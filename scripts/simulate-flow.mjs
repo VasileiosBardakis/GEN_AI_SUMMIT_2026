@@ -77,11 +77,32 @@ async function main() {
 
   if (flag("no-run")) return;
 
+  if (!flag("no-decide")) {
+    console.log("[decider] prompting user in browser extension...");
+    const decide = await postJson(`${serverUrl}/decide`, {
+      name,
+      solution,
+      script: impl.data.script,
+    });
+    if (!decide.ok) {
+      console.error(`[decider] failed (${decide.status}):`, decide.data.error ?? decide.data);
+      process.exit(4);
+    }
+    console.log(`[decider] response:`, decide.data);
+    if (decide.data.decision !== "approved") {
+      console.log(
+        '[decider] dismissed — hands skipped. In the page popup click "Trial it live" to approve, or rerun with --no-decide to skip the prompt.'
+      );
+      return;
+    }
+    console.log("[decider] approved by user.");
+  }
+
   console.log("[hands] sending script to already-open browser extension...");
   const run = await postJson(`${serverUrl}/hands/run`, { script: impl.data.script });
   if (!run.ok) {
     console.error(`[hands] failed (${run.status}):`, run.data.error ?? run.data);
-    process.exit(4);
+    process.exit(5);
   }
 
   console.log("[hands] results:");
