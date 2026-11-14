@@ -1,6 +1,19 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { Event } from "@gen/shared";
+import { EventSchema } from "@gen/shared/schema.ts";
 import { normalize } from "../src/detect/normalize.ts";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+async function loadFixtureEvents(filename: string): Promise<Event[]> {
+  const filePath = path.join(__dirname, "fixtures", filename);
+  const raw = await readFile(filePath, "utf-8");
+  const lines = raw.split("\n").filter((line) => line.trim().length > 0);
+  return lines.map((line) => EventSchema.parse(JSON.parse(line)));
+}
 
 let seq = 0;
 
@@ -23,100 +36,24 @@ function makeEvent(
 
 type Target = NonNullable<Event["target"]>;
 
-function threadRow(n: number): Target {
-  return {
-    tag: "tr",
-    role: "row",
-    label: `Order #${n}`,
-    locators: [
-      { kind: "testid", value: `thread-row-${n}` },
-      { kind: "css", value: `tr[data-thread='${n}']` },
-    ],
-  };
-}
-
-const replyButton: Target = {
-  tag: "button",
-  role: "button",
-  label: "Reply",
-  locators: [
-    { kind: "testid", value: "reply-btn" },
-    { kind: "aria", value: 'button[name="Reply"]' },
-    { kind: "text", value: "Reply" },
-  ],
-};
-
-const replyBody: Target = {
-  tag: "textarea",
-  role: "textbox",
-  label: "Reply body",
-  locators: [
-    { kind: "testid", value: "reply-body" },
-    { kind: "aria", value: 'textbox[name="Reply body"]' },
-    { kind: "css", value: "textarea.reply-editor" },
-  ],
-};
-
-const sendButton: Target = {
-  tag: "button",
-  role: "button",
-  label: "Send",
-  locators: [{ kind: "testid", value: "send-btn" }],
-};
-
-const replyForm: Target = {
-  tag: "form",
-  role: "form",
-  locators: [{ kind: "testid", value: "reply-form" }],
-};
-
-const header: Target = {
-  tag: "header",
-  role: "banner",
-  locators: [{ kind: "css", value: "header.topbar" }],
-};
-
 describe("normalize", () => {
-  it("collapses a 21-event, 3-cycle email reply trace into 17 steps", () => {
-    const body1 = "Hi, thanks for your order. It ships Friday.";
-    const body2 = "Thanks for the update, I will review it today.";
-    const body3 = "Received, thank you!";
+  it("collapses the 21-event, 3-cycle email reply fixture into 17 steps", async () => {
+    const body1 =
+      "Hi, thanks for your order. It ships Friday and tracking will follow shortly.";
+    const body2 =
+      "Hi, thanks for your order. It ships Monday and tracking will follow shortly.";
+    const body3 =
+      "Hi, thanks for your order! It ships Friday and tracking will follow shortly.";
 
-    const events: Event[] = [
-      makeEvent("nav", { url: "http://mail.local/inbox" }),
-      // Cycle 1
-      makeEvent("click", { target: threadRow(1) }),
-      makeEvent("scroll", {
-        target: { tag: "html", locators: [{ kind: "css", value: "html" }] },
-        meta: { scroll: { deltaX: 0, deltaY: 120 } },
-      }),
-      makeEvent("click", { target: replyButton }),
-      makeEvent("input", { target: replyBody, value: body1 }),
-      makeEvent("change", { target: replyBody, value: body1 }),
-      makeEvent("click", { target: sendButton }),
-      makeEvent("submit", { target: replyForm }),
-      // Cycle 2 (includes a stray header click)
-      makeEvent("click", { target: threadRow(2) }),
-      makeEvent("click", { target: header }),
-      makeEvent("click", { target: replyButton }),
-      makeEvent("input", { target: replyBody, value: body2 }),
-      makeEvent("change", { target: replyBody, value: body2 }),
-      makeEvent("click", { target: sendButton }),
-      makeEvent("submit", { target: replyForm }),
-      // Cycle 3
-      makeEvent("click", { target: threadRow(3) }),
-      makeEvent("click", { target: replyButton }),
-      makeEvent("input", { target: replyBody, value: body3 }),
-      makeEvent("change", { target: replyBody, value: body3 }),
-      makeEvent("click", { target: sendButton }),
-      makeEvent("submit", { target: replyForm }),
-    ];
+    const events = await loadFixtureEvents("reply-x3.jsonl");
 
     expect(events).toHaveLength(21);
+    expect(events.filter((event) => event.type === "scroll")).toHaveLength(1);
 
     const steps = normalize(events);
 
     expect(steps).toHaveLength(17);
+    expect(steps.map((step) => step.action as string)).not.toContain("scroll");
     expect(steps[0].action).toBe("nav");
     expect(steps.filter((step) => step.action === "fill")).toHaveLength(3);
     expect(steps.map((step) => step.action)).toEqual([
