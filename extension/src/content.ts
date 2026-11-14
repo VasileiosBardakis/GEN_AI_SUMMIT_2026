@@ -2,9 +2,10 @@ import type { Event, EventMeta, EventType } from "@gen/shared";
 import { executeStep } from "./hands/execute.ts";
 import { extractGridContext, extractMenuContext, extractTarget } from "./locators.ts";
 import { inspectElementPrivacy, sanitizeUrl, sanitizeValue } from "./privacy.ts";
-import { createSuggestionEngine } from "./suggestion.ts";
+import { buildDeciderSuggestion, createSuggestionEngine } from "./suggestion.ts";
 import type { FlowNode, Suggestion } from "./suggestion.ts";
 import { suggestionToOptimization } from "./library.ts";
+import type { ActionScript } from "./types.ts";
 
 export type WatcherMode = "all_raw" | "all_throttled" | "semantic";
 
@@ -42,20 +43,18 @@ interface GlobalEyesWindow {
   ) => boolean;
 }
 
-const SESSION_ID =
-  typeof sessionStorage !== "undefined"
-    ? (() => {
-        try {
-          const existing = sessionStorage.getItem("__eyes_session__");
-          if (existing) return existing;
-          const created = "sess_" + Math.random().toString(36).slice(2, 10);
-          sessionStorage.setItem("__eyes_session__", created);
-          return created;
-        } catch {
-          return "sess_default";
-        }
-      })()
-    : "sess_default";
+const SESSION_ID = (() => {
+  try {
+    if (typeof sessionStorage === "undefined") return "sess_default";
+    const existing = sessionStorage.getItem("__eyes_session__");
+    if (existing) return existing;
+    const created = "sess_" + Math.random().toString(36).slice(2, 10);
+    sessionStorage.setItem("__eyes_session__", created);
+    return created;
+  } catch {
+    return "sess_default";
+  }
+})();
 
 function getConfig(): WatcherConfig {
   const win = (typeof window !== "undefined" ? window : {}) as unknown as GlobalEyesWindow;
@@ -222,20 +221,39 @@ function sendLibraryMessage(message: unknown): void {
   }
 }
 
-function showSuggestion(suggestion: Suggestion | null): void {
+interface ShowSuggestionOptions {
+  onDecision?: (decision: "approved" | "dismissed") => void;
+  script?: ActionScript;
+  force?: boolean;
+}
+
+function showSuggestion(
+  suggestion: Suggestion | null,
+  options: ShowSuggestionOptions = {}
+): void {
   if (!suggestion) return;
   if (typeof document === "undefined" || !document.documentElement) return;
   if (window.top !== window.self) return;
 
   const existing = document.getElementById(SUGGESTION_HOST_ID);
-  if (existing && Date.now() - lastSuggestionShownAt < 800) return;
+  if (existing && !options.force && Date.now() - lastSuggestionShownAt < 800) return;
   existing?.remove();
   lastSuggestionShownAt = Date.now();
 
+  let settled = false;
+  const resolveDecision = (decision: "approved" | "dismissed"): void => {
+    if (settled) return;
+    settled = true;
+    console.log("[eyes-content] decider decision:", decision, suggestion.id);
+    options.onDecision?.(decision);
+  };
+
   const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
+  const suggestedItem = suggestionToOptimization(suggestion, { app: appHost, status: "suggested" });
+  if (options.script) suggestedItem.script = options.script;
   sendLibraryMessage({
     kind: "EYES_UPSERT_OPTIMIZATION",
-    item: suggestionToOptimization(suggestion, { app: appHost, status: "suggested" }),
+    item: suggestedItem,
   });
 
   const host = document.createElement("div");
@@ -598,22 +616,28 @@ function showSuggestion(suggestion: Suggestion | null): void {
     </section>
   `;
 
-  const dismiss = (): void => host.remove();
+  const dismiss = (): void => {
+    resolveDecision("dismissed");
+    host.remove();
+  };
   for (const button of Array.from(shadow.querySelectorAll("[data-eyes-dismiss]"))) {
     button.addEventListener("click", dismiss);
   }
   shadow.querySelector("[data-eyes-primary]")?.addEventListener("click", () => {
+    const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
+    if (options.script) activeItem.script = options.script;
     sendLibraryMessage({
       kind: "EYES_ACTIVATE_OPTIMIZATION",
       id: suggestion.id,
-      item: suggestionToOptimization(suggestion, { app: appHost, status: "active" }),
+      item: activeItem,
       recordRun: true,
     });
+    resolveDecision("approved");
     const content = shadow.querySelector<HTMLElement>("[data-eyes-content]");
     const success = shadow.querySelector<HTMLElement>("[data-eyes-success]");
     if (content) content.hidden = true;
     if (success) success.hidden = false;
-    setTimeout(dismiss, 2200);
+    setTimeout(() => host.remove(), 2200);
   });
   shadow.querySelector("video")?.addEventListener("error", () => {
     shadow.querySelector("[data-eyes-replay]")?.remove();
@@ -1668,7 +1692,39 @@ function setupHandsTracker(): void {
 
   win.__HANDS_ON_MESSAGE__ = (message, _sender, sendResponse) => {
     if (!message || typeof message !== "object") return false;
-    const msg = message as { kind?: string; text?: string; requireResponse?: boolean };
+    const msg = message as {
+      kind?: string;
+      text?: string;
+      requireResponse?: boolean;
+      name?: string;
+      solution?: string;
+      script?: ActionScript;
+    };
+
+    if (msg.kind === "EYES_SHOW_DECIDER") {
+      console.log("[eyes-content] received EYES_SHOW_DECIDER", {
+        isTop: window.top === window.self,
+        name: msg.name,
+        steps: msg.script?.steps?.length,
+      });
+      if (window.top !== window.self) return false;
+      if (typeof msg.solution !== "string" || !msg.script || !Array.isArray(msg.script.steps)) {
+        sendResponse({ ok: false, error: "Invalid decider payload" });
+        return false;
+      }
+      const suggestion = buildDeciderSuggestion({
+        name: typeof msg.name === "string" ? msg.name : "",
+        solution: msg.solution,
+        script: msg.script,
+      });
+      showSuggestion(suggestion, {
+        force: true,
+        script: msg.script,
+        onDecision: (decision) => sendResponse({ ok: true, decision }),
+      });
+      return true;
+    }
+
     if (msg.kind !== "HANDS_INSERT_LAST_FIELD" || typeof msg.text !== "string") return false;
 
     let targetEl: HTMLElement | null =
