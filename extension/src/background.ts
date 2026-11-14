@@ -1,5 +1,5 @@
 import { executeStep } from "./hands/execute.js";
-import type { BindingValue, DomStep, Plan, Step, StepResult } from "./types.js";
+import type { ActionScript, BindingValue, DomStep, Step, StepResult } from "./types.js";
 import type { Event } from "@gen/shared";
 import { sanitizeUrl } from "./privacy.ts";
 
@@ -7,7 +7,7 @@ const SERVER_URL = "http://localhost:8787";
 const BATCH_INTERVAL_MS = 300;
 const MAX_BATCH_SIZE = 40;
 
-const DEMO_PLAN: Plan = {
+const DEMO_SCRIPT: ActionScript = {
   name: "Demo",
   steps: [
     { action: "insertText", value: "Step 1: Hello" },
@@ -28,7 +28,7 @@ interface ClipboardState {
 interface ChromeRuntimeMessage {
   kind?: string;
   event?: Event;
-  plan?: Plan;
+  script?: ActionScript;
 }
 
 interface ChromeTab {
@@ -151,16 +151,19 @@ if (chromeApi?.runtime?.onMessage) {
       sendResponse({ ok: true });
       return false;
     }
-    if (msg?.kind === "HANDS_RUN_PLAN" && msg.plan) {
+    if (msg?.kind === "HANDS_RUN_SCRIPT" && msg.script) {
       const tabId = sender.tab?.id ?? lastActiveTab?.tabId;
       if (tabId === undefined) {
         sendResponse({ ok: false, error: "No active tab" });
         return false;
       }
-      void runPlan(tabId, msg.plan)
+      void runActionScript(tabId, msg.script)
         .then((results) => sendResponse({ ok: true, results }))
         .catch((error: unknown) =>
-          sendResponse({ ok: false, error: error instanceof Error ? error.message : "Hands plan failed" })
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : "Hands script failed",
+          })
         );
       return true;
     }
@@ -170,7 +173,7 @@ if (chromeApi?.runtime?.onMessage) {
         sendResponse({ ok: false, error: "No active tab" });
         return false;
       }
-      void runPlan(tabId, DEMO_PLAN)
+      void runActionScript(tabId, DEMO_SCRIPT)
         .then((results) => sendResponse({ ok: true, results }))
         .catch((error: unknown) =>
           sendResponse({ ok: false, error: error instanceof Error ? error.message : "Hands demo failed" })
@@ -292,17 +295,17 @@ if (typeof chrome !== "undefined") {
       return;
     }
     const tabId = tab.id;
-    void runPlan(tabId, DEMO_PLAN).catch((error: unknown) => {
+    void runActionScript(tabId, DEMO_SCRIPT).catch((error: unknown) => {
       console.error(
-        `Hands plan failed: ${error instanceof Error ? error.message : String(error)}`
+        `Hands script failed: ${error instanceof Error ? error.message : String(error)}`
       );
     });
   });
 }
 
-async function runPlan(tabId: number, plan: Plan): Promise<StepResult[]> {
+async function runActionScript(tabId: number, script: ActionScript): Promise<StepResult[]> {
   const bindings: Record<string, BindingValue> = {};
-  return runSteps(tabId, plan.steps, bindings, {});
+  return runSteps(tabId, script.steps, bindings, {});
 }
 
 async function runSteps(

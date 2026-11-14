@@ -30,7 +30,7 @@ export type Step =
       optional?: boolean;
     };
 
-export type Plan = {
+export type ActionScript = {
   name?: string;
   steps: Step[];
 };
