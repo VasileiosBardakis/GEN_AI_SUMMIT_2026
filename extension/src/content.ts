@@ -1495,18 +1495,11 @@ export function setupEventListeners(): void {
         if (!(node instanceof HTMLElement) || observedNodes.has(node)) continue;
         observedNodes.add(node);
 
-        const role = node.getAttribute("role");
-        const isDialog =
-          role === "dialog" ||
-          role === "alertdialog" ||
-          node.tagName === "DIALOG" ||
-          node.getAttribute("aria-modal") === "true" ||
-          node.hasAttribute("data-auth-modal");
-        const isMenu =
-          role === "menu" ||
-          node.classList.contains("context-menu") ||
-          node.hasAttribute("data-context-menu");
-        const isAlert = role === "alert" || role === "status" || node.hasAttribute("data-toast");
+        const isDialog = node.matches(
+          'dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"], [data-auth-modal]'
+        );
+        const isMenu = node.matches('[role="menu"], .context-menu, [data-context-menu]');
+        const isAlert = node.matches('[role="alert"], [role="status"], [data-toast]');
 
         if (isDialog) {
           const text = (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();

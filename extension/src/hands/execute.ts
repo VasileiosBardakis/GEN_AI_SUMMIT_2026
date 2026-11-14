@@ -9,6 +9,199 @@ export async function executeStep(
     return value.replace(/["\\]/g, "\\$&");
   }
 
+  function collapseWs(value: string): string {
+    return value.replace(/\s+/g, " ").trim();
+  }
+
+  function isVisible(element: Element): boolean {
+    if (element instanceof HTMLInputElement && element.type.toLowerCase() === "hidden") {
+      return false;
+    }
+    if (element.closest('[hidden], [aria-hidden="true"]')) return false;
+    if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+      const style = window.getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+    }
+    return typeof element.getClientRects === "function" && element.getClientRects().length > 0;
+  }
+
+  const TAG_ROLES: Record<string, string> = {
+    button: "button",
+    summary: "button",
+    a: "link",
+    select: "combobox",
+    textarea: "textbox",
+    td: "gridcell",
+    th: "gridcell",
+    option: "option",
+  };
+  const INPUT_ROLES: Record<string, string> = {
+    checkbox: "checkbox",
+    radio: "radio",
+    search: "searchbox",
+    button: "button",
+    submit: "button",
+    reset: "button",
+  };
+  const TEXT_NAMED_ROLES = new Set(["button", "link", "menuitem", "tab", "option"]);
+  const TEXTBOX_EQUIVALENTS = new Set(["textbox", "searchbox"]);
+
+  function implicitRole(element: Element): string {
+    const explicit = element.getAttribute("role")?.trim().toLowerCase();
+    if (explicit) return explicit;
+    const tag = element.tagName.toLowerCase();
+    if (tag === "input") {
+      const inputType = (element.getAttribute("type") || "text").toLowerCase();
+      return INPUT_ROLES[inputType] ?? "textbox";
+    }
+    return TAG_ROLES[tag] ?? "";
+  }
+
+  function roleMatches(actual: string, wanted: string): boolean {
+    return actual === wanted || (TEXTBOX_EQUIVALENTS.has(actual) && TEXTBOX_EQUIVALENTS.has(wanted));
+  }
+
+  function cleanLabelNode(label: HTMLElement): string {
+    const clone = label.cloneNode(true) as HTMLElement;
+    for (const nested of Array.from(
+      clone.querySelectorAll("input, select, textarea, button, datalist, script, style"),
+    )) {
+      nested.remove();
+    }
+    return collapseWs(clone.textContent ?? "");
+  }
+
+  function accessibleNames(element: Element): string[] {
+    const names: string[] = [];
+    const ariaLabel = element.getAttribute("aria-label");
+    if (ariaLabel) names.push(collapseWs(ariaLabel));
+
+    const labelledBy = element.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      const joined = labelledBy
+        .split(/\s+/)
+        .map((id) => collapseWs(document.getElementById(id)?.textContent ?? ""))
+        .filter(Boolean)
+        .join(" ");
+      if (joined) names.push(joined);
+    }
+
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement
+    ) {
+      if (element.labels && element.labels.length > 0) {
+        const labelText = Array.from(element.labels)
+          .map((label) => cleanLabelNode(label))
+          .filter(Boolean)
+          .join(" ");
+        if (labelText) names.push(labelText);
+      }
+      if (
+        element instanceof HTMLInputElement &&
+        /^(submit|button|reset)$/i.test(element.type) &&
+        element.value
+      ) {
+        names.push(collapseWs(element.value));
+      }
+      const placeholder = element.getAttribute("placeholder");
+      if (placeholder) names.push(collapseWs(placeholder));
+    }
+
+    const title = element.getAttribute("title");
+    if (title) names.push(collapseWs(title));
+
+    const role = implicitRole(element);
+    if (
+      !(element instanceof HTMLSelectElement) &&
+      (TEXT_NAMED_ROLES.has(role) || element.tagName.toLowerCase() === "label")
+    ) {
+      const text = collapseWs(element.textContent ?? "");
+      if (text) names.push(text);
+    }
+
+    return names.filter(Boolean);
+  }
+
+  function resolveAria(raw: string, root: ParentNode): Element[] {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+
+    if (trimmed.startsWith("[")) {
+      try {
+        return Array.from(root.querySelectorAll(trimmed));
+      } catch {
+        return [];
+      }
+    }
+
+    const roleSyntax = /^([a-z]+)\[\s*name\s*=\s*["']([\s\S]*?)["']\s*\]$/i.exec(trimmed);
+    const wantedRole = roleSyntax ? roleSyntax[1].toLowerCase() : null;
+    const wantedName = collapseWs(
+      roleSyntax ? roleSyntax[2].replace(/\\(["'\\])/g, "$1") : trimmed,
+    );
+    if (!wantedName) return [];
+    const wantedLower = wantedName.toLowerCase();
+
+    const candidates = Array.from(
+      root.querySelectorAll(
+        'input, textarea, select, button, a, summary, [role], [aria-label], [aria-labelledby], [contenteditable="true"]',
+      ),
+    ).filter((el) => !wantedRole || roleMatches(implicitRole(el), wantedRole));
+
+    const exact: Element[] = [];
+    const partial: Element[] = [];
+    for (const candidate of candidates) {
+      const names = accessibleNames(candidate).map((n) => n.toLowerCase());
+      if (names.some((n) => n === wantedLower)) {
+        exact.push(candidate);
+      } else if (names.some((n) => n.includes(wantedLower))) {
+        partial.push(candidate);
+      }
+    }
+    return [...exact, ...partial];
+  }
+
+  function isInteractiveControl(element: Element): boolean {
+    return element.matches(
+      'button, a, input, select, textarea, summary, label, option, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="radio"], [role="checkbox"]',
+    );
+  }
+
+  function resolveText(raw: string, root: ParentNode): Element[] {
+    const wanted = collapseWs(raw);
+    if (!wanted) return [];
+    const wantedLower = wanted.toLowerCase();
+
+    const submitInputs = Array.from(
+      root.querySelectorAll('input[type="submit"], input[type="button"], input[type="reset"]'),
+    ).filter((el) => {
+      const val = collapseWs((el as HTMLInputElement).value);
+      return val === wanted || val.toLowerCase() === wantedLower;
+    });
+
+    const allNodes = Array.from(root.querySelectorAll("*"));
+    let textMatched = allNodes.filter((el) => collapseWs(el.textContent ?? "") === wanted);
+    if (textMatched.length === 0) {
+      textMatched = allNodes.filter(
+        (el) => collapseWs(el.textContent ?? "").toLowerCase() === wantedLower,
+      );
+    }
+
+    const matchedSet = new Set(textMatched);
+    textMatched.sort((a, b) => {
+      const aInteractive = isInteractiveControl(a) ? 0 : 1;
+      const bInteractive = isInteractiveControl(b) ? 0 : 1;
+      if (aInteractive !== bInteractive) return aInteractive - bInteractive;
+      const aHasChild = Array.from(a.children).some((c) => matchedSet.has(c)) ? 1 : 0;
+      const bHasChild = Array.from(b.children).some((c) => matchedSet.has(c)) ? 1 : 0;
+      return aHasChild - bHasChild;
+    });
+
+    return [...submitInputs, ...textMatched];
+  }
+
   function resolveAll(locator: Locator, root: ParentNode = document): Element[] {
     if (locator.kind === "css") return Array.from(root.querySelectorAll(locator.value));
     if (locator.kind === "xpath") {
@@ -30,21 +223,30 @@ export async function executeStep(
       return Array.from(root.querySelectorAll(`[data-testid="${escapeValue(locator.value)}"]`));
     }
     if (locator.kind === "aria") {
-      return Array.from(root.querySelectorAll(`[aria-label="${escapeValue(locator.value)}"]`));
+      return resolveAria(locator.value, root);
     }
-    const wanted = locator.value.trim();
-    if (!wanted) return [];
-    return Array.from(root.querySelectorAll("*")).filter(
-      (element) => (element.textContent ?? "").trim() === wanted,
-    );
+    return resolveText(locator.value, root);
   }
 
   function resolve(locator: Locator, root: ParentNode = document): Element | null {
-    return resolveAll(locator, root)[0] ?? null;
+    const found = resolveAll(locator, root);
+    return found.find(isVisible) ?? found[0] ?? null;
   }
 
-  function readValue(element: Element): string {
-    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+  function unwrapControl(element: Element): Element {
+    if (element instanceof HTMLLabelElement && element.control) {
+      return element.control;
+    }
+    return element;
+  }
+
+  function readValue(rawElement: Element): string {
+    const element = unwrapControl(rawElement);
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement
+    ) {
       return element.value;
     }
     if (element instanceof HTMLElement && element.isContentEditable) {
@@ -114,9 +316,22 @@ export async function executeStep(
     element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   }
 
-  function selectOption(element: Element, value: string): void {
+  function selectOption(rawElement: Element, value: string): void {
+    const element = unwrapControl(rawElement);
     if (!(element instanceof HTMLSelectElement)) throw new Error("Target is not a select");
-    element.value = value;
+    const wanted = collapseWs(value);
+    const wantedLower = wanted.toLowerCase();
+    const options = Array.from(element.options);
+    const matched =
+      options.find((opt) => opt.value === value) ??
+      options.find((opt) => opt.value.toLowerCase() === wantedLower) ??
+      options.find((opt) => collapseWs(opt.label || opt.textContent || "").toLowerCase() === wantedLower) ??
+      options.find((opt) =>
+        collapseWs(opt.label || opt.textContent || "").toLowerCase().includes(wantedLower),
+      );
+    if (!matched) throw new Error(`Option not found: ${value}`);
+    element.value = matched.value;
+    matched.selected = true;
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
   }
@@ -134,8 +349,21 @@ export async function executeStep(
         return { ok: true, url: location.href };
       }
       case "fill": {
-        const element = resolve(step.target);
-        if (!element) throw new Error("Target not found");
+        const rawElement = resolve(step.target);
+        if (!rawElement) throw new Error("Target not found");
+        const element = unwrapControl(rawElement);
+        if (
+          element instanceof HTMLInputElement &&
+          (element.type === "checkbox" || element.type === "radio")
+        ) {
+          if (element.type === "radio") {
+            if (!element.checked) click(element);
+          } else {
+            const wantChecked = !/^(false|0|off|no|unchecked)$/i.test(step.value.trim());
+            if (element.checked !== wantChecked) click(element);
+          }
+          return { ok: true, url: location.href, value: String(element.checked) };
+        }
         if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
           setNativeValue(element, step.value);
         } else if (element instanceof HTMLElement && element.isContentEditable) {

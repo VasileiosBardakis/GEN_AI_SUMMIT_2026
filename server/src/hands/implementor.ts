@@ -79,9 +79,10 @@ Available actions:
 - wait: { action: "wait", ms } -> Short delay in ms only when explicitly needed.
 
 Locator rules (plain-text grounding without DOM snapshot):
-- "css": Prefer resilient selectors for inputs, e.g. 'input[type="search"], input[name="q"], input[placeholder*="search" i]' or 'input[type="email"], input[name*="email" i]'.
-- "xpath": Prefer for buttons, links, or labeled fields when exact text/casing on the page is uncertain, e.g. "//button[contains(normalize-space(.), 'Reply')]".
-- "text" and "aria": Only use when the exact trimmed text or exact aria-label is explicitly stated.
+- "aria": Prefer when a visible field <label>, aria-label, or placeholder is known (e.g. 'Address line 1', 'From these owners', or 'combobox[name="Nationality"]'). Matches <label>, aria-label, aria-labelledby, and placeholder.
+- "css": Prefer resilient attribute selectors when field label is uncertain, e.g. 'input[type="search"], input[name="q"], input[placeholder*="search" i]' or 'input[type="email"], input[name*="email" i]'.
+- "xpath": Prefer for controls when only partial text is known, e.g. "//button[contains(normalize-space(.), 'Reply')]".
+- "text": Use for buttons or links when visible text is stated (e.g. 'Continue', 'Search').
 - "testid": Only use when an explicit data-testid is given in the instructions.`;
 
 export function buildImplementorPrompt(solutionText: string, name?: string): string {
@@ -305,6 +306,8 @@ function extractLabelsFromLocator(locator: Locator): string[] {
   const idMatch = /#([A-Za-z][A-Za-z0-9_-]{2,})/.exec(v);
   if (idMatch?.[1]) hints.push(idMatch[1]);
   if (locator.kind === "text" || locator.kind === "testid") {
+    hints.push(v);
+  } else if (locator.kind === "aria" && !v.startsWith("[") && !/^[a-z]+\[\s*name\s*=/i.test(v)) {
     hints.push(v);
   }
   const xpathTextMatches = v.matchAll(/["']([^"']{3,40})["']/g);
