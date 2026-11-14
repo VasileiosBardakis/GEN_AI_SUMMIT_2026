@@ -16,6 +16,7 @@ describe("POST /implement, GET /script/latest, and /hands/* bridge", () => {
     tracesDir = await mkdtemp(path.join(os.tmpdir(), "gen-implement-test-"));
     server = createServer({
       tracesDir,
+      dataDir: path.join(tracesDir, "data"),
       implement: (solution, opts) =>
         implementSolution(solution, {
           ...opts,
@@ -118,5 +119,136 @@ describe("POST /implement, GET /script/latest, and /hands/* bridge", () => {
       ok: true,
       results: [{ ok: true, url: "http://x", value: "q" }],
     });
+  });
+
+  it("routes POST /decide -> GET /hands/next -> POST /hands/result for approved and dismissed", async () => {
+    const script = {
+      name: "Search",
+      steps: [{ action: "fill", target: { kind: "css", value: "input[type='search']" }, value: "q" }],
+    };
+
+    const approvePromise = fetch(`${baseUrl}/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Search", solution: "Fill search box", script }),
+    });
+
+    const nextApprove = await fetch(`${baseUrl}/hands/next?waitMs=1000`);
+    expect(nextApprove.status).toBe(200);
+    const approveCmd = (await nextApprove.json()) as {
+      id: string;
+      kind: string;
+      name: string;
+      solution: string;
+      script: typeof script;
+    };
+    expect(approveCmd.kind).toBe("decide");
+    expect(approveCmd.name).toBe("Search");
+    expect(approveCmd.solution).toBe("Fill search box");
+    expect(approveCmd.script).toEqual(script);
+
+    await fetch(`${baseUrl}/hands/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: approveCmd.id, ok: true, decision: "approved" }),
+    });
+
+    const approveRes = await approvePromise;
+    expect(approveRes.status).toBe(200);
+    expect(await approveRes.json()).toEqual({ id: approveCmd.id, ok: true, decision: "approved" });
+
+    const dismissPromise = fetch(`${baseUrl}/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Search", solution: "Fill search box", script }),
+    });
+    const nextDismiss = await fetch(`${baseUrl}/hands/next?waitMs=1000`);
+    const dismissCmd = (await nextDismiss.json()) as { id: string };
+    await fetch(`${baseUrl}/hands/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: dismissCmd.id, ok: true, decision: "dismissed" }),
+    });
+    const dismissRes = await dismissPromise;
+    expect(dismissRes.status).toBe(200);
+    expect(await dismissRes.json()).toEqual({ id: dismissCmd.id, ok: true, decision: "dismissed" });
+  });
+
+  it("saves compiled automations to the library on /implement and exposes GET/POST/DELETE /library", async () => {
+    const emptyLibRes = await fetch(`${baseUrl}/library`);
+    expect(emptyLibRes.status).toBe(200);
+    expect(await emptyLibRes.json()).toEqual({ ok: true, items: [] });
+
+    const implRes = await fetch(`${baseUrl}/implement`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Supplier reply",
+        solution: "Insert Thanks, shipping Friday. into the reply box.",
+        context: {
+          app: "mail.example.com",
+          url: "https://mail.example.com/tickets/42",
+          title: "Ticket #42",
+          targetLabel: "Customer Reply",
+        },
+      }),
+    });
+    expect(implRes.status).toBe(200);
+    expect(await implRes.json()).toEqual({
+      ok: true,
+      script: {
+        name: "Supplier reply",
+        steps: [{ action: "insertText", value: "Thanks, shipping Friday." }],
+      },
+    });
+
+    const listRes = await fetch(`${baseUrl}/library`);
+    expect(listRes.status).toBe(200);
+    const listJson = (await listRes.json()) as {
+      ok: boolean;
+      items: Array<{
+        id: string;
+        name: string;
+        kind: string;
+        eyes: {
+          triggerEvent: string;
+          scope: { apps: string[]; urlPatterns: string[]; pageHints: string[] };
+          targetHints: { labelContains: string[] };
+          textHints: { prefixHints: string[] };
+        };
+      }>;
+    };
+    expect(listJson.ok).toBe(true);
+    expect(listJson.items).toHaveLength(1);
+    const saved = listJson.items[0];
+    expect(saved.name).toBe("Supplier reply");
+    expect(saved.kind).toBe("snippet");
+    expect(saved.eyes.scope.apps).toEqual(["mail.example.com"]);
+    expect(saved.eyes.scope.urlPatterns).toEqual(["/tickets/*"]);
+    expect(saved.eyes.targetHints.labelContains).toContain("customer reply");
+    expect(saved.eyes.textHints.prefixHints).toEqual(["thanks, shipping friday."]);
+
+    const libImplRes = await fetch(`${baseUrl}/library/implement`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Second entry",
+        solution: "Insert Thanks, shipping Friday.",
+      }),
+    });
+    expect(libImplRes.status).toBe(200);
+    const libImplJson = (await libImplRes.json()) as {
+      ok: boolean;
+      entry: { id: string; name: string };
+    };
+    expect(libImplJson.ok).toBe(true);
+    expect(libImplJson.entry.name).toBe("Second entry");
+
+    const delRes = await fetch(`${baseUrl}/library/${libImplJson.entry.id}`, {
+      method: "DELETE",
+    });
+    expect(delRes.status).toBe(200);
+    const delJson = (await delRes.json()) as { ok: boolean; items: unknown[] };
+    expect(delJson.items).toHaveLength(1);
   });
 });
