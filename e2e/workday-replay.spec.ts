@@ -195,7 +195,7 @@ function encodeWebmFromJpegs(
         "-i",
         "pipe:0",
         "-c:v",
-        "libvpx",
+        "libvpx-vp9",
         "-b:v",
         "1200k",
         "-deadline",
@@ -210,6 +210,9 @@ function encodeWebmFromJpegs(
     let stderr = "";
     proc.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
+    });
+    proc.stdin.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code !== "EPIPE") reject(err);
     });
     proc.on("error", reject);
     proc.on("close", (code) => {
