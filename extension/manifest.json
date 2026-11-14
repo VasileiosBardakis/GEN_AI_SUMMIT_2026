@@ -3,15 +3,8 @@
   "name": "Automation Ladder — Eyes Watcher",
   "version": "0.1.0",
   "description": "Local-first workflow sensor: captures all browser, grid, shortcut, and clipboard events with Layer-1 PII redaction.",
-  "permissions": [
-    "storage",
-    "tabs",
-    "sidePanel",
-    "activeTab"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "permissions": ["storage", "tabs", "sidePanel", "activeTab", "scripting"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "dist/background.js",
     "type": "module"

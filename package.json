@@ -9,6 +9,7 @@
     "test": "vitest run --passWithNoTests",
     "smoke": "playwright test --pass-with-no-tests",
     "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run smoke",
+    "build:extension": "pnpm --filter @gen/extension build",
     "dev": "node scripts/dev.mjs",
     "dev:build": "node extension/build.mjs",
     "dev:watch": "node scripts/watch-extension.mjs",

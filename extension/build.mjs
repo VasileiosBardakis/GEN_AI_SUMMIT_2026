@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, "src");
 const distDir = path.join(__dirname, "dist");
 
+fs.rmSync(distDir, { recursive: true, force: true });
 fs.mkdirSync(distDir, { recursive: true });
 
 function compileTs(filePath) {
@@ -29,11 +30,23 @@ const contentCode = compileTs(path.join(srcDir, "content.ts"))
 const bundledContent = `(() => {\n"use strict";\n${privacyCode}\n${locatorsCode}\n${contentCode}\n})();\n`;
 fs.writeFileSync(path.join(distDir, "content.js"), bundledContent, "utf8");
 
-const backgroundCode = compileTs(path.join(srcDir, "background.ts"))
-  .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/privacy\.js["'];?/g, "");
+const backgroundSource = compileTs(path.join(srcDir, "background.ts")).replace(
+  /import\s+\{[^}]*\}\s+from\s+["']\.\/privacy\.js["'];?/g,
+  ""
+);
+const backgroundImports = backgroundSource.match(/^import .*;$/gm) ?? [];
+const backgroundBody = backgroundSource.replace(/^import .*;$/gm, "");
 fs.writeFileSync(
   path.join(distDir, "background.js"),
-  `${privacyCode}\n${backgroundCode}\n`,
+  `${backgroundImports.join("\n")}\n${privacyCode}\n${backgroundBody}\n`,
+  "utf8"
+);
+
+const handsDir = path.join(distDir, "hands");
+fs.mkdirSync(handsDir, { recursive: true });
+fs.writeFileSync(
+  path.join(handsDir, "execute.js"),
+  compileTs(path.join(srcDir, "hands", "execute.ts")),
   "utf8"
 );
 
@@ -41,4 +54,4 @@ const panelCode = compileTs(path.join(srcDir, "panel.ts"));
 fs.writeFileSync(path.join(distDir, "panel.js"), panelCode, "utf8");
 fs.copyFileSync(path.join(srcDir, "panel.html"), path.join(distDir, "panel.html"));
 
-console.log("Built extension/dist/{content.js, background.js, panel.js, panel.html}");
+console.log("Built extension/dist/{content.js, background.js, panel.js, panel.html, hands/execute.js}");
