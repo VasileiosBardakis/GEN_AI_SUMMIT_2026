@@ -149,7 +149,7 @@ async function main() {
   console.log(`[dev] demo app at ${demoServer.url}`);
 
   if (!flag("no-watch")) {
-    spawnChild(["scripts/watch-extension.mjs"]);
+    spawnChild(["scripts/watch-extension.mjs", "--no-initial-build"]);
   }
 
   if (!flag("no-tail")) {

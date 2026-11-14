@@ -1,3 +1,5 @@
+import type { ActionScript } from "./types.ts";
+
 export type SuggestionKind = "text" | "click";
 
 export interface SuggestionOptions {
@@ -203,4 +205,77 @@ export function createSuggestionEngine(options: SuggestionOptions = {}): Suggest
   }
 
   return { recordText, recordClick };
+}
+
+export interface DeciderProposalInput {
+  name: string;
+  solution: string;
+  script: ActionScript;
+}
+
+function stepToUserFlowNode(step: ActionScript["steps"][number]): FlowNode {
+  switch (step.action) {
+    case "fill":
+    case "insertText":
+      return {
+        kind: "input",
+        label:
+          typeof step.value === "string" && step.value.trim().length > 0
+            ? `Type "${collapsePreview(step.value, 22)}"`
+            : "Type text",
+      };
+    case "select":
+      return { kind: "click", label: "Select option" };
+    case "navigate":
+      return { kind: "tab", label: "Open page" };
+    case "forEach":
+      return { kind: "loop", label: "Repeat rows" };
+    default:
+      return { kind: "click", label: "Click target" };
+  }
+}
+
+export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion {
+  const name = input.name.trim() || (input.script.name ?? "").trim() || "Proposed automation";
+  const solution = input.solution.trim();
+  const steps = input.script.steps;
+  const firstStep = steps[0];
+  const isSingleInsert =
+    steps.length === 1 &&
+    firstStep?.action === "insertText" &&
+    !firstStep.target &&
+    typeof firstStep.value === "string";
+
+  const previewSource =
+    isSingleInsert && typeof firstStep.value === "string"
+      ? firstStep.value
+      : name;
+
+  const userNodes: FlowNode[] = steps.slice(0, 3).map(stepToUserFlowNode);
+  if (userNodes.length === 0) {
+    userNodes.push({ kind: "click", label: "Run manually" });
+  }
+  userNodes.push({ kind: "loop", label: "Repeat" });
+
+  const stepLabel = `${steps.length} ${steps.length === 1 ? "step" : "steps"}`;
+
+  return {
+    id: `decider_${shortHash(`${name}:${solution}`)}`,
+    kind: isSingleInsert ? "text" : "click",
+    count: 1,
+    preview: collapsePreview(previewSource, 64),
+    ...(isSingleInsert && typeof firstStep.value === "string"
+      ? { snippetText: firstStep.value }
+      : {}),
+    headline: collapsePreview(name, 56),
+    detail: collapsePreview(solution, 140),
+    meta: `${stepLabel} · Ready to run`,
+    flows: {
+      user: userNodes,
+      proposed: [
+        { kind: "ai", label: collapsePreview(name, 26) },
+        { kind: "done", label: "Done" },
+      ],
+    },
+  };
 }

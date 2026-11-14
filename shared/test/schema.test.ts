@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ActionScriptSchema, EventSchema, ReportSchema } from "../schema.ts";
+import {
+  ActionScriptSchema,
+  EventSchema,
+  LibraryEntrySchema,
+  ReportSchema,
+} from "../schema.ts";
 
 describe("EventSchema", () => {
   const validEvent = {
@@ -135,5 +140,50 @@ describe("ActionScriptSchema", () => {
     expect(
       ActionScriptSchema.safeParse({ steps: [{ action: "navigate", url: "/local" }] }).success,
     ).toBe(false);
+  });
+});
+
+describe("LibraryEntrySchema", () => {
+  it("validates a compiled library entry with Eyes detection metadata", () => {
+    const parsed = LibraryEntrySchema.safeParse({
+      id: "lib_12345abc",
+      name: "Shipping reply",
+      description: "Insert shipping update into customer reply box.",
+      kind: "snippet",
+      status: "suggested",
+      solution: "Insert 'Thanks, your order ships Friday.' into the reply box.",
+      script: {
+        name: "Shipping reply",
+        steps: [{ action: "insertText", value: "Thanks, your order ships Friday." }],
+      },
+      eyes: {
+        triggerEvent: "typing_prefix",
+        intent: "shipping_reply",
+        scope: {
+          apps: ["mail.example.com"],
+          urlPatterns: ["/tickets/*"],
+          pageHints: ["order", "ticket"],
+        },
+        targetHints: {
+          roles: ["textbox"],
+          labelContains: ["reply", "customer"],
+          locators: [],
+        },
+        textHints: {
+          prefixHints: ["thanks, your order"],
+          minCharsBeforeMatch: 6,
+        },
+        guards: {
+          fieldEmptyOnly: true,
+          requireClipboard: false,
+          cooldownMs: 60000,
+          minSignals: 2,
+        },
+      },
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000,
+      runCount: 0,
+    });
+    expect(parsed.success).toBe(true);
   });
 });

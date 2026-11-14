@@ -519,15 +519,83 @@ async function pollHandsBridge(): Promise<void> {
       try {
         const resp = await fetch(`${SERVER_URL}/hands/next`);
         if (resp.status === 200) {
-          const cmd = (await resp.json()) as { id?: string; script?: ActionScript };
-          if (cmd.id && cmd.script) {
+          const cmd = (await resp.json()) as {
+            id?: string;
+            kind?: "run" | "decide";
+            name?: string;
+            solution?: string;
+            script?: ActionScript;
+          };
+          if (cmd.id && cmd.kind === "decide" && cmd.script && typeof cmd.solution === "string") {
+            console.log("[eyes-bg] received decide command", cmd.id, cmd.name);
+            let payload: {
+              id: string;
+              ok: boolean;
+              decision?: "approved" | "dismissed";
+              error?: string;
+            };
+            try {
+              const tabId = await resolveActiveTabId();
+              console.log("[eyes-bg] decide target tabId =", tabId);
+              if (tabId === undefined) throw new Error("No active web tab open");
+              if (!chromeApi?.tabs?.sendMessage) {
+                throw new Error("chrome.tabs.sendMessage unavailable");
+              }
+              const msgPayload = {
+                kind: "EYES_SHOW_DECIDER",
+                name: cmd.name ?? cmd.script.name,
+                solution: cmd.solution,
+                script: cmd.script,
+              };
+              let res: { ok?: boolean; decision?: "approved" | "dismissed"; error?: string } | undefined;
+              try {
+                res = (await chromeApi.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
+                  | { ok?: boolean; decision?: "approved" | "dismissed"; error?: string }
+                  | undefined;
+              } catch (sendErr) {
+                console.warn("[eyes-bg] sendMessage failed, injecting content.js and retrying:", sendErr);
+                if (typeof chrome !== "undefined" && chrome.scripting?.executeScript) {
+                  await chrome.scripting.executeScript({
+                    target: { tabId, allFrames: false },
+                    files: ["dist/content.js"],
+                  });
+                  res = (await chromeApi.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
+                    | { ok?: boolean; decision?: "approved" | "dismissed"; error?: string }
+                    | undefined;
+                } else {
+                  throw sendErr;
+                }
+              }
+              console.log("[eyes-bg] decider response from tab:", res);
+              if (!res?.ok || (res.decision !== "approved" && res.decision !== "dismissed")) {
+                throw new Error(res?.error ?? "Decider prompt failed");
+              }
+              payload = { id: cmd.id, ok: true, decision: res.decision };
+            } catch (err) {
+              console.error("[eyes-bg] decide error:", err);
+              payload = {
+                id: cmd.id,
+                ok: false,
+                error: err instanceof Error ? err.message : "Decider failed",
+              };
+            }
+            await fetch(`${SERVER_URL}/hands/result`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            }).catch((err) => console.error("[eyes-bg] failed to post decide result:", err));
+          } else if (cmd.id && cmd.script) {
+            console.log("[eyes-bg] received run command", cmd.id, "steps=", cmd.script.steps.length);
             let payload: { id: string; ok: boolean; results?: StepResult[]; error?: string };
             try {
               const tabId = await resolveActiveTabId();
+              console.log("[eyes-bg] run target tabId =", tabId);
               if (tabId === undefined) throw new Error("No active web tab open");
               const results = await runActionScript(tabId, cmd.script);
+              console.log("[eyes-bg] runActionScript results:", results);
               payload = { id: cmd.id, ok: true, results };
             } catch (err) {
+              console.error("[eyes-bg] run error:", err);
               payload = {
                 id: cmd.id,
                 ok: false,
@@ -538,7 +606,7 @@ async function pollHandsBridge(): Promise<void> {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(payload),
-            }).catch(() => {});
+            }).catch((err) => console.error("[eyes-bg] failed to post run result:", err));
           }
           continue;
         }
