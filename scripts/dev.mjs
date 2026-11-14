@@ -122,6 +122,12 @@ async function main() {
     process.exit(1);
   }
 
+  const dataDir = path.join(rootDir, "data");
+  const libraryPath = path.join(dataDir, "library.json");
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(libraryPath, "[]\n", "utf8");
+  console.log("[dev] cleared data/library.json");
+
   console.log("[dev] building extension...");
   await buildExtension();
 
@@ -130,7 +136,11 @@ async function main() {
   } else {
     console.log(`[dev] starting backend on http://localhost:${backendPort}`);
     const serverChild = spawnChild(["--experimental-strip-types", "server/src/index.ts"], {
-      env: { ...process.env, PORT: String(backendPort) },
+      env: {
+        ...process.env,
+        PORT: String(backendPort),
+        BRAIN_AUTO_PROPOSE: process.env.BRAIN_AUTO_PROPOSE ?? "0",
+      },
     });
     serverChild.on("exit", (code) => {
       if (!shuttingDown && code !== 0) {

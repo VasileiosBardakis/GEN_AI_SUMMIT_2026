@@ -125,6 +125,9 @@ export async function executeStep(
     return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
   }
 
+  const winFlag = window as unknown as { __EYES_SUPPRESS_SYNTHETIC__?: boolean };
+  const prevSuppress = winFlag.__EYES_SUPPRESS_SYNTHETIC__;
+  winFlag.__EYES_SUPPRESS_SYNTHETIC__ = true;
   try {
     switch (step.action) {
       case "click": {
@@ -202,5 +205,7 @@ export async function executeStep(
       url: location.href,
       error: error instanceof Error ? error.message : "Unknown error",
     };
+  } finally {
+    winFlag.__EYES_SUPPRESS_SYNTHETIC__ = prevSuppress;
   }
 }
