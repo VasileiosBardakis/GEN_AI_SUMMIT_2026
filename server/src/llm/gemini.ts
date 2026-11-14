@@ -1,16 +1,18 @@
 /**
- * Vertex AI Gemini client wrapper (`@google/genai`).
+ * Gemini client wrapper (`@google/genai`).
  *
- * Authentication uses Vertex AI + Application Default Credentials (ADC) only.
- * API keys (`GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `options.apiKey`) are forbidden.
- *
- * Required environment variables:
- *   GOOGLE_GENAI_USE_VERTEXAI=true
- *   GOOGLE_CLOUD_PROJECT=genaihack26ath-52
- *   GOOGLE_CLOUD_LOCATION=global
+ * Supports two authentication modes:
+ * 1. API key mode (when `GEMINI_API_KEY` or `options.apiKey` is set):
+ *      GEMINI_API_KEY=<your-api-key>
+ * 2. Vertex AI mode with Application Default Credentials (ADC):
+ *      GOOGLE_GENAI_USE_VERTEXAI=true
+ *      GOOGLE_CLOUD_PROJECT=genaihack26ath-52
+ *      GOOGLE_CLOUD_LOCATION=global
  *
  * Optional environment variables:
  *   GEMINI_MODEL=gemini-2.5-flash
+ *
+ * Never log or print the API key.
  *
  * Usage example:
  * ```ts
@@ -65,7 +67,7 @@ export type GeminiClientOptions = {
   project?: string;
   location?: string;
   sdk?: GeminiSdk;
-  apiKey?: never;
+  apiKey?: string;
 };
 
 export type GeminiClient = {
@@ -80,16 +82,10 @@ function stripJsonCodeFences(text: string): string {
 }
 
 export function createGeminiClient(options?: GeminiClientOptions): GeminiClient {
-  if (options && "apiKey" in options && options.apiKey !== undefined) {
+  const apiKey = options?.apiKey || process.env.GEMINI_API_KEY;
+  if (!options?.sdk && !apiKey && process.env.GOOGLE_GENAI_USE_VERTEXAI !== "true") {
     throw new Error(
-      "API key authentication is forbidden; use Vertex AI with Application Default Credentials (ADC).",
-    );
-  }
-
-  const useVertexAiEnv = process.env.GOOGLE_GENAI_USE_VERTEXAI;
-  if (useVertexAiEnv !== undefined && useVertexAiEnv !== "true") {
-    throw new Error(
-      `GOOGLE_GENAI_USE_VERTEXAI must be "true" when set (received "${useVertexAiEnv}").`,
+      "Missing Gemini credentials: set GEMINI_API_KEY for API key mode, or set GOOGLE_GENAI_USE_VERTEXAI=true (with GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION) for Vertex AI ADC mode.",
     );
   }
 
@@ -98,7 +94,10 @@ export function createGeminiClient(options?: GeminiClientOptions): GeminiClient 
   const location = options?.location || process.env.GOOGLE_CLOUD_LOCATION || DEFAULT_GCP_LOCATION;
 
   const sdk: GeminiSdk =
-    options?.sdk ?? new GoogleGenAI({ vertexai: true, project, location });
+    options?.sdk ??
+    (apiKey
+      ? new GoogleGenAI({ apiKey })
+      : new GoogleGenAI({ vertexai: true, project, location }));
 
   return {
     async generateText(prompt: string): Promise<string> {

@@ -5,9 +5,28 @@ import {
   DEFAULT_GCP_LOCATION,
   DEFAULT_GCP_PROJECT,
   DEFAULT_GEMINI_MODEL,
-  type GeminiClientOptions,
   type GeminiSdk,
 } from "../src/llm/gemini.ts";
+
+const { googleGenAiCtorSpy, mockGenerateContent } = vi.hoisted(() => {
+  const mockGenerateContent = vi.fn<GeminiSdk["models"]["generateContent"]>(async () => ({
+    text: "mocked sdk response",
+  }));
+  const googleGenAiCtorSpy = vi.fn();
+  return { googleGenAiCtorSpy, mockGenerateContent };
+});
+
+vi.mock("@google/genai", () => {
+  class MockGoogleGenAI {
+    models = {
+      generateContent: mockGenerateContent,
+    };
+    constructor(options: unknown) {
+      googleGenAiCtorSpy(options);
+    }
+  }
+  return { GoogleGenAI: MockGoogleGenAI };
+});
 
 function makeFakeSdk(text?: string) {
   const generateContent = vi.fn<GeminiSdk["models"]["generateContent"]>(async () => ({
@@ -25,6 +44,8 @@ describe("createGeminiClient", () => {
   const originalEnv = { ...process.env };
 
   afterEach(() => {
+    googleGenAiCtorSpy.mockClear();
+    mockGenerateContent.mockClear();
     for (const key of [
       "GEMINI_MODEL",
       "GOOGLE_GENAI_USE_VERTEXAI",
@@ -145,27 +166,77 @@ describe("createGeminiClient", () => {
     );
   });
 
-  it("rejects API keys and non-Vertex configuration while ignoring GEMINI_API_KEY and GOOGLE_API_KEY", async () => {
-    const { sdk } = makeFakeSdk("ok");
+  it("builds SDK in API key mode when GEMINI_API_KEY is set and options.apiKey overrides env", async () => {
+    delete process.env.GOOGLE_GENAI_USE_VERTEXAI;
+    process.env.GEMINI_API_KEY = "env-gemini-key";
 
-    // Passing apiKey in options must throw
-    expect(() =>
-      createGeminiClient({
-        sdk,
-        apiKey: "secret-key" as never,
-      } as GeminiClientOptions),
-    ).toThrow(/API key/i);
+    const envClient = createGeminiClient();
+    expect(googleGenAiCtorSpy).toHaveBeenCalledTimes(1);
+    expect(googleGenAiCtorSpy).toHaveBeenLastCalledWith({ apiKey: "env-gemini-key" });
+    await expect(envClient.generateText("ping")).resolves.toBe("mocked sdk response");
 
-    // Setting GOOGLE_GENAI_USE_VERTEXAI to anything other than "true" must throw
-    process.env.GOOGLE_GENAI_USE_VERTEXAI = "false";
-    expect(() => createGeminiClient({ sdk })).toThrow(/GOOGLE_GENAI_USE_VERTEXAI/i);
-
-    // Setting GOOGLE_GENAI_USE_VERTEXAI="true" with stray API key env vars works and ignores them
+    // options.apiKey overrides both GEMINI_API_KEY and GOOGLE_GENAI_USE_VERTEXAI
     process.env.GOOGLE_GENAI_USE_VERTEXAI = "true";
-    process.env.GEMINI_API_KEY = "ignored-gemini-key";
-    process.env.GOOGLE_API_KEY = "ignored-google-key";
+    const keyClient = createGeminiClient({ apiKey: "options-override-key" });
+    expect(googleGenAiCtorSpy).toHaveBeenCalledTimes(2);
+    expect(googleGenAiCtorSpy).toHaveBeenLastCalledWith({ apiKey: "options-override-key" });
 
-    const client = createGeminiClient({ sdk });
-    await expect(client.generateText("ping")).resolves.toBe("ok");
+    // Key never appears in any error message thrown by the client
+    mockGenerateContent.mockResolvedValueOnce({ text: "" });
+    let errText = "";
+    try {
+      await keyClient.generateText("ping");
+    } catch (err) {
+      errText = (err as Error).message;
+    }
+    expect(errText).toMatch(/empty/i);
+    expect(errText).not.toContain("options-override-key");
+    expect(errText).not.toContain("env-gemini-key");
+  });
+
+  it("builds SDK in Vertex AI ADC mode when only Vertex variables are set", () => {
+    delete process.env.GEMINI_API_KEY;
+    process.env.GOOGLE_GENAI_USE_VERTEXAI = "true";
+    delete process.env.GOOGLE_CLOUD_PROJECT;
+    delete process.env.GOOGLE_CLOUD_LOCATION;
+
+    createGeminiClient();
+    expect(googleGenAiCtorSpy).toHaveBeenCalledTimes(1);
+    expect(googleGenAiCtorSpy).toHaveBeenLastCalledWith({
+      vertexai: true,
+      project: DEFAULT_GCP_PROJECT,
+      location: DEFAULT_GCP_LOCATION,
+    });
+
+    process.env.GOOGLE_CLOUD_PROJECT = "custom-proj";
+    process.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+    createGeminiClient();
+    expect(googleGenAiCtorSpy).toHaveBeenCalledTimes(2);
+    expect(googleGenAiCtorSpy).toHaveBeenLastCalledWith({
+      vertexai: true,
+      project: "custom-proj",
+      location: "us-central1",
+    });
+  });
+
+  it("throws a clear error naming the required variables when neither sign-in mode is configured and never leaks secrets", () => {
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_GENAI_USE_VERTEXAI;
+    process.env.GOOGLE_API_KEY = "unused-google-api-key-secret";
+
+    let caught: Error | undefined;
+    try {
+      createGeminiClient();
+    } catch (err) {
+      caught = err as Error;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught?.message).toContain("GEMINI_API_KEY");
+    expect(caught?.message).toContain("GOOGLE_GENAI_USE_VERTEXAI");
+    expect(caught?.message).toContain("GOOGLE_CLOUD_PROJECT");
+    expect(caught?.message).toContain("GOOGLE_CLOUD_LOCATION");
+    expect(caught?.message).not.toContain("unused-google-api-key-secret");
+    expect(googleGenAiCtorSpy).not.toHaveBeenCalled();
   });
 });
