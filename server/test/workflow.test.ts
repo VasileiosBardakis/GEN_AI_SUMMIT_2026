@@ -26,16 +26,17 @@ describe("detectWorkflows", () => {
     const [candidate] = candidates;
 
     expect(candidate.repetitions).toBe(9);
+    expect(candidate.stability).toBeGreaterThanOrEqual(0.9);
     expect(candidate.workflow.id).toMatch(/^wf_[0-9a-f]{8}$/);
     expect(candidate.workflow.sourceApp).toBe("portal.local");
     expect(candidate.workflow.destApp).toBe("erp.local");
     expect(candidate.workflow.steps).toHaveLength(9);
     expect(candidate.workflow.params).toHaveLength(4);
     expect(candidate.workflow.params.map((p) => p.name)).toEqual([
-      "invoice_id",
-      "vendor",
-      "amount",
-      "date",
+      "portal_invoice_id",
+      "portal_vendor",
+      "portal_amount",
+      "portal_date",
     ]);
 
     for (let i = 0; i < 4; i++) {
@@ -52,16 +53,16 @@ describe("detectWorkflows", () => {
 
     expect(candidate.workflow.instances).toHaveLength(9);
     expect(candidate.workflow.instances[0].bindings).toEqual({
-      invoice_id: "INV-2026-001",
-      vendor: "Acme Industrial",
-      amount: "1250.00",
-      date: "2026-02-01",
+      portal_invoice_id: "INV-2026-001",
+      portal_vendor: "Acme Industrial",
+      portal_amount: "1250.00",
+      portal_date: "2026-02-01",
     });
     expect(candidate.workflow.instances[8].bindings).toEqual({
-      invoice_id: "INV-2026-009",
-      vendor: "Hooli Cloud",
-      amount: "540.00",
-      date: "2026-02-24",
+      portal_invoice_id: "INV-2026-009",
+      portal_vendor: "Hooli Cloud",
+      portal_amount: "540.00",
+      portal_date: "2026-02-24",
     });
   });
 
@@ -96,7 +97,7 @@ describe("detectWorkflows", () => {
     expect(detectWorkflows(oneOffSteps)).toEqual([]);
   });
 
-  it("detects the 3-repetition dispute workflow from dispute-x3.jsonl with stability < 0.5", async () => {
+  it("detects the 3-repetition dispute workflow from dispute-x3.jsonl with structural stability", async () => {
     const events = await loadFixtureEvents("dispute-x3.jsonl");
     const steps = normalize(events);
     const candidates = detectWorkflows(steps);
@@ -105,7 +106,10 @@ describe("detectWorkflows", () => {
     const [candidate] = candidates;
 
     expect(candidate.repetitions).toBe(3);
-    expect(candidate.stability).toBeLessThan(0.5);
+    expect(candidate.stability).toBe(Number((4 / 7).toFixed(4)));
+    expect(candidate.workflow.params.map((p) => p.name)).toEqual([
+      "reply_body",
+    ]);
     expect(candidate.workflow.instances).toHaveLength(3);
   });
 
@@ -156,9 +160,21 @@ describe("detectWorkflows", () => {
     expect(candidates).toHaveLength(1);
     expect(candidates[0].repetitions).toBe(3);
     expect(candidates[0].workflow.instances).toEqual([
-      { startTs: 1_000, endTs: 5_000, bindings: { record_id: "REC-100" } },
-      { startTs: 35_000, endTs: 39_000, bindings: { record_id: "REC-200" } },
-      { startTs: 74_000, endTs: 78_000, bindings: { record_id: "REC-300" } },
+      {
+        startTs: 1_000,
+        endTs: 5_000,
+        bindings: { portal_record_id: "REC-100" },
+      },
+      {
+        startTs: 35_000,
+        endTs: 39_000,
+        bindings: { portal_record_id: "REC-200" },
+      },
+      {
+        startTs: 74_000,
+        endTs: 78_000,
+        bindings: { portal_record_id: "REC-300" },
+      },
     ]);
 
     // Explicit boundary check at exactly 30_000ms
