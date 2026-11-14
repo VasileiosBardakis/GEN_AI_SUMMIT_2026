@@ -375,4 +375,38 @@ describe("decideSecond", () => {
     await new Promise((resolve) => setTimeout(resolve, 160));
     expect(geminiSpy).not.toHaveBeenCalled();
   });
+
+  it("accepts GeminiClientOptions via opts.gemini, includes risky rule in prompt, and returns optional name", async () => {
+    delete process.env.OUMI_API_KEY;
+    delete process.env.OUMI_PROJECT_ID;
+
+    const digest = makeSampleDigest();
+    const generateContent = vi.fn<GeminiSdk["models"]["generateContent"]>(
+      async () => ({
+        text: JSON.stringify({
+          level: "rung2",
+          risky: false,
+          confidence: 0.85,
+          name: "Sync CRM account",
+        }),
+      }),
+    );
+
+    const result = await decideSecond(digest, {
+      gemini: { sdk: { models: { generateContent } } },
+    });
+
+    expect(result).toEqual({
+      level: "rung2",
+      risky: false,
+      confidence: 0.85,
+      source: "gemini",
+      name: "Sync CRM account",
+    });
+
+    const prompt = generateContent.mock.calls[0]?.[0]?.contents ?? "";
+    expect(prompt).toContain("harm that cannot be undone");
+    expect(prompt).toContain("affects other people");
+    expect(prompt).toContain("lower confidence instead");
+  });
 });
