@@ -17,13 +17,6 @@ const PHONE_PATTERN =
 const SENSITIVE_URL_PARAM_RE =
   /^(token|access_token|id_token|refresh_token|code|password|passwd|secret|api_key|apikey|key|sig|signature|session_key)$/i;
 
-const SECRET_AUTOCOMPLETE = new Set(["new-password", "current-password", "one-time-code"]);
-const FORM_CONTROL_TAGS = new Set(["input", "select", "textarea"]);
-const REASON_TO_PII_TYPE: Record<string, "password" | "credit_card" | "secret_token"> = {
-  password_field: "password",
-  payment_field: "credit_card",
-};
-
 export function hashValue(input: string): string {
   const normalized = input.trim().toLowerCase();
   let hash = 0x811c9dc5;
@@ -93,7 +86,12 @@ export function inspectElementPrivacy(el: Element | null): ElementPrivacyCheck {
     };
   }
 
-  if (SECRET_AUTOCOMPLETE.has(autocomplete) || SENSITIVE_FIELD_RE.test(combinedDescriptor)) {
+  if (
+    autocomplete === "new-password" ||
+    autocomplete === "current-password" ||
+    autocomplete === "one-time-code" ||
+    SENSITIVE_FIELD_RE.test(combinedDescriptor)
+  ) {
     return {
       isSensitiveField: true,
       reason: "secret_field",
@@ -103,7 +101,7 @@ export function inspectElementPrivacy(el: Element | null): ElementPrivacyCheck {
   }
 
   const autofillEligible =
-    FORM_CONTROL_TAGS.has(tag) &&
+    (tag === "input" || tag === "select" || tag === "textarea") &&
     ((autocomplete !== "" && autocomplete !== "off") ||
       typeAttr === "email" ||
       typeAttr === "tel" ||
@@ -128,7 +126,12 @@ export function sanitizeValue(
   const valueHash = valueLength > 0 ? hashValue(rawValue) : undefined;
 
   if (elCheck?.isSensitiveField) {
-    const piiType = (elCheck.reason && REASON_TO_PII_TYPE[elCheck.reason]) || "secret_token";
+    const piiType =
+      elCheck.reason === "password_field"
+        ? "password"
+        : elCheck.reason === "payment_field"
+          ? "credit_card"
+          : "secret_token";
     return {
       value: `[REDACTED:${piiType.toUpperCase()}#${valueHash || "empty"}]`,
       privacy: {

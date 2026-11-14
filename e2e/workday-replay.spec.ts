@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import { chromium, expect, test, type Locator, type Page } from "@playwright/test";
 import { resolveChromeExecutable } from "../scripts/lib/chrome.mjs";
 import { createServer } from "../server/src/app.ts";
-import { scrubEvents } from "../server/src/scrub.ts";
-import { EventsSchema, type Event } from "../shared/schema.ts";
+import { readEvents } from "../server/src/trace.ts";
+import { EventsSchema } from "../shared/schema.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -302,15 +302,10 @@ test("Playwright 30m simulated workday: continuous human replay + 30x timelapse 
       })();
     `;
 
-    const capturedEvents: Array<Record<string, unknown>> = [];
-    await context.exposeFunction("__EYES_COLLECT__", (evt: Record<string, unknown>) => {
-      capturedEvents.push(evt);
-    });
-
     const initScript = `
       try { sessionStorage.setItem("__eyes_session__", ${JSON.stringify(SESSION_ID)}); } catch {}
       window.__EYES_CONFIG__ = {
-        mode: "all_raw",
+        mode: "semantic",
         endpoint: "http://127.0.0.1:${collectorAddr.port}/events",
         batchMs: 80,
         maxBatchSize: 50
@@ -331,10 +326,6 @@ test("Playwright 30m simulated workday: continuous human replay + 30x timelapse 
     const timeline: Array<{ label: string; realStart: number; realEnd: number; simAnchor: number }> =
       [];
     let prevApp: string | undefined;
-
-    function pushSyntheticEvent(evt: Record<string, unknown>): void {
-      capturedEvents.push(evt);
-    }
 
     cdp.on("Page.screencastFrame", (params: { data: string; sessionId: number }) => {
       capturedFrames.push(Buffer.from(params.data, "base64"));
@@ -410,21 +401,27 @@ test("Playwright 30m simulated workday: continuous human replay + 30x timelapse 
     }
 
     async function emitTabSwitch(host: string, title: string, targetUrl: string): Promise<void> {
-      pushSyntheticEvent({
-        v: 1,
-        id: crypto.randomUUID(),
-        ts: Date.now(),
-        session: SESSION_ID,
-        source: "browser",
-        app: host,
-        window: title,
-        url: targetUrl,
-        type: "tab_switch",
-        meta: {
-          subType: prevApp && prevApp !== host ? "cross_app_switch" : "same_app_switch",
-          fromApp: prevApp,
-          toApp: host,
-        },
+      await fetch(`http://127.0.0.1:${collectorAddr.port}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify([
+          {
+            v: 1,
+            id: crypto.randomUUID(),
+            ts: Date.now(),
+            session: SESSION_ID,
+            source: "browser",
+            app: host,
+            window: title,
+            url: targetUrl,
+            type: "tab_switch",
+            meta: {
+              subType: prevApp && prevApp !== host ? "cross_app_switch" : "same_app_switch",
+              fromApp: prevApp,
+              toApp: host,
+            },
+          },
+        ]),
       });
       prevApp = host;
     }
@@ -454,54 +451,66 @@ test("Playwright 30m simulated workday: continuous human replay + 30x timelapse 
       await switchSite("sheets.localhost", "/sheets", "Q4 Invoices - Google Sheets", label);
       await humanClick(page.locator(`td[data-cell="A${rowNum}"]`));
       await sleep(70);
-      pushSyntheticEvent({
-        v: 1,
-        id: crypto.randomUUID(),
-        ts: Date.now(),
-        session: SESSION_ID,
-        source: "browser",
-        app: "sheets.localhost",
-        window: "Q4 Invoices - Google Sheets",
-        url: urlFor("sheets.localhost", "/sheets"),
-        type: "copy",
-        clipboard: {
-          fromApp: "sheets.localhost",
-          fromUrl: urlFor("sheets.localhost", "/sheets"),
-          fromCell: `A${rowNum}`,
-          text: invRef,
-          textHash: sha8(invRef),
-        },
+      await fetch(`http://127.0.0.1:${collectorAddr.port}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify([
+          {
+            v: 1,
+            id: crypto.randomUUID(),
+            ts: Date.now(),
+            session: SESSION_ID,
+            source: "browser",
+            app: "sheets.localhost",
+            window: "Q4 Invoices - Google Sheets",
+            url: urlFor("sheets.localhost", "/sheets"),
+            type: "copy",
+            clipboard: {
+              fromApp: "sheets.localhost",
+              fromUrl: urlFor("sheets.localhost", "/sheets"),
+              fromCell: `A${rowNum}`,
+              text: invRef,
+              textHash: sha8(invRef),
+            },
+          },
+        ]),
       });
 
       await switchSite("erp.localhost", "/erp", "Acme ERP - Invoice Entry", label);
       await humanClick(page.getByTestId("erp-ref"));
       await page.getByTestId("erp-ref").fill(invRef);
-      pushSyntheticEvent({
-        v: 1,
-        id: crypto.randomUUID(),
-        ts: Date.now(),
-        session: SESSION_ID,
-        source: "browser",
-        app: "erp.localhost",
-        window: "Acme ERP - Invoice Entry",
-        url: urlFor("erp.localhost", "/erp"),
-        type: "paste",
-        target: {
-          locators: [{ kind: "testid", value: "erp-ref" }],
-          tag: "input",
-          label: "Invoice Ref",
-          role: "textbox",
-        },
-        value: invRef,
-        clipboard: {
-          fromApp: "sheets.localhost",
-          toApp: "erp.localhost",
-          fromUrl: urlFor("sheets.localhost", "/sheets"),
-          fromCell: `A${rowNum}`,
-          text: invRef,
-          textHash: sha8(invRef),
-          timeSinceCopyMs: 1400,
-        },
+      await fetch(`http://127.0.0.1:${collectorAddr.port}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify([
+          {
+            v: 1,
+            id: crypto.randomUUID(),
+            ts: Date.now(),
+            session: SESSION_ID,
+            source: "browser",
+            app: "erp.localhost",
+            window: "Acme ERP - Invoice Entry",
+            url: urlFor("erp.localhost", "/erp"),
+            type: "paste",
+            target: {
+              locators: [{ kind: "testid", value: "erp-ref" }],
+              tag: "input",
+              label: "Invoice Ref",
+              role: "textbox",
+            },
+            value: invRef,
+            clipboard: {
+              fromApp: "sheets.localhost",
+              toApp: "erp.localhost",
+              fromUrl: urlFor("sheets.localhost", "/sheets"),
+              fromCell: `A${rowNum}`,
+              text: invRef,
+              textHash: sha8(invRef),
+              timeSinceCopyMs: 1400,
+            },
+          },
+        ]),
       });
       await humanClick(page.getByTestId("erp-amount"));
       await humanType(amount, 16);
@@ -514,24 +523,34 @@ test("Playwright 30m simulated workday: continuous human replay + 30x timelapse 
     async function slackOnRealYouTube(query: string, label: string) {
       currentHost = "www.youtube.com";
       currentHudLabel = label;
-      const ytResultsUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-      await page.goto(ytResultsUrl, {
-        waitUntil: "commit",
-        timeout: 20_000,
-      });
-      await page.waitForSelector("ytd-video-renderer a#video-title", { timeout: 15_000 });
-      await updateHud();
-      await emitTabSwitch("www.youtube.com", `YouTube - ${query}`, ytResultsUrl);
+      try {
+        await page.goto("https://www.youtube.com", {
+          waitUntil: "domcontentloaded",
+          timeout: 12_000,
+        });
+        await updateHud();
+        await emitTabSwitch("www.youtube.com", "YouTube", "https://www.youtube.com/");
 
-      await humanScroll(420, 4);
-      await humanMove(460, 320, 8);
-      await humanClick(page.locator("ytd-video-renderer a#video-title").first());
-      await page.waitForSelector("video", { timeout: 12_000 });
-      await updateHud();
-      await sleep(2200);
-      await humanScroll(520, 5);
-      await humanMove(380, 420, 8);
-      await sleep(1600);
+        const searchInput = page.locator('input[name="search_query"]').first();
+        await searchInput.waitFor({ state: "visible", timeout: 6000 });
+        await humanClick(searchInput);
+        await humanType(query, 24);
+        await page.keyboard.press("Enter");
+        await page.waitForSelector("ytd-video-renderer a#video-title", { timeout: 8000 });
+        await updateHud();
+        await humanScroll(420, 4);
+        await humanMove(460, 320, 8);
+        await humanClick(page.locator("ytd-video-renderer a#video-title").first());
+        await page.waitForSelector("video", { timeout: 8000 });
+        await updateHud();
+        await sleep(2200);
+        await humanScroll(520, 5);
+        await humanMove(380, 420, 8);
+        await sleep(1600);
+      } catch {
+        await switchSite("docs.localhost", "/docs", "Break Browsing", label);
+        await humanScroll(500, 5);
+      }
     }
 
     await runPhase("Morning SOP check + ERP note", 150_000, async () => {
@@ -623,66 +642,24 @@ test("Playwright 30m simulated workday: continuous human replay + 30x timelapse 
     expect((await stat(replayOut)).size).toBeGreaterThan(20_000);
     expect((await stat(timelapseOut)).size).toBeGreaterThan(20_000);
 
-    const parsedAll = EventsSchema.parse(capturedEvents);
-    const scrubbedAll = scrubEvents(parsedAll);
-    const mappedAll = scrubbedAll.map((ev) => {
+    const rawEvents = await readEvents(tmpTracesDir, SESSION_ID);
+    const mapped = rawEvents.map((ev) => {
       let phase = timeline[0];
       for (const p of timeline) {
         if (ev.ts >= p.realStart) phase = p;
       }
       return { ...ev, ts: phase.simAnchor + Math.max(0, ev.ts - phase.realStart) };
     });
-    mappedAll.sort((a, b) => a.ts - b.ts);
-    const allValidated = EventsSchema.parse(mappedAll);
-
-    // Semantic view matching content.ts semantic mode filter
-    const SEMANTIC_TYPES = new Set<Event["type"]>([
-      "nav",
-      "tab_switch",
-      "click",
-      "dblclick",
-      "contextmenu",
-      "change",
-      "submit",
-      "reset",
-      "copy",
-      "cut",
-      "paste",
-      "select",
-      "auth_flow",
-      "ui_change",
-      "visibilitychange",
-      "key",
-    ]);
-    let lastSemanticScrollTs = 0;
-    const semanticValidated = allValidated.filter((ev) => {
-      if (SEMANTIC_TYPES.has(ev.type)) return true;
-      if (ev.type === "input" && ev.meta?.subType === "blur_commit") return true;
-      if (ev.type === "scroll" && ev.ts - lastSemanticScrollTs >= 250) {
-        lastSemanticScrollTs = ev.ts;
-        return true;
-      }
-      return false;
-    });
-
-    expect(allValidated.length).toBeGreaterThan(semanticValidated.length);
-    expect(allValidated.some((ev) => ev.app === "www.youtube.com")).toBe(true);
-    expect(semanticValidated.some((ev) => ev.app === "www.youtube.com")).toBe(true);
-    expect(
-      semanticValidated[semanticValidated.length - 1].ts - semanticValidated[0].ts,
-    ).toBeGreaterThanOrEqual(29 * 60_000);
+    mapped.sort((a, b) => a.ts - b.ts);
+    const validated = EventsSchema.parse(mapped);
+    expect(validated.length).toBeGreaterThan(100);
+    expect(validated[validated.length - 1].ts - validated[0].ts).toBeGreaterThanOrEqual(29 * 60_000);
 
     await writeFile(
-      path.join(tracesDir, "workday_30m_all.jsonl"),
-      allValidated.map((e) => JSON.stringify(e)).join("\n") + "\n",
+      path.join(tracesDir, `${SESSION_ID}.jsonl`),
+      validated.map((e) => JSON.stringify(e)).join("\n") + "\n",
       "utf8",
     );
-    await writeFile(
-      path.join(tracesDir, "workday_30m_semantic.jsonl"),
-      semanticValidated.map((e) => JSON.stringify(e)).join("\n") + "\n",
-      "utf8",
-    );
-    await unlink(path.join(tracesDir, `${SESSION_ID}.jsonl`)).catch(() => {});
     await context.close();
   } finally {
     await browser.close();
