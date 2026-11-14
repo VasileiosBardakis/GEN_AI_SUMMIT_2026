@@ -136,7 +136,11 @@ async function main() {
   } else {
     console.log(`[dev] starting backend on http://localhost:${backendPort}`);
     const serverChild = spawnChild(["--experimental-strip-types", "server/src/index.ts"], {
-      env: { ...process.env, PORT: String(backendPort) },
+      env: {
+        ...process.env,
+        PORT: String(backendPort),
+        BRAIN_AUTO_PROPOSE: process.env.BRAIN_AUTO_PROPOSE ?? "0",
+      },
     });
     serverChild.on("exit", (code) => {
       if (!shuttingDown && code !== 0) {

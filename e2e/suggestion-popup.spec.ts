@@ -49,7 +49,7 @@ test("silently saves repeated snippets and only prompts to actually insert when 
   const demoServer = await startDemoServer({ dir: demoDir, port: 0 });
   const tracesDir = fs.mkdtempSync(path.join(os.tmpdir(), "eyes-e2e-traces-"));
   const dataDir = path.join(tracesDir, "data");
-  const apiServer: http.Server = createServer({ tracesDir, dataDir });
+  const apiServer: http.Server = createServer({ tracesDir, dataDir, autoPropose: false });
   await new Promise<void>((resolve) => {
     apiServer.listen(0, "127.0.0.1", () => resolve());
   });
