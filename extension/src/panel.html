@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Automation Ladder — Eyes</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 12px; background: #0f172a; color: #f8fafc; font-size: 13px; }
+    h1 { font-size: 15px; margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; }
+    .badge { background: #0ea5e9; color: #082f49; font-weight: 700; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+    .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
+    .stat-box { background: #1e293b; padding: 8px; border-radius: 6px; border: 1px solid #334155; }
+    .stat-val { font-size: 16px; font-weight: 700; color: #38bdf8; }
+    .stat-lbl { font-size: 11px; color: #94a3b8; }
+    .section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin: 12px 0 6px; }
+    .event-list, .finding-list { display: flex; flex-direction: column; gap: 6px; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 8px; }
+    .evt-row { font-family: ui-monospace, monospace; font-size: 11px; background: #1e293b; padding: 6px; border-radius: 4px; border-left: 3px solid #38bdf8; word-break: break-all; }
+    .evt-row.redacted { border-left-color: #f43f5e; }
+    .evt-row.auth { border-left-color: #f59e0b; }
+  </style>
+</head>
+<body>
+  <h1>
+    <span>Automation Ladder · Eyes</span>
+    <span class="badge">LOCAL ONLY</span>
+  </h1>
+  <div class="stats">
+    <div class="stat-box">
+      <div class="stat-val" id="stat-events">0</div>
+      <div class="stat-lbl">Captured Events</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-val" id="stat-bytes">0 KB</div>
+      <div class="stat-lbl">Trace Volume</div>
+    </div>
+  </div>
+  <div class="section-title">Findings (from /report)</div>
+  <div class="finding-list" id="findings">
+    <div class="card">Watching workflow...</div>
+  </div>
+  <div class="section-title">Live Event Stream</div>
+  <div class="event-list" id="events"></div>
+  <script src="panel.js"></script>
+</body>
+</html>
