@@ -2,5 +2,12 @@
   "name": "@gen/shared",
   "private": true,
   "type": "module",
-  "exports": "./contract.ts"
+  "exports": {
+    ".": "./contract.ts",
+    "./schema.ts": "./schema.ts",
+    "./schema": "./schema.ts"
+  },
+  "dependencies": {
+    "zod": "^3.24.2"
+  }
 }

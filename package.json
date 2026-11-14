@@ -13,7 +13,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "smoke": "playwright test --pass-with-no-tests",
-    "check": "npm run lint && npm run typecheck && npm run test && npm run smoke"
+    "check": "npm run lint && npm run typecheck && npm run test && npm run smoke",
+    "server": "npm run start -w @gen/server"
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",
