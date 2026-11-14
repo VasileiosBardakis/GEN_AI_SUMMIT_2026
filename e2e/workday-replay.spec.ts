@@ -195,7 +195,7 @@ function encodeWebmFromJpegs(
         "-i",
         "pipe:0",
         "-c:v",
-        "libvpx",
+        "libvpx-vp9",
         "-b:v",
         "1200k",
         "-deadline",
@@ -210,6 +210,10 @@ function encodeWebmFromJpegs(
     let stderr = "";
     proc.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
+    });
+    proc.stdin.on("error", (err) => {
+      // Ignore EPIPE when ffmpeg exits early; close handler reports stderr.
+      if ((err as NodeJS.ErrnoException).code !== "EPIPE") reject(err);
     });
     proc.on("error", reject);
     proc.on("close", (code) => {
