@@ -249,12 +249,14 @@ function showSuggestion(
   };
 
   const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
-  const suggestedItem = suggestionToOptimization(suggestion, { app: appHost, status: "suggested" });
-  if (options.script) suggestedItem.script = options.script;
-  sendLibraryMessage({
-    kind: "EYES_UPSERT_OPTIMIZATION",
-    item: suggestedItem,
-  });
+  if (!options.onDecision) {
+    const suggestedItem = suggestionToOptimization(suggestion, { app: appHost, status: "suggested" });
+    if (options.script) suggestedItem.script = options.script;
+    sendLibraryMessage({
+      kind: "EYES_UPSERT_OPTIMIZATION",
+      item: suggestedItem,
+    });
+  }
 
   const host = document.createElement("div");
   host.id = SUGGESTION_HOST_ID;
@@ -285,6 +287,13 @@ function showSuggestion(
       <circle cx="10" cy="10" r="2.3" fill="currentColor"/>
     </svg>
   `;
+
+  const primaryButtonLabel = suggestion.kind === "text" ? "Insert" : "Run";
+  const successTitle = suggestion.kind === "text" ? "Inserted." : "Running.";
+  const successSubtitle =
+    suggestion.kind === "text"
+      ? "Text pasted into the active field."
+      : "Eyes is executing this shortcut now.";
 
   shadow.innerHTML = `
     <style>
@@ -655,13 +664,13 @@ function showSuggestion(
           <div class="meta">${escapeHtml(suggestion.meta)}</div>
           <div class="actions">
             <button class="ghost" type="button" data-eyes-dismiss>Not now</button>
-            <button class="primary" type="button" data-eyes-primary>Trial it live</button>
+            <button class="primary" type="button" data-eyes-primary>${primaryButtonLabel}</button>
           </div>
         </div>
       </div>
       <div class="success" data-eyes-success hidden>
-        <strong>Trial started.</strong>
-        <span>Eyes will keep this shortcut ready for this session.</span>
+        <strong>${successTitle}</strong>
+        <span>${successSubtitle}</span>
       </div>
     </section>
   `;
@@ -710,12 +719,62 @@ function clearCommittedTextIfChanged(
   }
 }
 
+function autoSaveRepeatedSnippet(element: HTMLElement, suggestion: Suggestion): void {
+  const snippetText = (suggestion.snippetText ?? suggestion.preview).trim();
+  if (!snippetText) return;
+
+  const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
+  const shortPreview =
+    snippetText.length > 34 ? `${snippetText.slice(0, 34).trim()}...` : snippetText;
+  const name = `Insert "${shortPreview}"`;
+  const solution = `Insert '${snippetText}' into the currently focused field.`;
+  const script: ActionScript = {
+    name,
+    steps: [{ action: "insertText", value: snippetText }],
+  };
+
+  const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
+  activeItem.title = name;
+  activeItem.description = solution;
+  activeItem.solution = solution;
+  activeItem.script = script;
+  sendLibraryMessage({
+    kind: "EYES_ACTIVATE_OPTIMIZATION",
+    id: activeItem.id,
+    item: activeItem,
+  });
+
+  const { target } = extractTarget(element);
+  const locators = (target?.locators ?? []).filter(
+    (loc): loc is { kind: "testid" | "aria" | "css" | "text"; value: string } =>
+      loc.kind === "testid" || loc.kind === "aria" || loc.kind === "css" || loc.kind === "text"
+  );
+  const cleanUrl =
+    typeof location !== "undefined" ? sanitizeUrl(location.href).url : undefined;
+
+  sendLibraryMessage({
+    kind: "EYES_AUTO_SAVE_LIBRARY",
+    name,
+    solution,
+    script,
+    context: {
+      app: appHost,
+      ...(cleanUrl ? { url: cleanUrl } : {}),
+      ...(typeof document !== "undefined" && document.title ? { title: document.title } : {}),
+      ...(target?.label ? { targetLabel: target.label } : {}),
+      ...(target?.role ? { targetRole: target.role } : {}),
+      ...(locators.length > 0 ? { locators } : {}),
+    },
+  });
+}
+
 function recordCommittedText(
   element: HTMLElement | null,
   rawValue: string | undefined,
   privacyCheck: ReturnType<typeof inspectElementPrivacy>,
   force = false
 ): void {
+  if ((window as { __EYES_SUPPRESS_SYNTHETIC__?: boolean }).__EYES_SUPPRESS_SYNTHETIC__) return;
   if (!element || !rawValue) return;
 
   const { value, privacy } = sanitizeValue(rawValue, privacyCheck);
@@ -724,34 +783,10 @@ function recordCommittedText(
   if (!force && committedTextByElement.get(element) === value) return;
   committedTextByElement.set(element, value);
 
-  showSuggestion(suggestionEngine.recordText(value));
-}
-
-function recordRepeatedClick(rawTarget: EventTarget | null, event: MouseEvent): void {
-  if (
-    event.button !== 0 ||
-    event.detail !== 1 ||
-    event.ctrlKey ||
-    event.metaKey ||
-    event.altKey ||
-    event.shiftKey ||
-    isEyesUiTarget(rawTarget)
-  ) {
-    return;
+  const detected = suggestionEngine.recordText(value);
+  if (detected) {
+    autoSaveRepeatedSnippet(element, detected);
   }
-
-  const { element, target } = extractTarget(rawTarget);
-  if (!element || !target) return;
-  if (!element.matches('button, a, [role="button"], input[type="submit"]')) return;
-  if (element instanceof HTMLButtonElement && element.disabled) return;
-
-  const label =
-    target.label || target.locators.find((locator) => locator.kind === "text")?.value;
-  if (!label) return;
-
-  const primary = target.locators[0];
-  const key = `${target.tag ?? "element"}:${primary?.kind ?? "none"}:${primary?.value ?? label}`;
-  showSuggestion(suggestionEngine.recordClick(key, label, Date.now()));
 }
 
 function getElementValue(el: HTMLElement | null): string | undefined {
@@ -863,6 +898,7 @@ export function setupEventListeners(): void {
     extraMeta?: EventMeta,
     clipboard?: Event["clipboard"]
   ): void {
+    if ((window as { __EYES_SUPPRESS_SYNTHETIC__?: boolean }).__EYES_SUPPRESS_SYNTHETIC__) return;
     if (isEyesUiTarget(rawTarget)) return;
 
     const { element, target } = extractTarget(rawTarget);
@@ -965,13 +1001,13 @@ export function setupEventListeners(): void {
     "click",
     (e: MouseEvent) => {
       const dwellMs = Math.max(0, Date.now() - lastPointerDownTs);
-      emit("click", e.target, undefined, {
+      const editable = resolveEditableField(e.target);
+      emit("click", e.target, editable ? getElementValue(editable) : undefined, {
         button: e.button,
         clientX: Math.round(e.clientX),
         clientY: Math.round(e.clientY),
         dwellMs: dwellMs < 15000 ? dwellMs : undefined,
       });
-      recordRepeatedClick(e.target, e);
     },
     true
   );

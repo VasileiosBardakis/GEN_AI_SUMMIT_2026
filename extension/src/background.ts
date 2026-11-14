@@ -39,6 +39,9 @@ interface ChromeRuntimeMessage {
   id?: string;
   item?: OptimizationItem;
   recordRun?: boolean;
+  name?: string;
+  solution?: string;
+  context?: Record<string, unknown>;
 }
 
 interface ChromeTab {
@@ -259,6 +262,30 @@ if (chromeApi?.runtime?.onMessage) {
       void loadLibrary()
         .then((items) => saveLibrary(upsertOptimizationItem(items, incoming)))
         .then((items) => sendResponse({ ok: true, items }));
+      return true;
+    }
+    if (msg?.kind === "EYES_AUTO_SAVE_LIBRARY" && msg.script && typeof msg.solution === "string") {
+      const payload = {
+        name: msg.name,
+        solution: msg.solution,
+        script: msg.script,
+        context: msg.context,
+      };
+      void flushQueue()
+        .then(() =>
+          fetch(`${SERVER_URL}/library/auto`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          })
+        )
+        .then(async (resp) => {
+          const data = await resp.json().catch(() => ({ ok: resp.ok }));
+          sendResponse(data);
+        })
+        .catch(() => {
+          sendResponse({ ok: false });
+        });
       return true;
     }
     if (msg?.kind === "EYES_ACTIVATE_OPTIMIZATION" && (msg.id || msg.item)) {

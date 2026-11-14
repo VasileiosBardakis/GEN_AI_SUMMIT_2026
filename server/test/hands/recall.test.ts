@@ -216,6 +216,95 @@ describe("createLibraryRecallMatcher", () => {
     expect(matcher.matchEvents([clickEvt], [clipEntry], 25_000)).toBeNull();
     expect(matcher.matchEvents([clickEvt], [clipEntry], 43_000)?.id).toBe(clipEntry.id);
   });
+
+  it("ignores paste, change, blur_commit, insertFromPaste, filled clicks, and unrelated textboxes on the same page", () => {
+    const matcher = createLibraryRecallMatcher();
+    const snippet = "Hi, thanks for your order. It ships Friday and tracking will follow shortly.";
+    const replyEntry = buildLibraryEntryFromScript({
+      name: "Insert shipping reply",
+      solution: `Insert '${snippet}' into the currently focused field.`,
+      script: {
+        name: "Insert shipping reply",
+        steps: [{ action: "insertText", value: snippet }],
+      },
+      context: {
+        app: "localhost",
+        url: "http://localhost:5173/",
+        title: "Automation Ladder — Local Demo",
+        targetLabel: "Reply to customer",
+        targetRole: "textbox",
+        locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+      },
+      status: "active",
+      now: 1_000,
+    });
+
+    const baseReplyEvent = (overrides: Partial<Event>): Event =>
+      makeEvent({
+        app: "localhost",
+        url: "http://localhost:5173/",
+        window: "Automation Ladder — Local Demo",
+        target: {
+          locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+          tag: "textarea",
+          label: "Reply to customer",
+          role: "textbox",
+        },
+        ...overrides,
+      });
+
+    // nav / paste / change / blur_commit / insertFromPaste must never trigger
+    expect(matcher.matchEvents([baseReplyEvent({ type: "nav", target: undefined })], [replyEntry], 2_000)).toBeNull();
+    expect(matcher.matchEvents([baseReplyEvent({ type: "paste", value: snippet })], [replyEntry], 2_100)).toBeNull();
+    expect(matcher.matchEvents([baseReplyEvent({ type: "change", value: snippet })], [replyEntry], 2_200)).toBeNull();
+    expect(
+      matcher.matchEvents(
+        [baseReplyEvent({ type: "input", value: snippet, meta: { subType: "blur_commit" } })],
+        [replyEntry],
+        2_300,
+      ),
+    ).toBeNull();
+    expect(
+      matcher.matchEvents(
+        [baseReplyEvent({ type: "input", value: snippet, meta: { typing: { inputType: "insertFromPaste" } } })],
+        [replyEntry],
+        2_400,
+      ),
+    ).toBeNull();
+
+    // Clicking an unrelated empty input on the same page must NOT trigger
+    expect(
+      matcher.matchEvents(
+        [
+          makeEvent({
+            app: "localhost",
+            url: "http://localhost:5173/",
+            window: "Automation Ladder — Local Demo",
+            type: "click",
+            value: "",
+            target: {
+              locators: [{ kind: "css", value: 'input[name="company_name"]' }],
+              tag: "input",
+              label: "Company name",
+              role: "textbox",
+            },
+          }),
+        ],
+        [replyEntry],
+        2_500,
+      ),
+    ).toBeNull();
+
+    // Clicking the target field while already filled with unrelated text must NOT trigger
+    expect(
+      matcher.matchEvents([baseReplyEvent({ type: "click", value: "Already wrote something else" })], [replyEntry], 2_600),
+    ).toBeNull();
+
+    // Clicking the empty target field triggers immediately
+    expect(
+      matcher.matchEvents([baseReplyEvent({ type: "click", value: "" })], [replyEntry], 2_700)?.id,
+    ).toBe(replyEntry.id);
+  });
 });
 
 describe("POST /events -> library half-detection -> /decide bridge", () => {
@@ -340,5 +429,90 @@ describe("POST /events -> library half-detection -> /decide bridge", () => {
 
     const nextPoll = await fetch(`${baseUrl}/hands/next?waitMs=60`);
     expect(nextPoll.status).toBe(204);
+  });
+
+  it("auto-saves an active snippet via POST /library/auto without delaying subsequent empty focus", async () => {
+    const snippet = "Hi, thanks for your order. It ships Friday and tracking will follow shortly.";
+    const autoRes = await fetch(`${baseUrl}/library/auto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Insert shipping reply",
+        solution: `Insert '${snippet}' into the currently focused field.`,
+        script: {
+          name: "Insert shipping reply",
+          steps: [{ action: "insertText", value: snippet }],
+        },
+        context: {
+          app: "localhost",
+          url: "http://localhost:5173/",
+          title: "Automation Ladder — Local Demo",
+          targetLabel: "Reply to customer",
+          targetRole: "textbox",
+          locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+        },
+      }),
+    });
+    expect(autoRes.status).toBe(200);
+    const autoJson = (await autoRes.json()) as { ok: boolean; entry: LibraryEntry };
+    expect(autoJson.ok).toBe(true);
+    expect(autoJson.entry.status).toBe("active");
+
+    // Trailing change/paste events right after auto-save do NOT trigger recall
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([
+        makeEvent({
+          app: "localhost",
+          url: "http://localhost:5173/",
+          window: "Automation Ladder — Local Demo",
+          type: "change",
+          value: snippet,
+          target: {
+            locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+            tag: "textarea",
+            label: "Reply to customer",
+            role: "textbox",
+          },
+        }),
+      ]),
+    });
+    const suppressedPoll = await fetch(`${baseUrl}/hands/next?waitMs=50`);
+    expect(suppressedPoll.status).toBe(204);
+
+    // Focusing the empty field immediately afterwards triggers /decide to insert it
+    const pollDecidePromise = fetch(`${baseUrl}/hands/next?waitMs=2000`);
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([
+        makeEvent({
+          app: "localhost",
+          url: "http://localhost:5173/",
+          window: "Automation Ladder — Local Demo",
+          type: "focus",
+          value: "",
+          target: {
+            locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+            tag: "textarea",
+            label: "Reply to customer",
+            role: "textbox",
+          },
+        }),
+      ]),
+    });
+
+    const decidePollRes = await pollDecidePromise;
+    expect(decidePollRes.status).toBe(200);
+    const decideCmd = (await decidePollRes.json()) as {
+      id: string;
+      kind: string;
+      name: string;
+      script: LibraryEntry["script"];
+    };
+    expect(decideCmd.kind).toBe("decide");
+    expect(decideCmd.name).toBe("Insert shipping reply");
+    expect(decideCmd.script.steps).toEqual([{ action: "insertText", value: snippet }]);
   });
 });

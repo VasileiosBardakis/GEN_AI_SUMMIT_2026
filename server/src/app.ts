@@ -311,6 +311,19 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const scrubbed = validation.events.length - events.filter((e) => original.has(e)).length;
 
         await appendEvents(opts.tracesDir, events);
+        if (events.some((e) => e.type === "nav" && e.meta?.subType === "page_load")) {
+          for (let i = commandQueue.length - 1; i >= 0; i--) {
+            if (commandQueue[i]?.kind === "decide") {
+              const stale = commandQueue.splice(i, 1)[0];
+              if (stale) {
+                waiters.get(stale.id)?.({ ok: false, error: "Page navigated before decision" });
+              }
+            }
+          }
+          if (commandQueue.every((c) => c.kind !== "decide") && waiters.size === 0) {
+            activeLibraryDecideId = null;
+          }
+        }
         if (!activeLibraryDecideId) {
           const entries = await readLibrary(dataDir).catch(() => []);
           const matched = recallMatcher.matchEvents(events, entries);
@@ -361,6 +374,72 @@ export function createServer(opts: CreateServerOptions): http.Server {
         }
 
         sendJson(res, 200, { ok: true, script });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/library/auto") {
+        const raw = await readBody(req);
+        let parsedJson: unknown;
+        try {
+          parsedJson = JSON.parse(raw);
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid JSON body" });
+          return;
+        }
+
+        if (
+          !parsedJson ||
+          typeof parsedJson !== "object" ||
+          Array.isArray(parsedJson) ||
+          typeof (parsedJson as { solution?: unknown }).solution !== "string" ||
+          (parsedJson as { solution: string }).solution.trim().length === 0
+        ) {
+          sendJson(res, 400, { ok: false, error: "Expected non-empty solution string" });
+          return;
+        }
+
+        const body = parsedJson as {
+          name?: unknown;
+          solution: string;
+          script?: unknown;
+          context?: unknown;
+          suppressRecallMs?: unknown;
+        };
+
+        let script: ActionScript;
+        try {
+          script = parseActionScript(body.script);
+        } catch (err) {
+          sendJson(res, 400, {
+            ok: false,
+            error: err instanceof Error ? err.message : "Invalid action script",
+          });
+          return;
+        }
+
+        const name = typeof body.name === "string" ? body.name : undefined;
+        const context =
+          body.context && typeof body.context === "object" && !Array.isArray(body.context)
+            ? (body.context as ImplementContext)
+            : undefined;
+
+        const built = buildLibraryEntryFromScript({
+          name,
+          solution: body.solution,
+          script,
+          context,
+          status: "active",
+        });
+        const { entry } = await upsertLibraryEntry(dataDir, built);
+        latestScript = entry.script;
+        const suppressMs =
+          typeof body.suppressRecallMs === "number" && Number.isFinite(body.suppressRecallMs)
+            ? Math.max(0, body.suppressRecallMs)
+            : 0;
+        if (suppressMs > 0) {
+          recallMatcher.suppressEntry(entry.id, suppressMs);
+        }
+        sendJson(res, 200, { ok: true, entry });
         return;
       }
 

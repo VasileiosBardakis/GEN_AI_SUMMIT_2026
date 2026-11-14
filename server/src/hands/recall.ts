@@ -6,10 +6,7 @@ const INTERACTIVE_EVENT_TYPES = new Set<Event["type"]>([
   "dblclick",
   "focus",
   "input",
-  "change",
-  "paste",
   "select",
-  "submit",
 ]);
 
 const CLIPBOARD_WINDOW_MS = 120_000;
@@ -129,8 +126,16 @@ function matchEntryToEvent(
   const hasPrefixHints = eyes.textHints.prefixHints.length > 0;
 
   if (!INTERACTIVE_EVENT_TYPES.has(evt.type)) {
-    if (evt.type !== "nav" && evt.type !== "tab_switch") return 0;
-    if (hasTargetHints || hasPrefixHints || eyes.guards.fieldEmptyOnly) return 0;
+    return 0;
+  }
+
+  if (evt.type === "input") {
+    if (
+      evt.meta?.subType === "blur_commit" ||
+      evt.meta?.typing?.inputType === "insertFromPaste"
+    ) {
+      return 0;
+    }
   }
 
   if (eyes.guards.requireClipboard) {
@@ -200,8 +205,17 @@ function matchEntryToEvent(
     eyes.guards.fieldEmptyOnly &&
     normalizedVal.length > 0 &&
     !prefixMatched &&
-    (evt.type === "input" || evt.type === "change" || evt.type === "focus")
+    (evt.type === "input" ||
+      evt.type === "focus" ||
+      evt.type === "click" ||
+      evt.type === "dblclick")
   ) {
+    return 0;
+  }
+
+  const hasSpecificTargetHints =
+    eyes.targetHints.locators.length > 0 || eyes.targetHints.labelContains.length > 0;
+  if (hasSpecificTargetHints && !locatorMatched && !labelMatched && !prefixMatched) {
     return 0;
   }
 
@@ -227,14 +241,22 @@ function matchEntryToEvent(
 export interface LibraryRecallMatcher {
   matchEvents(events: Event[], entries: LibraryEntry[], now?: number): LibraryEntry | null;
   markTriggered(entryId: string, now?: number): void;
+  suppressEntry(entryId: string, durationMs: number, now?: number): void;
 }
 
 export function createLibraryRecallMatcher(): LibraryRecallMatcher {
   let lastClipboardAt: number | null = null;
   const lastTriggeredAt = new Map<string, number>();
+  const suppressedUntil = new Map<string, number>();
 
   function markTriggered(entryId: string, now = Date.now()): void {
     lastTriggeredAt.set(entryId, now);
+  }
+
+  function suppressEntry(entryId: string, durationMs: number, now = Date.now()): void {
+    if (durationMs > 0) {
+      suppressedUntil.set(entryId, now + durationMs);
+    }
   }
 
   function matchEvents(
@@ -251,6 +273,11 @@ export function createLibraryRecallMatcher(): LibraryRecallMatcher {
 
     const candidates = entries.filter((entry) => {
       if (entry.status === "paused") return false;
+      const until = suppressedUntil.get(entry.id);
+      if (until !== undefined) {
+        if (now < until) return false;
+        suppressedUntil.delete(entry.id);
+      }
       const last = lastTriggeredAt.get(entry.id);
       return last === undefined || now - last >= entry.eyes.guards.cooldownMs;
     });
@@ -276,5 +303,5 @@ export function createLibraryRecallMatcher(): LibraryRecallMatcher {
     return best?.entry ?? null;
   }
 
-  return { matchEvents, markTriggered };
+  return { matchEvents, markTriggered, suppressEntry };
 }

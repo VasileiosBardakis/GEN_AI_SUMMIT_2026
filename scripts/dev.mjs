@@ -122,6 +122,12 @@ async function main() {
     process.exit(1);
   }
 
+  const dataDir = path.join(rootDir, "data");
+  const libraryPath = path.join(dataDir, "library.json");
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(libraryPath, "[]\n", "utf8");
+  console.log("[dev] cleared data/library.json");
+
   console.log("[dev] building extension...");
   await buildExtension();
 
