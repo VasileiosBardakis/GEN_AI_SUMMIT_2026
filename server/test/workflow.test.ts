@@ -110,10 +110,14 @@ describe("detectWorkflows", () => {
   });
 
   it("splits sequences on >= 30s timestamp gaps", () => {
-    const unitSteps = (baseTs: number, idValue: string): Step[] => [
+    const unitSteps = (
+      baseTs: number,
+      firstTarget: string,
+      idValue: string,
+    ): Step[] => [
       {
         action: "click",
-        target: [{ kind: "testid", value: "row-select" }],
+        target: [{ kind: "testid", value: firstTarget }],
         ...({ ts: baseTs } as Record<string, unknown>),
       },
       {
@@ -130,45 +134,38 @@ describe("detectWorkflows", () => {
       },
       {
         action: "click",
-        target: [{ kind: "testid", value: "save-record" }],
+        target: [{ kind: "testid", value: "verify-record" }],
         ...({ ts: baseTs + 3_000 } as Record<string, unknown>),
+      },
+      {
+        action: "click",
+        target: [{ kind: "testid", value: "save-record" }],
+        ...({ ts: baseTs + 4_000 } as Record<string, unknown>),
       },
     ];
 
-    // 3 sequences separated by >= 30s timestamp gaps (35s between end of rep and start of next)
+    // 3 sequences with distinct first-step keys and 4 shared tail steps (edit distance 1/5 = 0.2),
+    // separated by an exact 30_000ms gap (5_000 -> 35_000) and a 35_000ms gap (39_000 -> 74_000)
     const stepsWithGaps: Step[] = [
-      ...unitSteps(1_000, "REC-100"),
-      ...unitSteps(39_000, "REC-200"),
-      ...unitSteps(77_000, "REC-300"),
+      ...unitSteps(1_000, "row-select-1", "REC-100"),
+      ...unitSteps(35_000, "row-select-2", "REC-200"),
+      ...unitSteps(74_000, "row-select-3", "REC-300"),
     ];
 
     const candidates = detectWorkflows(stepsWithGaps);
     expect(candidates).toHaveLength(1);
     expect(candidates[0].repetitions).toBe(3);
     expect(candidates[0].workflow.instances).toEqual([
-      { startTs: 1_000, endTs: 4_000, bindings: { record_id: "REC-100" } },
-      { startTs: 39_000, endTs: 42_000, bindings: { record_id: "REC-200" } },
-      { startTs: 77_000, endTs: 80_000, bindings: { record_id: "REC-300" } },
+      { startTs: 1_000, endTs: 5_000, bindings: { record_id: "REC-100" } },
+      { startTs: 35_000, endTs: 39_000, bindings: { record_id: "REC-200" } },
+      { startTs: 74_000, endTs: 78_000, bindings: { record_id: "REC-300" } },
     ]);
 
-    // When a >= 30s gap interrupts each repetition into < minSteps fragments, no candidate is emitted
-    const brokenSteps: Step[] = [
-      {
-        action: "click",
-        target: [{ kind: "testid", value: "a" }],
-        ...({ ts: 1_000 } as Record<string, unknown>),
-      },
-      {
-        action: "click",
-        target: [{ kind: "testid", value: "b" }],
-        ...({ ts: 2_000 } as Record<string, unknown>),
-      },
-      {
-        action: "click",
-        target: [{ kind: "testid", value: "c" }],
-        ...({ ts: 35_000 } as Record<string, unknown>),
-      },
-    ];
-    expect(detectWorkflows(brokenSteps)).toEqual([]);
+    // Explicit boundary check at exactly 30_000ms
+    expect(detectWorkflows(stepsWithGaps, { gapMs: 30_000 })).toHaveLength(1);
+
+    // When gapMs is above the 30_000ms gap or above all trace gaps, sequences are not split
+    expect(detectWorkflows(stepsWithGaps, { gapMs: 30_001 })).toEqual([]);
+    expect(detectWorkflows(stepsWithGaps, { gapMs: 40_000 })).toEqual([]);
   });
 });
