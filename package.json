@@ -9,6 +9,14 @@
     "test": "vitest run --passWithNoTests",
     "smoke": "playwright test --pass-with-no-tests",
     "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run smoke",
+    "dev": "node scripts/dev.mjs",
+    "dev:build": "node extension/build.mjs",
+    "dev:watch": "node scripts/watch-extension.mjs",
+    "dev:browser": "node scripts/dev-browser.mjs",
+    "dev:demo": "node scripts/dev-static.mjs",
+    "dev:tail": "node scripts/tail-traces.mjs",
+    "probe": "node --experimental-strip-types scripts/run-watcher-probe.mjs",
+    "clean": "node scripts/clean.mjs",
     "server": "pnpm --filter @gen/server start"
   },
   "devDependencies": {

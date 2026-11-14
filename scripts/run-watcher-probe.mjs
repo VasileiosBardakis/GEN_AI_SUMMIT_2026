@@ -6,14 +6,14 @@ import zlib from "node:zlib";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createServer } from "../server/src/app.ts";
+import { resolveChromeExecutable } from "./lib/chrome.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const contentScriptPath = path.join(rootDir, "extension/dist/content.js");
 const tracesDir = path.join(rootDir, "traces");
 
-const CHROME_BIN =
-  "/home/harris/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome";
+const CHROME_BIN = await resolveChromeExecutable();
 
 const SHEETS_HTML = `<!doctype html>
 <html>
