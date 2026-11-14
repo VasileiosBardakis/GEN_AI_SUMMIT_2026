@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EventSchema, ReportSchema } from "../schema.ts";
+import { ActionScriptSchema, EventSchema, ReportSchema } from "../schema.ts";
 
 describe("EventSchema", () => {
   const validEvent = {
@@ -97,5 +97,43 @@ describe("ReportSchema", () => {
       ],
     });
     expect(tooLow.success).toBe(false);
+  });
+});
+
+describe("ActionScriptSchema", () => {
+  it("parses valid scripts and normalizes extractList fields array to record", () => {
+    const parsed = ActionScriptSchema.safeParse({
+      name: "Fill search",
+      steps: [
+        {
+          action: "extractList",
+          target: { kind: "css", value: "tr" },
+          bind: "rows",
+          fields: [{ name: "title", locator: { kind: "css", value: ".title" } }],
+        },
+        {
+          action: "forEach",
+          items: "rows",
+          steps: [{ action: "fill", target: { kind: "css", value: "input" }, value: "{{title}}" }],
+        },
+      ],
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.steps[0]).toEqual({
+        action: "extractList",
+        target: { kind: "css", value: "tr" },
+        bind: "rows",
+        fields: { title: { kind: "css", value: ".title" } },
+      });
+    }
+  });
+
+  it("rejects empty steps, unknown action, and relative navigate URL", () => {
+    expect(ActionScriptSchema.safeParse({ steps: [] }).success).toBe(false);
+    expect(ActionScriptSchema.safeParse({ steps: [{ action: "bogus" }] }).success).toBe(false);
+    expect(
+      ActionScriptSchema.safeParse({ steps: [{ action: "navigate", url: "/local" }] }).success,
+    ).toBe(false);
   });
 });
