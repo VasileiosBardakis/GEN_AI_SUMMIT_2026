@@ -23,7 +23,7 @@ export function buildReport(
         ? writeSnippetArtifact(dataDir, finding, text)
         : finding,
     ),
-    ...detectShortValues(steps),
+    ...detectShortValues(steps, events),
   ];
   return ReportSchema.parse({
     generatedAt: Date.now(),
@@ -52,7 +52,7 @@ export function buildCombinedReport(
         );
       }
     }
-    for (const finding of detectShortValues(steps)) {
+    for (const finding of detectShortValues(steps, events)) {
       if (!seenIds.has(finding.id)) {
         seenIds.add(finding.id);
         findings.push(finding);
