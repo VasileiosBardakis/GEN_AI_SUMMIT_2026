@@ -217,6 +217,14 @@ describe("createGeminiClient", () => {
       project: "custom-proj",
       location: "us-central1",
     });
+
+    createGeminiClient({ project: "opt-proj", location: "europe-west1" });
+    expect(googleGenAiCtorSpy).toHaveBeenCalledTimes(3);
+    expect(googleGenAiCtorSpy).toHaveBeenLastCalledWith({
+      vertexai: true,
+      project: "opt-proj",
+      location: "europe-west1",
+    });
   });
 
   it("throws a clear error naming the required variables when neither sign-in mode is configured and never leaks secrets", () => {
