@@ -2,6 +2,7 @@ import type { Event, Finding, Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { writeSnippetArtifact } from "./artifacts.ts";
 import { normalize } from "./detect/normalize.ts";
+import { detectShortValues } from "./detect/short-values.ts";
 import { detectSnippetsWithText } from "./detect/snippet.ts";
 
 export interface BuildReportOptions {
@@ -16,11 +17,14 @@ export function buildReport(
   const dataDir = typeof opts === "string" ? opts : opts?.dataDir;
   const steps = normalize(events);
   const detected = detectSnippetsWithText(steps);
-  const findings = detected.map(({ finding, text }) =>
-    dataDir !== undefined
-      ? writeSnippetArtifact(dataDir, finding, text)
-      : finding,
-  );
+  const findings = [
+    ...detected.map(({ finding, text }) =>
+      dataDir !== undefined
+        ? writeSnippetArtifact(dataDir, finding, text)
+        : finding,
+    ),
+    ...detectShortValues(steps),
+  ];
   return ReportSchema.parse({
     generatedAt: Date.now(),
     session,
@@ -46,6 +50,12 @@ export function buildCombinedReport(
             ? writeSnippetArtifact(dataDir, finding, text)
             : finding,
         );
+      }
+    }
+    for (const finding of detectShortValues(steps)) {
+      if (!seenIds.has(finding.id)) {
+        seenIds.add(finding.id);
+        findings.push(finding);
       }
     }
   }
