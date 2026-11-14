@@ -188,6 +188,7 @@ export type ScriptStep =
   | ScriptDomStep
   | { action: "navigate"; url: string; optional?: boolean }
   | { action: "wait"; ms: number; optional?: boolean }
+  | { action: "switchTab"; host: string; optional?: boolean }
   | {
       action: "forEach";
       items: Record<string, string>[] | string;
@@ -206,6 +207,11 @@ export const ScriptStepSchema: z.ZodType<ScriptStep, z.ZodTypeDef, unknown> = z.
     z.object({
       action: z.literal("wait"),
       ms: z.number().nonnegative(),
+      optional: z.boolean().optional(),
+    }),
+    z.object({
+      action: z.literal("switchTab"),
+      host: z.string().refine((s) => s.trim().length > 0, "expected non-empty host"),
       optional: z.boolean().optional(),
     }),
     z.object({

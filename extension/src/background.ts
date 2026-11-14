@@ -649,9 +649,21 @@ async function fetchAndRunLatestScript(
   return { script, results };
 }
 
-async function runActionScript(tabId: number, script: ActionScript): Promise<StepResult[]> {
+export async function runActionScript(tabId: number, script: ActionScript): Promise<StepResult[]> {
   const bindings: Record<string, BindingValue> = {};
   return runSteps(tabId, script.steps, bindings, {});
+}
+
+function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const want = targetHost.trim().toLowerCase();
+    const got = want.includes(":") ? parsed.host.toLowerCase() : parsed.hostname.toLowerCase();
+    return got === want;
+  } catch {
+    return false;
+  }
 }
 
 async function runSteps(
@@ -661,6 +673,7 @@ async function runSteps(
   scope: Record<string, unknown>,
 ): Promise<StepResult[]> {
   const results: StepResult[] = [];
+  let currentTabId = tabId;
 
   for (const rawStep of steps) {
     let step: Step;
@@ -673,8 +686,8 @@ async function runSteps(
 
     try {
       if (step.action === "navigate") {
-        await chrome.tabs.update(tabId, { url: step.url });
-        await waitForTabLoad(tabId);
+        await chrome.tabs.update(currentTabId, { url: step.url });
+        await waitForTabLoad(currentTabId);
         results.push({ ok: true, url: step.url });
         continue;
       }
@@ -685,17 +698,45 @@ async function runSteps(
         continue;
       }
 
+      if (step.action === "switchTab") {
+        const allTabs = await chrome.tabs.query({});
+        const matches = allTabs.filter(
+          (t) => t.id !== undefined && tabMatchesHost(t.url, step.host),
+        );
+        matches.sort((a, b) => {
+          const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
+          if (accessDiff !== 0) return accessDiff;
+          if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;
+          return 0;
+        });
+        const match = matches[0];
+        if (match?.id === undefined) {
+          throw new Error(`No open tab for ${step.host}`);
+        }
+        await chrome.tabs.update(match.id, { active: true });
+        if (match.windowId !== undefined && chrome.windows?.update) {
+          await chrome.windows.update(match.windowId, { focused: true });
+        }
+        currentTabId = match.id;
+        results.push({ ok: true, tab: step.host });
+        continue;
+      }
+
       if (step.action === "forEach") {
         const items = Array.isArray(step.items) ? step.items : bindings[step.items];
         if (!Array.isArray(items)) throw new Error(`No array binding: ${step.items}`);
         for (const item of items) {
-          const nested = await runSteps(tabId, step.steps, bindings, { ...scope, ...item, item });
+          const nested = await runSteps(currentTabId, step.steps, bindings, {
+            ...scope,
+            ...item,
+            item,
+          });
           results.push(...nested);
         }
         continue;
       }
 
-      const result = await executeDomStep(tabId, step);
+      const result = await executeDomStep(currentTabId, step);
       results.push(result);
       if (!result.ok) {
         if (step.optional) continue;

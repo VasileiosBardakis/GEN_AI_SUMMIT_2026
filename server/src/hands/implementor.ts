@@ -77,6 +77,7 @@ Available actions:
 - forEach: { action: "forEach", items, steps } -> Loops over an extractList binding. Set items to the plain binding key (e.g. "rows", NOT "{{rows}}") and reference row fields as "{{fieldName}}".
 - navigate: { action: "navigate", url } -> Full http:// or https:// URL only.
 - wait: { action: "wait", ms } -> Short delay in ms only when explicitly needed.
+- switchTab: { action: "switchTab", host } -> If the solution reads values on one site and fills them on another, use readText on the first site, then {action:'switchTab', host:'<dest host>'}, then fill with {{binding}}.
 
 Locator rules (plain-text grounding without DOM snapshot):
 - "css": Prefer resilient selectors for inputs, e.g. 'input[type="search"], input[name="q"], input[placeholder*="search" i]' or 'input[type="email"], input[name*="email" i]'.

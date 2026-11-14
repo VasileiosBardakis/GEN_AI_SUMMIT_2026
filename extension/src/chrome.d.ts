@@ -12,6 +12,7 @@ declare namespace chrome {
       status?: string;
       active?: boolean;
       windowId?: number;
+      lastAccessed?: number;
     }
 
     interface TabChangeInfo {
@@ -21,7 +22,7 @@ declare namespace chrome {
 
     function get(tabId: number): Promise<Tab>;
     function query(queryInfo: { active?: boolean; currentWindow?: boolean }): Promise<Tab[]>;
-    function update(tabId: number, updateProperties: { url?: string }): Promise<Tab>;
+    function update(tabId: number, updateProperties: { url?: string; active?: boolean }): Promise<Tab>;
     function sendMessage(
       tabId: number,
       message: unknown,
@@ -68,5 +69,12 @@ declare namespace chrome {
         files: string[];
       },
     ): Promise<InjectionResult<unknown>[]>;
+  }
+
+  namespace windows {
+    function update(
+      windowId: number,
+      updateInfo: { focused?: boolean },
+    ): Promise<unknown>;
   }
 }

@@ -23,6 +23,7 @@ export type Step =
   | DomStep
   | { action: "navigate"; url: string; optional?: boolean }
   | { action: "wait"; ms: number; optional?: boolean }
+  | { action: "switchTab"; host: string; optional?: boolean }
   | {
       action: "forEach";
       items: Record<string, string>[] | string;
@@ -39,7 +40,8 @@ export type BindingValue = string | Record<string, string>[];
 
 export type StepResult = {
   ok: boolean;
-  url: string;
+  url?: string;
+  tab?: string;
   value?: string;
   items?: Record<string, string>[];
   error?: string;
