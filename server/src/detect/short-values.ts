@@ -14,6 +14,15 @@ interface FieldMeta {
   inputName?: string;
 }
 
+interface SimulatedStepMeta {
+  action: Step["action"];
+  targetKey: string;
+  locators: Set<string>;
+  value?: string;
+  meta: FieldMeta;
+  used?: boolean;
+}
+
 interface ShortValueGroup {
   fieldType: string;
   fieldKey: string;
@@ -95,6 +104,21 @@ function targetKey(target?: Event["target"]): string {
   return `${formatted[0].kind}:${formatted[0].value}`;
 }
 
+function targetLocatorSet(target?: Event["target"]): Set<string> {
+  const formatted = formatTarget(target);
+  if (!formatted) return new Set();
+  return new Set(formatted.map((loc) => `${loc.kind}:${loc.value}`));
+}
+
+function stepTargetKey(step: Step): string {
+  const first = step.target?.[0];
+  return first ? `${first.kind}:${first.value}` : "";
+}
+
+function normalizeValueText(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 function cleanAttr(val: unknown): string | undefined {
   if (typeof val !== "string") return undefined;
   const trimmed = val.trim();
@@ -146,39 +170,32 @@ function pickFieldType(
 }
 
 function buildEventFieldLookup(events?: Event[]): {
-  stepMetas: FieldMeta[];
-  fillPasteMetas: FieldMeta[];
-  locatorMetas: Map<string, FieldMeta>;
+  simulatedSteps: SimulatedStepMeta[];
+  fillPasteSteps: SimulatedStepMeta[];
 } {
-  const stepMetas: FieldMeta[] = [];
-  const fillPasteMetas: FieldMeta[] = [];
-  const locatorMetas = new Map<string, FieldMeta>();
+  const simulatedSteps: SimulatedStepMeta[] = [];
 
   if (!events || events.length === 0) {
-    return { stepMetas, fillPasteMetas, locatorMetas };
+    return { simulatedSteps, fillPasteSteps: [] };
   }
 
-  const simulatedSteps: { action: Step["action"]; value?: string }[] = [];
   let lastTargetKey = "";
 
   for (const ev of events) {
     const evMeta = extractMeta(ev.meta);
-    if (
-      ev.target?.locators &&
-      (evMeta.autocompleteAttr || evMeta.inputTypeAttr || evMeta.inputName)
-    ) {
-      for (const loc of ev.target.locators) {
-        const rawKey = `${loc.kind}:${loc.value}`;
-        locatorMetas.set(
-          rawKey,
-          mergeFieldMeta(locatorMetas.get(rawKey) ?? {}, evMeta),
-        );
-        const strippedKey = `${loc.kind}:${loc.value.replace(SHORTCUT_RE, "")}`;
-        locatorMetas.set(
-          strippedKey,
-          mergeFieldMeta(locatorMetas.get(strippedKey) ?? {}, evMeta),
-        );
+
+    if (ev.type === "blur") {
+      const key = targetKey(ev.target);
+      const prev = simulatedSteps[simulatedSteps.length - 1];
+      if (
+        prev &&
+        (prev.action === "fill" || prev.action === "paste") &&
+        lastTargetKey !== "" &&
+        lastTargetKey === key
+      ) {
+        prev.meta = mergeFieldMeta(prev.meta, evMeta);
       }
+      continue;
     }
 
     if (!INCLUDED_TYPES.has(ev.type)) continue;
@@ -191,19 +208,15 @@ function buildEventFieldLookup(events?: Event[]): {
 
         if (prev && prev.action === "fill" && lastTargetKey === key) {
           prev.value = masked;
-          const idx = stepMetas.length - 1;
-          stepMetas[idx] = mergeFieldMeta(stepMetas[idx] ?? {}, evMeta);
-          const fpIdx = fillPasteMetas.length - 1;
-          if (fpIdx >= 0) {
-            fillPasteMetas[fpIdx] = mergeFieldMeta(
-              fillPasteMetas[fpIdx] ?? {},
-              evMeta,
-            );
-          }
+          prev.meta = mergeFieldMeta(prev.meta, evMeta);
         } else {
-          simulatedSteps.push({ action: "fill", value: masked });
-          stepMetas.push(evMeta);
-          fillPasteMetas.push(evMeta);
+          simulatedSteps.push({
+            action: "fill",
+            targetKey: key,
+            locators: targetLocatorSet(ev.target),
+            value: masked,
+            meta: evMeta,
+          });
         }
         lastTargetKey = key;
         break;
@@ -220,62 +233,70 @@ function buildEventFieldLookup(events?: Event[]): {
           lastTargetKey === key &&
           prev.value === masked
         ) {
-          const idx = stepMetas.length - 1;
-          stepMetas[idx] = mergeFieldMeta(stepMetas[idx] ?? {}, evMeta);
-          const fpIdx = fillPasteMetas.length - 1;
-          if (fpIdx >= 0) {
-            fillPasteMetas[fpIdx] = mergeFieldMeta(
-              fillPasteMetas[fpIdx] ?? {},
-              evMeta,
-            );
-          }
+          prev.meta = mergeFieldMeta(prev.meta, evMeta);
           break;
         }
 
-        simulatedSteps.push({ action: "fill", value: masked });
-        stepMetas.push(evMeta);
-        fillPasteMetas.push(evMeta);
+        simulatedSteps.push({
+          action: "fill",
+          targetKey: key,
+          locators: targetLocatorSet(ev.target),
+          value: masked,
+          meta: evMeta,
+        });
         lastTargetKey = key;
         break;
       }
 
       case "paste": {
         const rawVal = ev.value ?? ev.clipboard?.text;
+        const key = targetKey(ev.target);
         simulatedSteps.push({
           action: "paste",
+          targetKey: key,
+          locators: targetLocatorSet(ev.target),
           ...(rawVal !== undefined ? { value: maskPii(rawVal) } : {}),
+          meta: evMeta,
         });
-        stepMetas.push(evMeta);
-        fillPasteMetas.push(evMeta);
-        lastTargetKey = targetKey(ev.target);
+        lastTargetKey = key;
         break;
       }
 
       case "copy": {
         const rawVal = ev.value ?? ev.clipboard?.text;
+        const key = targetKey(ev.target);
         simulatedSteps.push({
           action: "copy",
+          targetKey: key,
+          locators: targetLocatorSet(ev.target),
           ...(rawVal !== undefined ? { value: maskPii(rawVal) } : {}),
+          meta: evMeta,
         });
-        stepMetas.push(evMeta);
-        lastTargetKey = targetKey(ev.target);
+        lastTargetKey = key;
         break;
       }
 
       case "click":
       case "submit": {
-        simulatedSteps.push({ action: ev.type });
-        stepMetas.push(evMeta);
-        lastTargetKey = targetKey(ev.target);
+        const key = targetKey(ev.target);
+        simulatedSteps.push({
+          action: ev.type,
+          targetKey: key,
+          locators: targetLocatorSet(ev.target),
+          meta: evMeta,
+        });
+        lastTargetKey = key;
         break;
       }
 
       case "nav": {
         simulatedSteps.push({
           action: "nav",
+          targetKey: "",
+          locators: new Set(),
           ...(ev.url ? { value: maskPii(ev.url) } : {}),
+          meta: evMeta,
         });
-        stepMetas.push(evMeta);
         lastTargetKey = "";
         break;
       }
@@ -285,7 +306,61 @@ function buildEventFieldLookup(events?: Event[]): {
     }
   }
 
-  return { stepMetas, fillPasteMetas, locatorMetas };
+  const fillPasteSteps = simulatedSteps.filter(
+    (s) => s.action === "fill" || s.action === "paste",
+  );
+
+  return { simulatedSteps, fillPasteSteps };
+}
+
+function resolveStepMetas(steps: Step[], events?: Event[]): FieldMeta[] {
+  const { simulatedSteps, fillPasteSteps } = buildEventFieldLookup(events);
+  const alignedWithAllSteps = simulatedSteps.length === steps.length;
+  const totalFillPaste = steps.filter(
+    (s) => s.action === "fill" || s.action === "paste",
+  ).length;
+  const alignedWithFillPaste = fillPasteSteps.length === totalFillPaste;
+
+  let fillPasteIndex = 0;
+  return steps.map((step, i) => {
+    const inlineStepMeta = extractMeta(
+      (step as Step & { meta?: EventMeta }).meta,
+    );
+    const isFillOrPaste = step.action === "fill" || step.action === "paste";
+    const currentFpIndex = isFillOrPaste ? fillPasteIndex++ : -1;
+
+    let eventMeta: FieldMeta | undefined;
+    if (alignedWithAllSteps) {
+      eventMeta = simulatedSteps[i]?.meta;
+    } else if (alignedWithFillPaste && isFillOrPaste) {
+      eventMeta = fillPasteSteps[currentFpIndex]?.meta;
+    } else if (isFillOrPaste) {
+      const key = stepTargetKey(step);
+      const stepNorm =
+        typeof step.value === "string"
+          ? normalizeValueText(step.value)
+          : undefined;
+      const matched = fillPasteSteps.find((entry) => {
+        if (entry.used) return false;
+        const targetMatches =
+          (key !== "" && entry.targetKey === key) ||
+          (step.target ?? []).some((loc) =>
+            entry.locators.has(`${loc.kind}:${loc.value}`),
+          );
+        if (!targetMatches) return false;
+        if (stepNorm !== undefined && typeof entry.value === "string") {
+          return normalizeValueText(entry.value) === stepNorm;
+        }
+        return true;
+      });
+      if (matched) {
+        matched.used = true;
+        eventMeta = matched.meta;
+      }
+    }
+
+    return mergeFieldMeta(inlineStepMeta, eventMeta ?? {});
+  });
 }
 
 export function detectShortValues(
@@ -302,19 +377,50 @@ export function detectShortValues(
   const maxLength = opts?.maxLength ?? 19;
   const minRepetitions = opts?.minRepetitions ?? 2;
 
-  const { stepMetas, fillPasteMetas, locatorMetas } =
-    buildEventFieldLookup(events);
-  const alignedWithAllSteps = stepMetas.length === steps.length;
-
+  const stepMetas = resolveStepMetas(steps, events);
   const groups = new Map<string, ShortValueGroup>();
-  let fillPasteIndex = 0;
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     const isFillOrPaste = step.action === "fill" || step.action === "paste";
-    const currentFpIndex = isFillOrPaste ? fillPasteIndex++ : -1;
+    if (!isFillOrPaste) {
+      continue;
+    }
 
-    if (!isFillOrPaste || typeof step.value !== "string") {
+    let resolvedMeta = stepMetas[i] ?? {};
+
+    // A browser paste emits a `paste` step followed by a `fill` step from the
+    // accompanying `input`/`change` event on the same target. Collapse them
+    // into one user action while preserving metadata from both steps.
+    if (step.action === "paste" && i + 1 < steps.length) {
+      const nextStep = steps[i + 1];
+      const currentKey = stepTargetKey(step);
+      if (
+        nextStep.action === "fill" &&
+        currentKey !== "" &&
+        currentKey === stepTargetKey(nextStep)
+      ) {
+        if (
+          typeof step.value === "string" &&
+          typeof nextStep.value === "string" &&
+          normalizeValueText(step.value) === normalizeValueText(nextStep.value)
+        ) {
+          resolvedMeta = mergeFieldMeta(resolvedMeta, stepMetas[i + 1] ?? {});
+          i += 1;
+        } else if (
+          step.value === undefined &&
+          typeof nextStep.value === "string"
+        ) {
+          stepMetas[i + 1] = mergeFieldMeta(
+            resolvedMeta,
+            stepMetas[i + 1] ?? {},
+          );
+          continue;
+        }
+      }
+    }
+
+    if (typeof step.value !== "string") {
       continue;
     }
 
@@ -324,7 +430,7 @@ export function detectShortValues(
     }
 
     const trimmed = step.value.trim();
-    const norm = trimmed.toLowerCase().replace(/\s+/g, " ");
+    const norm = normalizeValueText(trimmed);
 
     const isMaskedToken =
       trimmed === "<email>" ||
@@ -338,31 +444,6 @@ export function detectShortValues(
     if (!isMaskedToken && !isShortString) {
       continue;
     }
-
-    const inlineStepMeta = extractMeta(
-      (step as Step & { meta?: EventMeta }).meta,
-    );
-    const alignedMeta = alignedWithAllSteps
-      ? stepMetas[i]
-      : fillPasteMetas[currentFpIndex];
-
-    let locatorMeta: FieldMeta = {};
-    for (const loc of step.target ?? []) {
-      const found = locatorMetas.get(`${loc.kind}:${loc.value}`);
-      if (found) {
-        locatorMeta = mergeFieldMeta(locatorMeta, found);
-      }
-    }
-
-    const primaryMeta = mergeFieldMeta(inlineStepMeta, alignedMeta ?? {});
-    const hasPrimaryAttr = Boolean(
-      primaryMeta.autocompleteAttr ||
-        primaryMeta.inputTypeAttr ||
-        primaryMeta.inputName,
-    );
-    const resolvedMeta = hasPrimaryAttr
-      ? primaryMeta
-      : mergeFieldMeta(primaryMeta, locatorMeta);
 
     const fieldType = pickFieldType(resolvedMeta, firstLocator);
     const fieldKey = fieldType.toLowerCase();

@@ -294,6 +294,136 @@ describe("detectShortValues", () => {
 
     expect(detectShortValues(steps)).toEqual([]);
   });
+
+  it("collapses a paste followed by its input/change on the same field so 1 paste is not double-counted and 2 pastes report repetitions=2", () => {
+    const rawEmail = "founder@acme.io";
+    const makePasteSequence = (
+      idx: number,
+      app: string,
+      locatorValue: string,
+    ): Event[] => [
+      {
+        v: 1,
+        id: `00000000-0000-4000-8000-00000000031${idx}`,
+        ts: 1740000010000 + idx * 5000,
+        session: "sess_paste_collapse",
+        source: "browser",
+        app,
+        type: "paste",
+        target: {
+          tag: "input",
+          locators: [{ kind: "testid", value: locatorValue }],
+        },
+        value: rawEmail,
+      },
+      {
+        v: 1,
+        id: `00000000-0000-4000-8000-00000000032${idx}`,
+        ts: 1740000010100 + idx * 5000,
+        session: "sess_paste_collapse",
+        source: "browser",
+        app,
+        type: "input",
+        target: {
+          tag: "input",
+          locators: [{ kind: "testid", value: locatorValue }],
+        },
+        value: rawEmail,
+        meta: {
+          typing: {
+            inputType: "insertFromPaste",
+            autocompleteAttr: "email",
+          },
+        },
+      },
+      {
+        v: 1,
+        id: `00000000-0000-4000-8000-00000000033${idx}`,
+        ts: 1740000010200 + idx * 5000,
+        session: "sess_paste_collapse",
+        source: "browser",
+        app,
+        type: "change",
+        target: {
+          tag: "input",
+          locators: [{ kind: "testid", value: locatorValue }],
+        },
+        value: rawEmail,
+        meta: {
+          typing: {
+            inputType: "insertFromPaste",
+            autocompleteAttr: "email",
+          },
+        },
+      },
+    ];
+
+    // Single paste + input + change -> 1 user action -> []
+    const singlePasteEvents = makePasteSequence(1, "site-a.local", "email-a");
+    const singlePasteSteps = normalize(singlePasteEvents);
+    expect(singlePasteSteps.map((s) => s.action)).toEqual(["paste", "fill"]);
+    expect(detectShortValues(singlePasteSteps, singlePasteEvents)).toEqual([]);
+
+    // Two pastes (each paste + input + change) -> 2 user actions -> repetitions: 2
+    const twoPasteEvents = [
+      ...singlePasteEvents,
+      ...makePasteSequence(2, "site-b.local", "email-b"),
+    ];
+    const twoPasteSteps = normalize(twoPasteEvents);
+    const findings = detectShortValues(twoPasteSteps, twoPasteEvents);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].title).toBe("Same email typed 2 times in email fields");
+    expect(findings[0].stats.repetitions).toBe(2);
+  });
+
+  it("does not leak field metadata across sites when a generic locator is reused without metadata", () => {
+    const sharedLocator = [{ kind: "css" as const, value: "input#field" }];
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "00000000-0000-4000-8000-000000000401",
+        ts: 1740000020000,
+        session: "sess_no_global_leak",
+        source: "browser",
+        app: "site-one.local",
+        type: "input",
+        target: { tag: "input", locators: sharedLocator },
+        value: "ACC-99102",
+        meta: {
+          typing: {
+            autocompleteAttr: "organization",
+          },
+        },
+      },
+      {
+        v: 1,
+        id: "00000000-0000-4000-8000-000000000402",
+        ts: 1740000021000,
+        session: "sess_no_global_leak",
+        source: "browser",
+        app: "site-one.local",
+        type: "click",
+        target: {
+          tag: "button",
+          locators: [{ kind: "testid", value: "next-btn" }],
+        },
+      },
+      {
+        v: 1,
+        id: "00000000-0000-4000-8000-000000000403",
+        ts: 1740000022000,
+        session: "sess_no_global_leak",
+        source: "browser",
+        app: "site-two.local",
+        type: "input",
+        target: { tag: "input", locators: sharedLocator },
+        value: "ACC-99102",
+      },
+    ];
+
+    const steps = normalize(events);
+    expect(detectShortValues(steps, events)).toEqual([]);
+  });
 });
 
 describe("buildReport & buildCombinedReport short-values integration", () => {
