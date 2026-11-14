@@ -1,7 +1,7 @@
 import http from "node:http";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { buildReport } from "./report.ts";
-import { appendEvents } from "./trace.ts";
+import { appendEvents, readEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
 
 function setCorsHeaders(res: http.ServerResponse): void {
@@ -48,7 +48,8 @@ export function createServer(opts: { tracesDir: string }): http.Server {
       if (req.method === "GET" && url.pathname === "/report") {
         const sessionParam = url.searchParams.get("session");
         const session = sessionParam && sessionParam.length > 0 ? sessionParam : latestSession;
-        const parsed = ReportSchema.safeParse(buildReport(session));
+        const events = await readEvents(opts.tracesDir, session);
+        const parsed = ReportSchema.safeParse(buildReport(session, events));
         if (!parsed.success) {
           sendJson(res, 500, { ok: false, error: parsed.error.message });
           return;
