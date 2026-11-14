@@ -146,15 +146,27 @@ export async function matchLibrary(
     return { kind: "none", distance: 1 };
   }
 
-  let bestEntry = entries[0];
-  let bestDistance = normalizedEditDistance(sig, entries[0].signature);
+  let bestEntry: LibraryEntry | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
 
-  for (let i = 1; i < entries.length; i++) {
-    const d = normalizedEditDistance(sig, entries[i].signature);
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (
+      !entry?.signature ||
+      typeof entry.signature.host !== "string" ||
+      !Array.isArray(entry.signature.steps)
+    ) {
+      continue;
+    }
+    const d = normalizedEditDistance(sig, entry.signature);
     if (d < bestDistance) {
       bestDistance = d;
-      bestEntry = entries[i];
+      bestEntry = entry;
     }
+  }
+
+  if (!bestEntry) {
+    return { kind: "none", distance: 1 };
   }
 
   if (bestDistance <= config.matchMaxDistance) {

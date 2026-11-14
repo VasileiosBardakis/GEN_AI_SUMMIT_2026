@@ -1,11 +1,16 @@
 import type { Event, Finding, Step, Verdict, Workflow } from "@gen/shared";
-import { VerdictSchema } from "@gen/shared/schema.ts";
 import { writeSnippetArtifact } from "./artifacts.ts";
+import {
+  buildDigest,
+  decideSecond,
+  type DecideSecondOptions,
+  type SecondDecision,
+  type WorkflowDigest,
+} from "./decide/second.ts";
 import {
   DEFAULT_STATS_CONFIG,
   decideStats,
   type Candidate,
-  type StatsDecision,
 } from "./decide/stats.ts";
 import { detectSharedEdgesWithText } from "./detect/shared-edges.ts";
 import { detectShortValues } from "./detect/short-values.ts";
@@ -13,12 +18,8 @@ import { detectSnippetsWithText, type SnippetFinding } from "./detect/snippet.ts
 import { detectWorkflows, exactStepKey } from "./detect/workflow.ts";
 import { implementSolution } from "./hands/implementor.ts";
 import type { ActionScript } from "./hands/types.ts";
-import {
-  createGeminiClient,
-  type GeminiClient,
-  type GeminiClientOptions,
-  type ZodLikeSchema,
-} from "./llm/gemini.ts";
+import { matchLibrary } from "./library.ts";
+import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
 
 export type PipelineConfig = {
   minBigramShare: number;
@@ -47,17 +48,14 @@ export type PipelineOptions = {
   llm: boolean;
   events?: Event[];
   gemini?: GeminiClient | GeminiClientOptions;
+  decideSecond?: (
+    digest: WorkflowDigest,
+    opts?: DecideSecondOptions,
+  ) => Promise<SecondDecision | null>;
   implement?: (solution: string, opts?: { name?: string }) => Promise<ActionScript>;
   dataDir?: string;
   scriptStore?: Map<string, ActionScript>;
   config?: Partial<PipelineConfig>;
-};
-
-export type GeminiDecision = {
-  verdict: Verdict;
-  confidence: number;
-  name: string;
-  risky: boolean;
 };
 
 export type SafetyCheckResult =
@@ -71,58 +69,6 @@ export type SafetyCheckResult =
     };
 
 export const generatedScripts = new Map<string, ActionScript>();
-
-export const GeminiDecisionSchema: ZodLikeSchema<GeminiDecision> = {
-  safeParse(data: unknown) {
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-      return {
-        success: false,
-        error: { message: "Expected an object" },
-      };
-    }
-    const obj = data as Record<string, unknown>;
-    const issues: Array<{ path: ReadonlyArray<PropertyKey>; message: string }> = [];
-
-    const verdictParsed = VerdictSchema.safeParse(obj.verdict);
-    if (!verdictParsed.success) {
-      issues.push({ path: ["verdict"], message: "Invalid verdict" });
-    }
-
-    if (
-      typeof obj.confidence !== "number" ||
-      !Number.isFinite(obj.confidence) ||
-      obj.confidence < 0 ||
-      obj.confidence > 1
-    ) {
-      issues.push({ path: ["confidence"], message: "Expected number between 0 and 1" });
-    }
-
-    if (typeof obj.name !== "string" || obj.name.trim().length === 0) {
-      issues.push({ path: ["name"], message: "Expected non-empty string" });
-    }
-
-    if (typeof obj.risky !== "boolean") {
-      issues.push({ path: ["risky"], message: "Expected boolean" });
-    }
-
-    if (issues.length > 0 || !verdictParsed.success) {
-      return {
-        success: false,
-        error: { issues },
-      };
-    }
-
-    return {
-      success: true,
-      data: {
-        verdict: verdictParsed.data,
-        confidence: obj.confidence as number,
-        name: (obj.name as string).trim(),
-        risky: obj.risky as boolean,
-      },
-    };
-  },
-};
 
 const INCLUDED_EVENT_TYPES = new Set<Event["type"]>([
   "click",
@@ -530,39 +476,47 @@ export function checkCandidateSafety(
   return { safe: true };
 }
 
-export function buildDigestPrompt(
-  candidate: Candidate,
-  statsDecision: StatsDecision,
-): string {
-  const digest = {
-    host: {
-      source: candidate.workflow.sourceApp,
-      dest: candidate.workflow.destApp,
-    },
-    steps: candidate.workflow.steps.map((step) => ({
-      action: step.action,
-      locatorKind: step.target?.[0]?.kind ?? null,
-      ...(typeof step.value === "object" && step.value !== null
-        ? { param: step.value.param }
-        : {}),
-    })),
-    paramNames: candidate.workflow.params.map((p) => p.name),
-    stats: {
-      repetitions: candidate.repetitions,
-      minutesPerWeek: candidate.minutesPerWeek,
-      stability: candidate.stability,
-      statsVerdict: statsDecision.verdict,
-      statsConfidence: statsDecision.confidence,
-    },
-  };
+export function describeCandidate(candidate: Candidate): string {
+  const { workflow } = candidate;
+  const steps = workflow.steps;
+  const srcHost = workflow.sourceApp;
+  const destHost = workflow.destApp;
 
-  return [
-    "Evaluate whether this repeated browser workflow should be automated.",
-    "Return JSON with exactly: verdict ('rung0' | 'rung1' | 'rung2' | 'rung3' | 'do_not_automate'), confidence (0..1), name (short human-readable title), risky (boolean).",
-    "Set risky=true if the workflow looks fragile, ambiguous, or unsafe to automate.",
-    "",
-    JSON.stringify(digest),
-  ].join("\n");
+  if (
+    steps.length === 1 &&
+    (steps[0].action === "fill" || steps[0].action === "paste") &&
+    typeof steps[0].value === "string"
+  ) {
+    const collapsed = steps[0].value.replace(/\s+/g, " ").trim();
+    if (collapsed.length > 0) {
+      const preview =
+        collapsed.length > 40 ? `${collapsed.slice(0, 40)}...` : collapsed;
+      return `Insert reply: "${preview}"`;
+    }
+  }
+
+  const readSteps = steps.filter((s) => s.action === "copy");
+  const fillSteps = steps.filter(
+    (s) => s.action === "fill" || s.action === "paste",
+  );
+  if (
+    srcHost &&
+    destHost &&
+    srcHost !== destHost &&
+    readSteps.length > 0 &&
+    fillSteps.length > 0
+  ) {
+    const fieldCount = Math.min(readSteps.length, fillSteps.length);
+    return `Copy ${fieldCount} ${fieldCount === 1 ? "field" : "fields"} from ${srcHost} to ${destHost}`;
+  }
+
+  if (steps.length > 0 && steps.every((s) => s.action === "click")) {
+    const host = destHost || srcHost || "browser";
+    const count = steps.length;
+    return `Click ${count} ${count === 1 ? "item" : "items"} on ${host}`;
+  }
+
+  return workflow.name;
 }
 
 export function buildSolutionText(
@@ -593,51 +547,6 @@ export function buildSolutionText(
   }
 
   return null;
-}
-
-function isGeminiClient(
-  value: GeminiClient | GeminiClientOptions,
-): value is GeminiClient {
-  return (
-    typeof (value as GeminiClient).generateJson === "function" &&
-    typeof (value as GeminiClient).generateText === "function"
-  );
-}
-
-function resolveGeminiClient(
-  opt?: GeminiClient | GeminiClientOptions,
-): GeminiClient {
-  if (opt && isGeminiClient(opt)) {
-    return opt;
-  }
-  return createGeminiClient(opt);
-}
-
-async function askGeminiWithTimeout(
-  prompt: string,
-  timeoutMs: number,
-  geminiOpt?: GeminiClient | GeminiClientOptions,
-): Promise<GeminiDecision | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const client = resolveGeminiClient(geminiOpt);
-    const decision = await Promise.race([
-      client.generateJson(prompt, GeminiDecisionSchema),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("Gemini planner timed out")),
-          timeoutMs,
-        );
-      }),
-    ]);
-    return decision;
-  } catch {
-    return null;
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-  }
 }
 
 type PipelineItem = {
@@ -697,15 +606,15 @@ function shortValueToCandidate(finding: Finding, app: string): Candidate {
 function buildWorkflowWhy(
   verdict: Verdict,
   candidate: Candidate,
-  llmDecision: GeminiDecision | null,
+  secondDecision: { risky: boolean; name: string } | null,
 ): { why: string; whyNotNext: string } {
   const reps = candidate.repetitions;
   const stepCount = candidate.workflow.steps.length;
   const stabilityPct = Math.round(candidate.stability * 100);
 
-  if (llmDecision?.risky) {
+  if (secondDecision?.risky) {
     return {
-      why: `Planner flagged "${llmDecision.name}" as risky to automate (${reps} repetitions, ${stabilityPct}% stability).`,
+      why: `Planner flagged "${secondDecision.name}" as risky to automate (${reps} repetitions, ${stabilityPct}% stability).`,
       whyNotNext: "Risky workflows must not be automated without explicit review.",
     };
   }
@@ -750,6 +659,7 @@ export async function runPipeline(
     ...opts.config,
   };
   const scriptStore = opts.scriptStore ?? generatedScripts;
+  const decideSecondFn = opts.decideSecond ?? decideSecond;
   const implementFn =
     opts.implement ??
     ((solution: string, o?: { name?: string }) => implementSolution(solution, o));
@@ -814,7 +724,10 @@ export async function runPipeline(
     );
 
     let verdict: Verdict;
-    let title = item.baseFinding?.title ?? candidate.workflow.name;
+    let title =
+      item.kind === "short"
+        ? (item.baseFinding?.title ?? candidate.workflow.name)
+        : describeCandidate(candidate);
     let why = item.baseFinding?.why ?? "";
     let whyNotNext = item.baseFinding?.whyNotNext ?? "";
 
@@ -824,25 +737,45 @@ export async function runPipeline(
       whyNotNext = `Steps that click or submit irreversible actions (${safety.matchedWord}) must not be automated.`;
     } else {
       verdict = statsDecision.verdict;
-      let llmDecision: GeminiDecision | null = null;
+      let secondDecision: SecondDecision | null = null;
+      let effectiveRisky = false;
 
       if (statsDecision.confidence < config.confidenceThreshold && opts.llm) {
-        const prompt = buildDigestPrompt(candidate, statsDecision);
-        llmDecision = await askGeminiWithTimeout(
-          prompt,
-          config.llmTimeoutMs,
-          opts.gemini,
-        );
-        if (llmDecision) {
-          verdict = llmDecision.risky ? "do_not_automate" : llmDecision.verdict;
-          if (item.kind === "workflow") {
-            title = llmDecision.name;
+        try {
+          secondDecision = await decideSecondFn(
+            buildDigest(candidate, statsDecision.features),
+            {
+              gemini: opts.gemini,
+              timeoutMs: config.llmTimeoutMs,
+            },
+          );
+        } catch {
+          secondDecision = null;
+        }
+
+        if (secondDecision) {
+          const isSnippetOnly =
+            (item.kind === "snippet" || item.kind === "short") &&
+            !candidate.workflow.steps.some(
+              (s) => s.action === "click" || s.action === "submit",
+            );
+          effectiveRisky = isSnippetOnly ? false : secondDecision.risky;
+          verdict = effectiveRisky ? "do_not_automate" : secondDecision.level;
+          if (item.kind !== "short" && secondDecision.name) {
+            title = secondDecision.name;
           }
         }
       }
 
       if (item.kind === "workflow" || verdict !== item.baseFinding?.verdict) {
-        const reasons = buildWorkflowWhy(verdict, candidate, llmDecision);
+        const effectiveDecision =
+          secondDecision !== null
+            ? {
+                risky: effectiveRisky,
+                name: secondDecision.name ?? title,
+              }
+            : null;
+        const reasons = buildWorkflowWhy(verdict, candidate, effectiveDecision);
         why = reasons.why;
         whyNotNext = reasons.whyNotNext;
       }
@@ -866,25 +799,53 @@ export async function runPipeline(
     };
 
     if (verdict === "rung1" || verdict === "rung2") {
-      const solution = buildSolutionText(
-        verdict,
-        candidate.workflow,
-        item.snippetText,
-      );
-      if (solution && opts.llm) {
+      let matchedLibrary = false;
+
+      if (item.kind === "workflow" && opts.dataDir !== undefined) {
         try {
-          const script = await implementFn(solution, { name: finding.title });
-          scriptStore.set(finding.id, script);
-          finding = {
-            ...finding,
-            artifact: {
-              kind: "text",
-              path: `/script/${finding.id}`,
-              verified: false,
-            },
-          };
+          const match = await matchLibrary(candidate.workflow, {
+            dataDir: opts.dataDir,
+          });
+          if (match.kind === "match" && match.entry?.script) {
+            scriptStore.set(finding.id, match.entry.script);
+            const matchedNote = `Matched saved automation ${match.entry.name}`;
+            finding = {
+              ...finding,
+              why: finding.why ? `${finding.why} ${matchedNote}.` : `${matchedNote}.`,
+              artifact: {
+                kind: "text",
+                path: `/script/${finding.id}`,
+                verified: false,
+              },
+            };
+            matchedLibrary = true;
+          }
         } catch {
-          // Keep non-script artifact / no script if implementor fails
+          // Fall back to implementor if library cannot be read
+        }
+      }
+
+      if (!matchedLibrary) {
+        const solution = buildSolutionText(
+          verdict,
+          candidate.workflow,
+          item.snippetText,
+        );
+        if (solution && opts.llm) {
+          try {
+            const script = await implementFn(solution, { name: finding.title });
+            scriptStore.set(finding.id, script);
+            finding = {
+              ...finding,
+              artifact: {
+                kind: "text",
+                path: `/script/${finding.id}`,
+                verified: false,
+              },
+            };
+          } catch {
+            // Keep non-script artifact / no script if implementor fails
+          }
         }
       }
     }

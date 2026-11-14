@@ -20,7 +20,12 @@ export type Candidate = {
   stability: number;
 };
 
-export type SecondLevel = "rung0" | "rung1" | "rung2" | "do_not_automate";
+export type SecondLevel =
+  | "rung0"
+  | "rung1"
+  | "rung2"
+  | "rung3"
+  | "do_not_automate";
 
 export type WorkflowDigestStep = {
   action: Step["action"];
@@ -43,6 +48,7 @@ export type SecondDecision = {
   risky: boolean;
   confidence: number;
   source: "iris" | "gemini";
+  name?: string;
 };
 
 export const DEFAULT_SECOND_TIMEOUT_MS = 8000;
@@ -50,7 +56,7 @@ export const DEFAULT_SECOND_TIMEOUT_MS = 8000;
 export type DecideSecondOptions = {
   iris?: IrisClient;
   irisOptions?: IrisClientOptions;
-  gemini?: GeminiClient;
+  gemini?: GeminiClient | GeminiClientOptions;
   geminiOptions?: GeminiClientOptions;
   sdk?: GeminiSdk;
   timeoutMs?: number;
@@ -60,14 +66,36 @@ const SecondLevelSchema = z.enum([
   "rung0",
   "rung1",
   "rung2",
+  "rung3",
   "do_not_automate",
 ]);
 
-export const SecondOutputSchema = z.object({
-  level: SecondLevelSchema,
-  risky: z.boolean(),
-  confidence: z.number().min(0).max(1),
-});
+export const SecondOutputSchema = z
+  .object({
+    level: SecondLevelSchema.optional(),
+    verdict: SecondLevelSchema.optional(),
+    risky: z.boolean(),
+    confidence: z.number().min(0).max(1),
+    name: z.string().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (!val.level && !val.verdict) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["level"],
+        message: "Expected level or verdict",
+      });
+    }
+  })
+  .transform((val) => {
+    const trimmedName = val.name?.trim();
+    return {
+      level: (val.level ?? val.verdict)!,
+      risky: val.risky,
+      confidence: val.confidence,
+      ...(trimmedName ? { name: trimmedName } : {}),
+    };
+  });
 
 const SECOND_IRIS_QUESTIONS: IrisQuestions = {
   level: {
@@ -76,10 +104,12 @@ const SECOND_IRIS_QUESTIONS: IrisQuestions = {
       "Classify the automation rung for this sanitized workflow digest.",
     criteria: {
       rung0:
-        "Simple repetitive snippet insertion or deterministic copy-paste.",
+        "Below automation threshold; not repeated or valuable enough yet.",
       rung1:
-        "Deterministic multi-step UI macro with stable locators and clear parameters.",
+        "Simple repetitive text snippet insertion or deterministic copy-paste.",
       rung2:
+        "Deterministic multi-step UI macro with stable locators and clear parameters.",
+      rung3:
         "Variable or multi-branch workflow suited for adaptive browser automation.",
       do_not_automate:
         "Unsafe, unstable, low-value, or unsuitable for automation.",
@@ -88,16 +118,16 @@ const SECOND_IRIS_QUESTIONS: IrisQuestions = {
   risky: {
     type: "choice",
     instructions:
-      "Does automating this workflow pose notable security, privacy, or operational risk?",
+      "Can automating this task cause harm that cannot be undone or affect other people?",
     criteria: {
-      yes: "Involves sensitive actions, destructive submits, auth/payment flows, or high error risk.",
-      no: "Low-risk routine workflow with bounded, predictable actions.",
+      yes: "Sending or publishing a message, paying, deleting, transferring, or submitting a form for someone else.",
+      no: "Does not cause irreversible harm or affect other people. Fragile or ambiguous workflows lower confidence instead.",
     },
   },
   confidence: {
     type: "score",
     instructions:
-      "Rate confidence in the rung classification and risk assessment.",
+      "Rate confidence in the rung classification; lower confidence if the workflow looks fragile or ambiguous.",
     criteria: ["low", "medium", "high"],
   },
 };
@@ -198,28 +228,45 @@ function parseIrisAnswers(
 function buildGeminiPrompt(digest: WorkflowDigest): string {
   return [
     "Evaluate this sanitized workflow digest for automation suitability.",
-    'Return JSON matching: {"level":"rung0"|"rung1"|"rung2"|"do_not_automate","risky":boolean,"confidence":number}.',
-    "Confidence must be a number in [0, 1].",
+    'Return JSON matching: {"level":"rung0"|"rung1"|"rung2"|"rung3"|"do_not_automate","risky":boolean,"confidence":number,"name":string}.',
+    "Confidence must be a number in [0, 1]. Name should be a short human-readable title.",
     "",
     "Rung definitions:",
-    "- rung0: simple repetitive snippet insertion or deterministic copy-paste",
-    "- rung1: deterministic multi-step UI macro with stable locators and clear parameters",
-    "- rung2: variable or multi-branch workflow suited for adaptive browser automation",
-    "- do_not_automate: unsafe, unstable, low-value, or unsuitable for automation",
+    "- rung0: below automation threshold (not repeated or valuable enough yet)",
+    "- rung1: simple repetitive snippet insertion or deterministic copy-paste",
+    "- rung2: deterministic multi-step UI macro with stable locators and clear parameters",
+    "- rung3: variable or multi-branch workflow suited for adaptive browser automation",
+    "- do_not_automate: unsafe, unstable, or unsuitable for automation",
+    "",
+    "Risky rule:",
+    "- Set risky=true ONLY if the task can cause harm that cannot be undone or affects other people: sending or publishing a message, paying, deleting, transferring, or submitting a form for someone else.",
+    "- If the workflow looks fragile or ambiguous, lower confidence instead of setting risky=true.",
     "",
     "Workflow digest:",
     JSON.stringify(digest),
   ].join("\n");
 }
 
+function isGeminiClient(
+  value: GeminiClient | GeminiClientOptions,
+): value is GeminiClient {
+  return (
+    typeof (value as GeminiClient).generateJson === "function" &&
+    typeof (value as GeminiClient).generateText === "function"
+  );
+}
+
 function resolveGeminiClient(opts?: DecideSecondOptions): GeminiClient {
-  if (opts?.gemini) {
+  if (opts?.gemini && isGeminiClient(opts.gemini)) {
     return opts.gemini;
   }
-  const geminiOptions: GeminiClientOptions | undefined = opts?.geminiOptions
-    ? opts.sdk && !opts.geminiOptions.sdk
-      ? { ...opts.geminiOptions, sdk: opts.sdk }
-      : opts.geminiOptions
+  const geminiFromOpt =
+    opts?.gemini && !isGeminiClient(opts.gemini) ? opts.gemini : undefined;
+  const baseOptions = geminiFromOpt ?? opts?.geminiOptions;
+  const geminiOptions: GeminiClientOptions | undefined = baseOptions
+    ? opts?.sdk && !baseOptions.sdk
+      ? { ...baseOptions, sdk: opts.sdk }
+      : baseOptions
     : opts?.sdk
       ? { sdk: opts.sdk }
       : undefined;
@@ -258,6 +305,7 @@ async function evaluateWithFallback(
       risky: parsed.risky,
       confidence: clamp01(parsed.confidence),
       source: "gemini",
+      ...(parsed.name ? { name: parsed.name } : {}),
     };
   } catch {
     return null;

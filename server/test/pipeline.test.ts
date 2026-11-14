@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -10,9 +10,11 @@ import { EventSchema, ReportSchema } from "@gen/shared/schema.ts";
 import { createServer } from "../src/app.ts";
 import { normalize } from "../src/detect/normalize.ts";
 import type { ActionScript } from "../src/hands/types.ts";
+import type { LibraryEntry } from "../src/library.ts";
 import type { GeminiSdk } from "../src/llm/gemini.ts";
 import {
   DEFAULT_PIPELINE_CONFIG,
+  describeCandidate,
   filterNoisySteps,
   runPipeline,
 } from "../src/pipeline.ts";
@@ -277,6 +279,227 @@ describe("pipeline unit & config tests", () => {
     expect(implement).toHaveBeenCalledTimes(1);
     expect(capturedSolution).toContain("{erp_order_id}");
     expect(capturedSolution).toContain('testid="lookup-btn"');
+  });
+
+  it("reply-x3 with a fake model that returns risky=true -> still a snippet (rung1)", async () => {
+    const replyEvents = await loadFixtureEvents("reply-x3.jsonl");
+    const steps = normalize(replyEvents);
+
+    const generateContent = vi.fn<GeminiSdk["models"]["generateContent"]>(
+      async () => ({
+        text: JSON.stringify({
+          level: "rung1",
+          risky: true,
+          confidence: 0.9,
+        }),
+      }),
+    );
+    const implement = vi.fn(async (_solution: string, opts?: { name?: string }) =>
+      makeFakeActionScript(opts?.name),
+    );
+
+    const findings = await runPipeline(steps, {
+      llm: true,
+      events: replyEvents,
+      gemini: { sdk: { models: { generateContent } } },
+      implement,
+    });
+
+    expect(generateContent).toHaveBeenCalledTimes(1);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].verdict).toBe("rung1");
+    expect(findings[0].title).toBe(
+      'Insert reply: "Hi, thanks for your order. It ships Frid..."',
+    );
+  });
+
+  it("dispute-x3 -> do_not_automate (safety list), with and without the model", async () => {
+    const disputeEvents = await loadFixtureEvents("dispute-x3.jsonl");
+    const steps = normalize(disputeEvents);
+
+    const generateContent = vi.fn<GeminiSdk["models"]["generateContent"]>(
+      async () => ({
+        text: JSON.stringify({
+          level: "rung2",
+          risky: false,
+          confidence: 0.99,
+          name: "Reply to disputes",
+        }),
+      }),
+    );
+    const implement = vi.fn(async () => makeFakeActionScript());
+
+    const withModel = await runPipeline(steps, {
+      llm: true,
+      events: disputeEvents,
+      gemini: { sdk: { models: { generateContent } } },
+      implement,
+    });
+    expect(withModel).toHaveLength(1);
+    expect(withModel[0].verdict).toBe("do_not_automate");
+    expect(withModel[0].why.toLowerCase()).toContain("send");
+    expect(generateContent).not.toHaveBeenCalled();
+    expect(implement).not.toHaveBeenCalled();
+
+    const withoutModel = await runPipeline(steps, {
+      llm: false,
+      events: disputeEvents,
+      implement,
+    });
+    expect(withoutModel).toHaveLength(1);
+    expect(withoutModel[0].verdict).toBe("do_not_automate");
+    expect(withoutModel[0].why.toLowerCase()).toContain("send");
+    expect(implement).not.toHaveBeenCalled();
+  });
+
+  it("a fake second layer that throws -> stats result kept", async () => {
+    const replyEvents = await loadFixtureEvents("reply-x3.jsonl");
+    const steps = normalize(replyEvents);
+
+    const throwingSecondLayer = vi.fn(async () => {
+      throw new Error("Second layer crashed");
+    });
+
+    const findings = await runPipeline(steps, {
+      llm: true,
+      events: replyEvents,
+      decideSecond: throwingSecondLayer,
+      implement: vi.fn(async (_s: string, opts?: { name?: string }) =>
+        makeFakeActionScript(opts?.name),
+      ),
+    });
+
+    expect(throwingSecondLayer).toHaveBeenCalledTimes(1);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].verdict).toBe("rung1");
+  });
+
+  it("a library file in a temp dataDir that matches invoice-x9 -> finding uses the library script, implement is not called", async () => {
+    const invoiceEvents = await loadFixtureEvents("invoice-x9.jsonl");
+    const steps = normalize(invoiceEvents);
+
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "gen-pipeline-lib-"));
+    try {
+      const savedScript: ActionScript = {
+        name: "Saved Invoice Copier",
+        steps: [
+          {
+            action: "click",
+            target: { kind: "testid", value: "save-btn" },
+          },
+        ],
+      };
+      const entry: LibraryEntry = {
+        id: "lib-invoice-x9",
+        signature: {
+          host: "portal.local->erp.local",
+          steps: [
+            "copy:testid",
+            "copy:testid",
+            "copy:testid",
+            "copy:testid",
+            "paste:testid",
+            "paste:testid",
+            "paste:testid",
+            "paste:testid",
+            "click:testid",
+          ],
+        },
+        name: "Invoice Portal to ERP",
+        solution: "Copy 4 invoice fields from portal.local to erp.local and click Save.",
+        script: savedScript,
+      };
+      await writeFile(
+        path.join(tempDir, "library.json"),
+        JSON.stringify([entry]),
+        "utf8",
+      );
+
+      const scriptStore = new Map<string, ActionScript>();
+      const implement = vi.fn(async () => makeFakeActionScript("Should not be called"));
+
+      const findings = await runPipeline(steps, {
+        llm: true,
+        events: invoiceEvents,
+        dataDir: tempDir,
+        scriptStore,
+        implement,
+      });
+
+      expect(implement).not.toHaveBeenCalled();
+      expect(findings).toHaveLength(1);
+      expect(findings[0].verdict).toBe("rung2");
+      expect(findings[0].title).toMatch(/^Copy 4 fields from/);
+      expect(findings[0].why).toContain(
+        "Matched saved automation Invoice Portal to ERP",
+      );
+      expect(findings[0].artifact).toEqual({
+        kind: "text",
+        path: `/script/${findings[0].id}`,
+        verified: false,
+      });
+      expect(scriptStore.get(findings[0].id)).toEqual(savedScript);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("invoice-x9 title starts with 'Copy 4 fields from' and describeCandidate formats deterministic titles", async () => {
+    const invoiceEvents = await loadFixtureEvents("invoice-x9.jsonl");
+    const steps = normalize(invoiceEvents);
+
+    const findings = await runPipeline(steps, {
+      llm: false,
+      events: invoiceEvents,
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].title).toMatch(/^Copy 4 fields from/);
+    expect(findings[0].title).toBe("Copy 4 fields from portal.local to erp.local");
+
+    expect(
+      describeCandidate({
+        workflow: {
+          id: "wf-clicks",
+          name: "sheets.local workflow (3 steps)",
+          sourceApp: "sheets.local",
+          destApp: "sheets.local",
+          steps: [
+            { action: "click", target: [{ kind: "css", value: "td.a" }] },
+            { action: "click", target: [{ kind: "css", value: "td.b" }] },
+            { action: "click", target: [{ kind: "css", value: "td.c" }] },
+          ],
+          params: [],
+          instances: [],
+        },
+        repetitions: 4,
+        minutesPerWeek: 2,
+        stability: 1,
+      }),
+    ).toBe("Click 3 items on sheets.local");
+
+    expect(
+      describeCandidate({
+        workflow: {
+          id: "snip-1",
+          name: "Save a snippet",
+          sourceApp: "mail.local",
+          destApp: "mail.local",
+          steps: [
+            {
+              action: "fill",
+              value:
+                "Hi, thanks for your order. It ships Friday and tracking will follow shortly.",
+            },
+          ],
+          params: [],
+          instances: [],
+        },
+        repetitions: 3,
+        minutesPerWeek: 1,
+        stability: 0.9,
+      }),
+    ).toBe('Insert reply: "Hi, thanks for your order. It ships Frid..."');
   });
 });
 
