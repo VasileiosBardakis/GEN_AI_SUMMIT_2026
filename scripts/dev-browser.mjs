@@ -41,6 +41,11 @@ const openPanel = !flag("no-panel");
 const debugPort = arg("debug-port", process.env.DEV_DEBUG_PORT || "");
 
 fs.mkdirSync(profileDir, { recursive: true });
+// Clear Chrome's cached MV3 Service Worker so unpacked extension changes in dist/background.js always load fresh.
+const swCacheDir = path.join(profileDir, "Default", "Service Worker");
+if (fs.existsSync(swCacheDir)) {
+  fs.rmSync(swCacheDir, { recursive: true, force: true });
+}
 
 const executablePath = await resolveChromeExecutable();
 

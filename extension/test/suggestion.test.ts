@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSuggestionEngine, trigramJaccard } from "../src/suggestion.ts";
+import { buildDeciderSuggestion, createSuggestionEngine, trigramJaccard } from "../src/suggestion.ts";
 
 const REPLY_A =
   "Hi, thanks for your order. It ships Friday and tracking will follow shortly.";
@@ -115,5 +115,29 @@ describe("createSuggestionEngine", () => {
     expect(engine.recordClick("button:testid:submit", "Submit", 2_100)).toBeNull();
     expect(engine.recordClick("button:testid:copy", "Copy", 2_200)).toBeNull();
     expect(engine.recordClick("button:testid:copy", "Copy", 2_400)).not.toBeNull();
+  });
+
+  it("builds a decider suggestion from a planner solution and action script", () => {
+    const suggestion = buildDeciderSuggestion({
+      name: "Search current page",
+      solution: "Type 'quarterly report' into the search box.",
+      script: {
+        name: "Search current page",
+        steps: [
+          {
+            action: "fill",
+            target: { kind: "css", value: "input[type='search']" },
+            value: "quarterly report",
+          },
+        ],
+      },
+    });
+
+    expect(suggestion.kind).toBe("click");
+    expect(suggestion.headline).toBe("Search current page");
+    expect(suggestion.detail).toContain("quarterly report");
+    expect(suggestion.meta).toBe("1 step · Ready to run");
+    expect(suggestion.flows.user.map((n) => n.kind)).toEqual(["input", "loop"]);
+    expect(suggestion.flows.proposed.map((n) => n.kind)).toEqual(["ai", "done"]);
   });
 });
