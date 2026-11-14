@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { implementSolution } from "../../src/hands/implementor.ts";
 import { ACTION_SCRIPT_RESPONSE_SCHEMA, parseActionScript } from "../../src/hands/types.ts";
+import type { GeminiSdk } from "../../src/llm/gemini.ts";
 
 describe("Stage 1: parseActionScript & ACTION_SCRIPT_RESPONSE_SCHEMA", () => {
   it("parses a targetless insertText action script", () => {
@@ -79,6 +80,15 @@ describe("Stage 1: parseActionScript & ACTION_SCRIPT_RESPONSE_SCHEMA", () => {
 });
 
 describe("Stage 2: implementSolution", () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    for (const key of ["GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"]) {
+      if (originalEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
+  });
+
   it("passes prompt, systemInstruction, and responseSchema to generator and parses JSON string output", async () => {
     let capturedPrompt = "";
     let capturedSystem = "";
@@ -109,8 +119,49 @@ describe("Stage 2: implementSolution", () => {
     });
   });
 
-  it("rejects empty solution text and invalid JSON from generator", async () => {
+  it("wires into createGeminiClient by default and validates returned ActionScript", async () => {
+    const generateContent = vi.fn<GeminiSdk["models"]["generateContent"]>(async () => ({
+      text: JSON.stringify({
+        steps: [{ action: "insertText", value: "Thanks, shipping Friday." }],
+      }),
+    }));
+    const sdk: GeminiSdk = { models: { generateContent } };
+
+    const script = await implementSolution("Insert 'Thanks, shipping Friday.' into the reply box", {
+      name: "Shipping reply",
+      gemini: { sdk },
+    });
+
+    expect(generateContent).toHaveBeenCalledTimes(1);
+    const callArg = generateContent.mock.calls[0]?.[0];
+    expect(callArg?.config).toEqual({ responseMimeType: "application/json" });
+    expect(callArg?.contents).toContain("You are the Implementor.");
+    expect(callArg?.contents).toContain('"required":["steps"]');
+    expect(callArg?.contents).toContain("Insert 'Thanks, shipping Friday.' into the reply box");
+    expect(script).toEqual({
+      name: "Shipping reply",
+      steps: [{ action: "insertText", value: "Thanks, shipping Friday." }],
+    });
+  });
+
+  it("rejects empty solution text, missing credentials, and invalid Gemini outputs", async () => {
     await expect(implementSolution("   ")).rejects.toThrow(/non-empty/);
+
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_GENAI_USE_VERTEXAI;
+    await expect(implementSolution("Click reply")).rejects.toThrow(/Missing Gemini credentials/);
+
+    const badSdk: GeminiSdk = {
+      models: {
+        generateContent: async () => ({
+          text: JSON.stringify({ steps: [{ action: "unknown" }] }),
+        }),
+      },
+    };
+    await expect(implementSolution("Click reply", { gemini: { sdk: badSdk } })).rejects.toThrow(
+      /schema validation/i,
+    );
+
     await expect(
       implementSolution("Click reply", {
         generate: async () => "not-json",

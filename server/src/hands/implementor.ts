@@ -1,4 +1,9 @@
 import {
+  createGeminiClient,
+  type GeminiClientOptions,
+  type ZodLikeSchema,
+} from "../llm/gemini.ts";
+import {
   ACTION_SCRIPT_RESPONSE_SCHEMA,
   parseActionScript,
   type ActionScript,
@@ -15,6 +20,7 @@ export type ImplementorGenerator = (input: ImplementorGeneratorInput) => Promise
 export type ImplementorOptions = {
   name?: string;
   generate?: ImplementorGenerator;
+  gemini?: GeminiClientOptions;
 };
 
 export const IMPLEMENTOR_SYSTEM_INSTRUCTION = `You are the Implementor. You convert a plain-text solution from the Planner into an executable browser ActionScript JSON for Hands.
@@ -61,9 +67,33 @@ function unwrapJson(raw: unknown): unknown {
   }
 }
 
-const unconfiguredGenerator: ImplementorGenerator = async () => {
-  throw new Error("Gemini generator is not wired yet; pass { generate } to implementSolution");
+const ActionScriptZodSchema: ZodLikeSchema<ActionScript> = {
+  safeParse(data: unknown) {
+    try {
+      return { success: true, data: parseActionScript(data) };
+    } catch (err) {
+      return {
+        success: false,
+        error: { message: err instanceof Error ? err.message : String(err) },
+      };
+    }
+  },
 };
+
+function createGeminiGenerator(geminiOpts?: GeminiClientOptions): ImplementorGenerator {
+  return async ({ systemInstruction, prompt, responseSchema }) => {
+    const gemini = createGeminiClient(geminiOpts);
+    const fullPrompt = [
+      systemInstruction,
+      "",
+      "Output JSON strictly matching this JSON Schema:",
+      JSON.stringify(responseSchema),
+      "",
+      prompt,
+    ].join("\n");
+    return gemini.generateJson(fullPrompt, ActionScriptZodSchema);
+  };
+}
 
 export async function implementSolution(
   solutionText: string,
@@ -73,7 +103,7 @@ export async function implementSolution(
     throw new Error("solutionText must be a non-empty string");
   }
 
-  const generate = opts.generate ?? unconfiguredGenerator;
+  const generate = opts.generate ?? createGeminiGenerator(opts.gemini);
   const raw = await generate({
     systemInstruction: IMPLEMENTOR_SYSTEM_INSTRUCTION,
     prompt: buildImplementorPrompt(solutionText, opts.name),
