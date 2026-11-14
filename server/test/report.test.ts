@@ -61,7 +61,7 @@ describe("GET /report HTTP integration", () => {
     await rm(tracesDir, { recursive: true, force: true });
   });
 
-  it("returns 1 rung1 finding for GET /report?session=sess_reply_x3 and GET /report (latestSession fallback)", async () => {
+  it("returns 1 rung1 finding for GET /report?session=sess_reply_x3 after POSTing reply-x3.jsonl", async () => {
     const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
 
     const postRes = await fetch(`${baseUrl}/events`, {
@@ -81,13 +81,26 @@ describe("GET /report HTTP integration", () => {
     expect(bySessionReport.findings).toHaveLength(1);
     expect(bySessionReport.findings[0].verdict).toBe("rung1");
     expect(bySessionReport.findings[0].stats.repetitions).toBe(3);
+  });
+
+  it("falls back to latestSession for GET /report without ?session= after POSTing reply-x3.jsonl", async () => {
+    const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+
+    const postRes = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(replyX3Events),
+    });
+    expect(postRes.status).toBe(200);
 
     const latestRes = await fetch(`${baseUrl}/report`);
     expect(latestRes.status).toBe(200);
     const latestReport = (await latestRes.json()) as Report;
     expect(ReportSchema.parse(latestReport)).toEqual(latestReport);
     expect(latestReport.session).toBe("sess_reply_x3");
-    expect(latestReport.findings).toEqual(bySessionReport.findings);
+    expect(latestReport.findings).toHaveLength(1);
+    expect(latestReport.findings[0].verdict).toBe("rung1");
+    expect(latestReport.findings[0].stats.repetitions).toBe(3);
   });
 
   it("returns findings: [] for GET /report?session=sess_one_off after POSTing one-off.jsonl", async () => {
