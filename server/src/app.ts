@@ -189,8 +189,10 @@ export function createServer(opts: CreateServerOptions): http.Server {
       const resolve = nextPollResolver;
       nextPollResolver = null;
       resolve(cmd);
-    } else {
+    } else if (cmd.kind === "decide") {
       commandQueue.push(cmd);
+    } else {
+      commandQueue.unshift(cmd);
     }
   }
 
@@ -294,7 +296,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
             `[server] library recall run id=${entry.id} ok=${runRes.ok}${runRes.error ? ` err=${runRes.error}` : ""}`,
           );
         });
-      } else {
+      } else if (activeLibraryDecide?.commandId === commandId) {
         recallMatcher.suppressOnTarget(entry.id, targetKey, 10_000);
       }
     } finally {
@@ -517,7 +519,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
           const matched = recallMatcher.matchEventsWithEvent(events, entries);
           if (matched) {
             if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
-              cancelCommand(activeLibraryDecide.commandId, "Superseded");
+              if (commandQueue.some((c) => c.id === activeLibraryDecide!.commandId)) {
+                cancelCommand(activeLibraryDecide.commandId, "Superseded");
+              }
               activeLibraryDecide = null;
             }
             if (!activeLibraryDecide) {
