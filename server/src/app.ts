@@ -1,4 +1,5 @@
 import http from "node:http";
+import { ReportSchema } from "@gen/shared/schema.ts";
 import { buildReport } from "./report.ts";
 import { appendEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
@@ -47,7 +48,12 @@ export function createServer(opts: { tracesDir: string }): http.Server {
       if (req.method === "GET" && url.pathname === "/report") {
         const sessionParam = url.searchParams.get("session");
         const session = sessionParam && sessionParam.length > 0 ? sessionParam : latestSession;
-        sendJson(res, 200, buildReport(session));
+        const parsed = ReportSchema.safeParse(buildReport(session));
+        if (!parsed.success) {
+          sendJson(res, 500, { ok: false, error: parsed.error.message });
+          return;
+        }
+        sendJson(res, 200, parsed.data);
         return;
       }
 
