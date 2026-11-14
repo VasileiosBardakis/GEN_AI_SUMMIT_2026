@@ -1,44 +1,35 @@
 import type { Event, Finding, Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
-import { writeSnippetArtifact } from "./artifacts.ts";
 import { normalize } from "./detect/normalize.ts";
-import { detectSharedEdgesWithText } from "./detect/shared-edges.ts";
-import { detectShortValues } from "./detect/short-values.ts";
-import { detectSnippetsWithText } from "./detect/snippet.ts";
+import type { ActionScript } from "./hands/types.ts";
+import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
+import { runPipeline } from "./pipeline.ts";
 
 export interface BuildReportOptions {
   dataDir?: string;
+  llm?: boolean;
+  gemini?: GeminiClient | GeminiClientOptions;
+  implement?: (solution: string, opts?: { name?: string }) => Promise<ActionScript>;
+  scriptStore?: Map<string, ActionScript>;
 }
 
-export function buildReport(
+export async function buildReport(
   session: string,
   events: Event[] = [],
   opts?: string | BuildReportOptions,
-): Report {
-  const dataDir = typeof opts === "string" ? opts : opts?.dataDir;
+): Promise<Report> {
+  const options: BuildReportOptions =
+    typeof opts === "string" ? { dataDir: opts } : (opts ?? {});
   const steps = normalize(events);
-  const detected = [
-    ...detectSnippetsWithText(steps),
-    ...detectSharedEdgesWithText(steps),
-  ];
-  const seenIds = new Set<string>();
-  const findings: Finding[] = [];
-  for (const { finding, text } of detected) {
-    if (!seenIds.has(finding.id)) {
-      seenIds.add(finding.id);
-      findings.push(
-        dataDir !== undefined
-          ? writeSnippetArtifact(dataDir, finding, text)
-          : finding,
-      );
-    }
-  }
-  for (const finding of detectShortValues(steps, events)) {
-    if (!seenIds.has(finding.id)) {
-      seenIds.add(finding.id);
-      findings.push(finding);
-    }
-  }
+  const findings = await runPipeline(steps, {
+    llm: options.llm ?? true,
+    events,
+    gemini: options.gemini,
+    implement: options.implement,
+    dataDir: options.dataDir,
+    scriptStore: options.scriptStore,
+  });
+
   return ReportSchema.parse({
     generatedAt: Date.now(),
     session,
@@ -46,31 +37,26 @@ export function buildReport(
   });
 }
 
-export function buildCombinedReport(
+export async function buildCombinedReport(
   sessionEvents: Event[][],
   opts?: string | BuildReportOptions,
-): Report {
-  const dataDir = typeof opts === "string" ? opts : opts?.dataDir;
+): Promise<Report> {
+  const options: BuildReportOptions =
+    typeof opts === "string" ? { dataDir: opts } : (opts ?? {});
   const seenIds = new Set<string>();
   const findings: Finding[] = [];
 
   for (const events of sessionEvents) {
     const steps = normalize(events);
-    const detected = [
-      ...detectSnippetsWithText(steps),
-      ...detectSharedEdgesWithText(steps),
-    ];
-    for (const { finding, text } of detected) {
-      if (!seenIds.has(finding.id)) {
-        seenIds.add(finding.id);
-        findings.push(
-          dataDir !== undefined
-            ? writeSnippetArtifact(dataDir, finding, text)
-            : finding,
-        );
-      }
-    }
-    for (const finding of detectShortValues(steps, events)) {
+    const sessionFindings = await runPipeline(steps, {
+      llm: options.llm ?? true,
+      events,
+      gemini: options.gemini,
+      implement: options.implement,
+      dataDir: options.dataDir,
+      scriptStore: options.scriptStore,
+    });
+    for (const finding of sessionFindings) {
       if (!seenIds.has(finding.id)) {
         seenIds.add(finding.id);
         findings.push(finding);
@@ -84,4 +70,3 @@ export function buildCombinedReport(
     findings,
   });
 }
-

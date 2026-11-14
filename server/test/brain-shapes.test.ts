@@ -681,12 +681,12 @@ describe("Brain shapes: buildReport(session, events)", () => {
     },
   ])(
     "produces schema-valid Report for $label",
-    ({ session, events, expectedFindings }) => {
+    async ({ session, events, expectedFindings }) => {
       const before = Date.now();
       const report =
         events === undefined
-          ? buildReport(session)
-          : buildReport(session, events);
+          ? await buildReport(session)
+          : await buildReport(session, events);
       const after = Date.now();
 
       assertValidReportShape(report);
@@ -716,7 +716,7 @@ describe("Brain shapes: buildReport(session, events)", () => {
     "produces schema-valid Report from fixture $fixture",
     async ({ fixture, session, expectedFindings }) => {
       const events = await loadFixtureEvents(fixture);
-      const report = buildReport(session, events);
+      const report = await buildReport(session, events);
 
       assertValidReportShape(report);
       expect(report.session).toBe(session);

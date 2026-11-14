@@ -105,30 +105,37 @@ describe("signoff-x4.jsonl fixture & detectSharedEdges", () => {
     );
 
     try {
-      const report = buildReport("sess_signoff_x4", events, {
+      const report = await buildReport("sess_signoff_x4", events, {
         dataDir: tempDir,
       });
       expect(ReportSchema.parse(report)).toEqual(report);
       expect(report.session).toBe("sess_signoff_x4");
-      expect(report.findings).toHaveLength(1);
-      expect(report.findings[0].verdict).toBe("rung1");
-      expect(report.findings[0].stats.repetitions).toBe(4);
-      expect(report.findings[0].artifact?.verified).toBe(true);
+      const rung1Findings = report.findings.filter((f) => f.verdict === "rung1");
+      expect(rung1Findings).toHaveLength(1);
+      expect(
+        report.findings.every(
+          (f) => f.verdict === "rung1" || f.verdict === "do_not_automate",
+        ),
+      ).toBe(true);
+      const [rung1] = rung1Findings;
+      expect(rung1.stats.repetitions).toBe(4);
+      expect(rung1.artifact?.verified).toBe(true);
 
       const artifact = await readSnippetArtifact(
         tempDir,
-        report.findings[0].id,
+        rung1.id,
       );
       expect(artifact).toEqual({
-        id: report.findings[0].id,
+        id: rung1.id,
         kind: "snippet",
         text: EXPECTED_SIGNOFF,
       });
 
-      const combined = buildCombinedReport([events], { dataDir: tempDir });
+      const combined = await buildCombinedReport([events], { dataDir: tempDir });
       expect(ReportSchema.parse(combined)).toEqual(combined);
-      expect(combined.findings).toHaveLength(1);
-      expect(combined.findings[0].id).toBe(report.findings[0].id);
+      const combinedRung1 = combined.findings.filter((f) => f.verdict === "rung1");
+      expect(combinedRung1).toHaveLength(1);
+      expect(combinedRung1[0].id).toBe(rung1.id);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -145,7 +152,7 @@ describe("signoff-x4.jsonl fixture & detectSharedEdges", () => {
     ];
     expect(combinedReplyFindings).toHaveLength(1);
 
-    const replyReport = buildReport("sess_reply_x3", replyEvents);
+    const replyReport = await buildReport("sess_reply_x3", replyEvents);
     expect(replyReport.findings).toHaveLength(1);
     expect(replyReport.findings[0].stats.repetitions).toBe(3);
 
@@ -155,7 +162,7 @@ describe("signoff-x4.jsonl fixture & detectSharedEdges", () => {
       ...detectSnippets(oneOffSteps),
       ...detectSharedEdges(oneOffSteps),
     ]).toEqual([]);
-    expect(buildReport("sess_one_off", oneOffEvents).findings).toEqual([]);
+    expect((await buildReport("sess_one_off", oneOffEvents)).findings).toEqual([]);
   });
 
   it("detects shared prefix greetings (>= 20 chars across >= 3 fills on the same target locator)", () => {
