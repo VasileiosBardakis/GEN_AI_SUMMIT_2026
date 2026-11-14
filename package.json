@@ -8,7 +8,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "smoke": "playwright test --pass-with-no-tests",
-    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run smoke"
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run smoke",
+    "server": "pnpm --filter @gen/server start"
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",
