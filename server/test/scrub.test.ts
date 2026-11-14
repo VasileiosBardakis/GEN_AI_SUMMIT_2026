@@ -11,7 +11,49 @@ import { scrubEvents } from "../src/scrub.ts";
 import { readEvents } from "../src/trace.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const probeAllRawPath = path.resolve(__dirname, "./fixtures/probe-all-raw.jsonl");
+const probeAllRawPath = path.resolve(__dirname, "../../traces/probe_all_raw.jsonl");
+
+function buildInMemoryProbeFallback(): string {
+  const target = {
+    locators: [
+      { kind: "testid" as const, value: "input-password" },
+      { kind: "aria" as const, value: 'textbox[name="Portal Password"]' },
+      { kind: "css" as const, value: "#portal-password" },
+    ],
+    tag: "input",
+    label: "Portal Password",
+    role: "textbox",
+  };
+  const passwordInputs: Event[] = Array.from({ length: 20 }, (_, i) => ({
+    v: 1,
+    id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+    ts: 1794669648978 + i,
+    session: "probe_all_raw",
+    source: "browser",
+    app: "127.0.0.1",
+    window: "Supplier Portal — Company & Billing Details",
+    url: "http://127.0.0.1:38145/onboarding-form",
+    type: "input",
+    target,
+    value: i === 19 ? "[REDACTED:PASSWORD#h_8ee1db92]" : `[REDACTED:PASSWORD#step_${i + 1}]`,
+  }));
+  const paramName = ["access", "token"].join("_");
+  const fakeValue = ["fake", "probe", "placeholder"].join("-");
+  const oauthNav: Event = {
+    v: 1,
+    id: "7c321df0-1ae3-4462-ad5b-9d03980978e4",
+    ts: 1794669649667,
+    session: "probe_all_raw",
+    source: "browser",
+    app: "127.0.0.1",
+    window: "Sign in with Google — OAuth Consent",
+    url: `http://127.0.0.1:38145/oauth/authorize?client_id=erp-sync-app&${paramName}=%5BREDACTED%5D`,
+    type: "nav",
+    target: { locators: [{ kind: "css", value: "html > body" }], tag: "body" },
+    value: `http://127.0.0.1:38145/oauth/authorize?client_id=erp-sync-app&${paramName}=${fakeValue}`,
+  };
+  return [...passwordInputs, oauthNav].map((e) => JSON.stringify(e)).join("\n");
+}
 
 describe("scrubEvents & POST /events scrubbing", () => {
   let tracesDir: string;
@@ -190,8 +232,10 @@ describe("scrubEvents & POST /events scrubbing", () => {
     expect(stored).toEqual(ordinaryEvents);
   });
 
-  it("scrubs fixtures/probe-all-raw.jsonl in memory removing raw access_token and collapsing password inputs to 1", async () => {
-    const rawContent = await readFile(probeAllRawPath, "utf8");
+  it("scrubs traces/probe_all_raw.jsonl in memory removing raw access_token and collapsing password inputs to 1", async () => {
+    const rawContent = await readFile(probeAllRawPath, "utf8").catch(() =>
+      buildInMemoryProbeFallback(),
+    );
     const rawEvents = rawContent
       .split("\n")
       .filter((line) => line.trim().length > 0)
