@@ -85,6 +85,21 @@ describe("Stage 1: parseActionScript & ACTION_SCRIPT_RESPONSE_SCHEMA", () => {
     );
     expect(ACTION_SCRIPT_RESPONSE_SCHEMA.required).toContain("steps");
   });
+
+  it("includes switchTab and host in ACTION_SCRIPT_RESPONSE_SCHEMA and parses switchTab scripts", () => {
+    const stepProps = ACTION_SCRIPT_RESPONSE_SCHEMA.properties.steps.items.properties;
+    expect(stepProps.action.enum).toContain("switchTab");
+    expect(stepProps.host).toEqual({ type: "string" });
+
+    const script = parseActionScript({
+      steps: [
+        { action: "readText", target: { kind: "css", value: ".id" }, bind: "orderId" },
+        { action: "switchTab", host: "erp.local" },
+        { action: "fill", target: { kind: "css", value: 'input[name="id"]' }, value: "{{orderId}}" },
+      ],
+    });
+    expect(script.steps[1]).toEqual({ action: "switchTab", host: "erp.local" });
+  });
 });
 
 describe("Stage 2: implementSolution", () => {
