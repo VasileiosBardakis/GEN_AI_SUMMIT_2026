@@ -1,10 +1,14 @@
 import { executeStep } from "./hands/execute.js";
 import type { ActionScript, BindingValue, DomStep, Step, StepResult } from "./types.js";
 import type { Event } from "@gen/shared";
+import type { LibraryEntry } from "@gen/shared/schema.ts";
 import { sanitizeUrl } from "./privacy.ts";
+import { createSuggestionEngine, type SuggestionEngine, type TextCluster } from "./suggestion.ts";
 import {
   createDefaultOptimizations,
   LIBRARY_STORAGE_KEY,
+  libraryEntryToOptimization,
+  mergeServerAndLocalOptimizations,
   recordOptimizationRun,
   upsertOptimizationItem,
   type OptimizationItem,
@@ -42,6 +46,9 @@ interface ChromeRuntimeMessage {
   name?: string;
   solution?: string;
   context?: Record<string, unknown>;
+  value?: string;
+  scopeKey?: string;
+  appHost?: string;
 }
 
 interface ChromeTab {
@@ -165,9 +172,43 @@ const flushTimer = setInterval(() => {
 
 const chromeApi = (globalThis as Record<string, unknown>).chrome as ChromeApi | undefined;
 
-let cachedLibrary: OptimizationItem[] | null = null;
+const TEXT_CLUSTERS_STORAGE_KEY = "eyes_text_clusters_v1";
+const BROWSER_SESSION_ID = "sess_browser_" + Math.random().toString(36).slice(2, 10);
 
-async function loadLibrary(): Promise<OptimizationItem[]> {
+let cachedLibrary: OptimizationItem[] | null = null;
+const serverEntriesById = new Map<string, LibraryEntry>();
+let persistentSuggestionEngine: SuggestionEngine | null = null;
+let suggestionEngineInit: Promise<SuggestionEngine> | null = null;
+
+async function getPersistentSuggestionEngine(): Promise<SuggestionEngine> {
+  if (persistentSuggestionEngine) return persistentSuggestionEngine;
+  if (suggestionEngineInit) return suggestionEngineInit;
+  suggestionEngineInit = (async () => {
+    let initialTextClusters: TextCluster[] = [];
+    try {
+      const stored = await chromeApi?.storage?.local?.get(TEXT_CLUSTERS_STORAGE_KEY);
+      const raw = stored?.[TEXT_CLUSTERS_STORAGE_KEY];
+      if (Array.isArray(raw)) {
+        initialTextClusters = raw as TextCluster[];
+      }
+    } catch {
+      // ignore storage read error
+    }
+    persistentSuggestionEngine = createSuggestionEngine({
+      minTextLength: 6,
+      initialTextClusters,
+      onTextClustersChange: (clusters) => {
+        void chromeApi?.storage?.local
+          ?.set({ [TEXT_CLUSTERS_STORAGE_KEY]: clusters })
+          .catch(() => {});
+      },
+    });
+    return persistentSuggestionEngine;
+  })();
+  return suggestionEngineInit;
+}
+
+async function readLocalLibraryRaw(): Promise<OptimizationItem[]> {
   if (cachedLibrary) return cachedLibrary;
   try {
     const stored = await chromeApi?.storage?.local?.get(LIBRARY_STORAGE_KEY);
@@ -179,6 +220,36 @@ async function loadLibrary(): Promise<OptimizationItem[]> {
   } catch {
     // ignore storage read error
   }
+  return [];
+}
+
+async function fetchServerLibrary(): Promise<LibraryEntry[] | null> {
+  try {
+    const resp = await fetch(`${SERVER_URL}/library`);
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { ok?: boolean; items?: LibraryEntry[] };
+    if (!data.ok || !Array.isArray(data.items)) return null;
+    serverEntriesById.clear();
+    for (const entry of data.items) {
+      serverEntriesById.set(entry.id, entry);
+    }
+    return data.items;
+  } catch {
+    return null;
+  }
+}
+
+async function loadLibrary(syncServer = false): Promise<OptimizationItem[]> {
+  const localRaw = await readLocalLibraryRaw();
+  if (syncServer) {
+    const serverEntries = await fetchServerLibrary();
+    if (serverEntries !== null) {
+      const merged = mergeServerAndLocalOptimizations(serverEntries, localRaw);
+      await saveLibrary(merged);
+      return merged;
+    }
+  }
+  if (localRaw.length > 0) return localRaw;
   const defaults = createDefaultOptimizations();
   await saveLibrary(defaults);
   return defaults;
@@ -262,8 +333,21 @@ if (chromeApi?.runtime?.onMessage) {
       sendResponse({ ok: true });
       return false;
     }
+    if (msg?.kind === "EYES_RECORD_TEXT" && typeof msg.value === "string") {
+      const value = msg.value;
+      const appHost = typeof msg.appHost === "string" ? msg.appHost : "browser";
+      const scopeKey = typeof msg.scopeKey === "string" ? msg.scopeKey : "";
+      const fullScope = `${appHost}::${scopeKey}`;
+      void getPersistentSuggestionEngine()
+        .then((engine) => {
+          const suggestion = engine.recordText(value, fullScope);
+          sendResponse({ ok: true, suggestion });
+        })
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+    }
     if (msg?.kind === "EYES_GET_LIBRARY") {
-      void loadLibrary().then((items) => sendResponse({ ok: true, items }));
+      void loadLibrary(true).then((items) => sendResponse({ ok: true, items }));
       return true;
     }
     if (msg?.kind === "EYES_UPSERT_OPTIMIZATION" && msg.item) {
@@ -289,7 +373,19 @@ if (chromeApi?.runtime?.onMessage) {
           })
         )
         .then(async (resp) => {
-          const data = await resp.json().catch(() => ({ ok: resp.ok }));
+          const data = (await resp.json().catch(() => ({ ok: resp.ok }))) as {
+            ok?: boolean;
+            entry?: LibraryEntry;
+          };
+          if (data.ok && data.entry) {
+            serverEntriesById.set(data.entry.id, data.entry);
+            const items = await readLocalLibraryRaw();
+            await saveLibrary(
+              upsertOptimizationItem(items, libraryEntryToOptimization(data.entry), {
+                forceActivate: true,
+              })
+            );
+          }
           sendResponse(data);
         })
         .catch(() => {
@@ -318,26 +414,41 @@ if (chromeApi?.runtime?.onMessage) {
     }
     if (msg?.kind === "EYES_TOGGLE_OPTIMIZATION" && msg.id) {
       const targetId = msg.id;
-      void loadLibrary()
-        .then((items) =>
-          saveLibrary(
-            items.map((item) => {
-              if (item.id !== targetId) return item;
-              return {
-                ...item,
-                status: item.status === "active" ? ("paused" as const) : ("active" as const),
-              };
-            })
-          )
-        )
-        .then((items) => sendResponse({ ok: true, items }));
+      void (async () => {
+        const items = await loadLibrary();
+        let nextStatus: "active" | "paused" | undefined;
+        const updated = await saveLibrary(
+          items.map((item) => {
+            if (item.id !== targetId) return item;
+            nextStatus = item.status === "active" ? "paused" : "active";
+            return { ...item, status: nextStatus };
+          })
+        );
+        const serverEntry = serverEntriesById.get(targetId);
+        if (serverEntry && nextStatus) {
+          const synced = { ...serverEntry, status: nextStatus, updatedAt: Date.now() };
+          serverEntriesById.set(targetId, synced);
+          await fetch(`${SERVER_URL}/library`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(synced),
+          }).catch(() => {});
+        }
+        sendResponse({ ok: true, items: updated });
+      })();
       return true;
     }
     if (msg?.kind === "EYES_DISMISS_OPTIMIZATION" && msg.id) {
       const targetId = msg.id;
-      void loadLibrary()
-        .then((items) => saveLibrary(items.filter((item) => item.id !== targetId)))
-        .then((items) => sendResponse({ ok: true, items }));
+      void (async () => {
+        const items = await loadLibrary();
+        const updated = await saveLibrary(items.filter((item) => item.id !== targetId));
+        serverEntriesById.delete(targetId);
+        await fetch(`${SERVER_URL}/library/${encodeURIComponent(targetId)}`, {
+          method: "DELETE",
+        }).catch(() => {});
+        sendResponse({ ok: true, items: updated });
+      })();
       return true;
     }
     if (msg?.kind === "EYES_RUN_OPTIMIZATION" && msg.id) {
@@ -439,7 +550,7 @@ if (chromeApi?.tabs?.onActivated) {
     void (async () => {
       try {
         const tab = await tabsApi.get(activeInfo.tabId);
-        if (!tab?.url || tab.url.startsWith("chrome://")) return;
+        if (!tab?.url || !isRunnablePageUrl(tab.url)) return;
         const cleanUrl = sanitizeUrl(tab.url).url;
         const host = new URL(tab.url).hostname || "local-page";
         const prevApp = lastActiveTab?.app;
@@ -449,7 +560,7 @@ if (chromeApi?.tabs?.onActivated) {
           v: 1,
           id: uuid(),
           ts: Date.now(),
-          session: "sess_browser",
+          session: BROWSER_SESSION_ID,
           source: "browser",
           app: host,
           window: tab.title,
@@ -470,7 +581,7 @@ if (chromeApi?.tabs?.onActivated) {
 
 if (chromeApi?.tabs?.onUpdated) {
   chromeApi.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
-    if (changeInfo.status === "complete" && tab?.url && !tab.url.startsWith("chrome://")) {
+    if (changeInfo.status === "complete" && tab?.url && isRunnablePageUrl(tab.url)) {
       const cleanUrl = sanitizeUrl(tab.url).url;
       let host = "local-page";
       try {
@@ -482,7 +593,7 @@ if (chromeApi?.tabs?.onUpdated) {
         v: 1,
         id: uuid(),
         ts: Date.now(),
-        session: "sess_browser",
+        session: BROWSER_SESSION_ID,
         source: "browser",
         app: host,
         window: tab.title,

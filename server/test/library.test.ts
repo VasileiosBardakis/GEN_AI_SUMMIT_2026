@@ -300,4 +300,45 @@ describe("loadLibrary & matchLibrary", () => {
     expect(demoted).toEqual({ kind: "none", distance: 0.2 });
     expect("entry" in demoted).toBe(false);
   });
+
+  it("matches Hands LibraryEntry objects stored with eyes + script and no signature field", async () => {
+    const dataDir = await makeTempDir();
+    const handsEntry = {
+      id: "lib_hands_wf",
+      name: "Fill supplier form",
+      kind: "workflow",
+      status: "active",
+      solution: "Fill company and click save",
+      script: {
+        name: "Fill supplier form",
+        steps: [
+          { action: "fill", target: { kind: "testid", value: "company" }, value: "Acme" },
+          { action: "click", target: { kind: "testid", value: "save" } },
+        ],
+      },
+      eyes: {
+        scope: { apps: ["crm.example.com"], urlPatterns: [], pageHints: [] },
+        targetHints: { roles: [], labelContains: [], locators: [] },
+        textHints: { prefixHints: [], minCharsBeforeMatch: 2 },
+        guards: { requireClipboard: false, fieldEmptyOnly: false, minSignals: 1, cooldownMs: 5000 },
+      },
+      runCount: 1,
+      createdAt: 1000,
+      updatedAt: 1000,
+    };
+    await writeFile(path.join(dataDir, "library.json"), JSON.stringify([handsEntry]), "utf8");
+
+    const wf = makeWorkflow({
+      sourceApp: "crm.example.com",
+      destApp: "crm.example.com",
+      steps: [
+        { action: "fill", target: [{ kind: "testid", value: "company" }], value: "Globex" },
+        { action: "click", target: [{ kind: "testid", value: "save" }] },
+      ],
+    });
+    const res = await matchLibrary(wf, { dataDir });
+    expect(res.kind).toBe("match");
+    expect(res.distance).toBe(0);
+    expect(res.entry?.id).toBe("lib_hands_wf");
+  });
 });

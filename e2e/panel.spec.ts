@@ -40,7 +40,7 @@ test("extension panel displays optimization library with DESIGN.md craft and no 
     await demoPage.goto(demoServer.url, { waitUntil: "load" });
 
     const panel = await context.newPage();
-    await panel.route("http://localhost:8787/**", (route) => route.abort());
+    await context.route("http://localhost:8787/**", (route) => route.abort());
     await panel.goto(`chrome-extension://${extensionId}/dist/panel.html`, {
       waitUntil: "domcontentloaded",
     });

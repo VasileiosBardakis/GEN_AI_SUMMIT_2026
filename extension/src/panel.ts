@@ -390,13 +390,14 @@ async function handleAction(action: string, id: string): Promise<void> {
 
 async function syncServerFindings(): Promise<void> {
   try {
-    const resp = await fetch(`${SERVER_URL}/report`);
+    const resp = await fetch(`${SERVER_URL}/report?llm=0`);
     if (!resp.ok) return;
     const report = (await resp.json()) as Report;
     if (!Array.isArray(report.findings) || report.findings.length === 0) return;
 
     let changed = false;
     for (const finding of report.findings) {
+      if (finding.verdict !== "rung1" && finding.verdict !== "rung2") continue;
       const converted = findingToOptimization(finding);
       if (!converted) continue;
       const exists = allItems.some((item) => item.id === converted.id);
@@ -414,7 +415,7 @@ async function syncServerFindings(): Promise<void> {
 
 async function init(): Promise<void> {
   const res = await sendBgMessage({ kind: "EYES_GET_LIBRARY" });
-  allItems = res?.items && res.items.length > 0 ? res.items : createDefaultOptimizations();
+  allItems = res?.items ?? createDefaultOptimizations();
   render();
   void syncServerFindings();
 

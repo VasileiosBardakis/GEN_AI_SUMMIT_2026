@@ -1,5 +1,5 @@
 import type { Finding } from "@gen/shared";
-import type { EyesDetectionSpec } from "@gen/shared/schema.ts";
+import type { EyesDetectionSpec, LibraryEntry } from "@gen/shared/schema.ts";
 import type { ActionScript } from "./types.ts";
 import type { FlowNode, Suggestion } from "./suggestion.ts";
 
@@ -324,4 +324,89 @@ export function recordOptimizationRun(
       lastRunAt: now,
     };
   });
+}
+
+const DEFAULT_MOCK_IDS = new Set([
+  "opt_shipping_reply",
+  "opt_copy_invoice_erp",
+  "opt_supplier_receipt",
+  "opt_grid_gross_fill",
+]);
+
+export function libraryEntryToOptimization(entry: LibraryEntry): OptimizationItem {
+  const firstStep = entry.script.steps[0];
+  const isSnippet =
+    entry.kind === "snippet" &&
+    entry.script.steps.length === 1 &&
+    firstStep?.action === "insertText" &&
+    typeof firstStep.value === "string";
+  const snippetText = isSnippet && typeof firstStep.value === "string" ? firstStep.value : undefined;
+  const timeSavedPerRunSec = isSnippet && snippetText
+    ? Math.max(8, Math.round(snippetText.length / 4))
+    : Math.max(10, entry.script.steps.length * 6);
+  const app = entry.eyes.scope.apps[0] || "Browser";
+  const preview = snippetText
+    ? snippetText.length > 64
+      ? `${snippetText.slice(0, 64).trim()}...`
+      : snippetText
+    : entry.name;
+
+  return {
+    id: entry.id,
+    title: entry.name,
+    description: entry.description || entry.solution,
+    kind: entry.kind,
+    status: entry.status,
+    app,
+    preview,
+    ...(snippetText ? { snippetText } : {}),
+    solution: entry.solution,
+    script: entry.script,
+    eyes: entry.eyes,
+    timeSavedPerRunSec,
+    runCount: entry.runCount,
+    totalTimeSavedSec: entry.runCount * timeSavedPerRunSec,
+    createdAt: entry.createdAt,
+    lastRunAt: entry.runCount > 0 ? entry.updatedAt : undefined,
+  };
+}
+
+export function mergeServerAndLocalOptimizations(
+  serverEntries: LibraryEntry[],
+  localItems: OptimizationItem[]
+): OptimizationItem[] {
+  const localById = new Map(localItems.map((item) => [item.id, item]));
+  const serverIds = new Set<string>();
+  const merged: OptimizationItem[] = [];
+
+  for (const entry of serverEntries) {
+    serverIds.add(entry.id);
+    const base = libraryEntryToOptimization(entry);
+    const local = localById.get(entry.id);
+    if (local) {
+      const runCount = Math.max(entry.runCount, local.runCount);
+      merged.push({
+        ...base,
+        runCount,
+        totalTimeSavedSec: Math.max(
+          runCount * base.timeSavedPerRunSec,
+          local.totalTimeSavedSec
+        ),
+        lastRunAt: local.lastRunAt ?? base.lastRunAt,
+        flows: local.flows ?? base.flows,
+      });
+    } else {
+      merged.push(base);
+    }
+  }
+
+  for (const item of localItems) {
+    if (serverIds.has(item.id)) continue;
+    if (DEFAULT_MOCK_IDS.has(item.id)) continue;
+    if (item.status === "suggested") {
+      merged.push(item);
+    }
+  }
+
+  return merged;
 }

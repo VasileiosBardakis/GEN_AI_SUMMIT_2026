@@ -36,14 +36,14 @@ const bundledContent = `(() => {\n"use strict";\n${privacyCode}\n${locatorsCode}
 fs.writeFileSync(path.join(distDir, "content.js"), bundledContent, "utf8");
 
 const backgroundSource = compileTs(path.join(srcDir, "background.ts")).replace(
-  /import\s+\{[^}]*\}\s+from\s+["']\.\/(privacy|library)\.js["'];?/g,
+  /import\s+\{[^}]*\}\s+from\s+["']\.\/(privacy|library|suggestion)\.js["'];?/g,
   ""
 );
 const backgroundImports = backgroundSource.match(/^import .*;$/gm) ?? [];
 const backgroundBody = backgroundSource.replace(/^import .*;$/gm, "");
 fs.writeFileSync(
   path.join(distDir, "background.js"),
-  `${backgroundImports.join("\n")}\n${privacyCode}\n${libraryCode}\n${backgroundBody}\n`,
+  `${backgroundImports.join("\n")}\n${privacyCode}\n${suggestionCode}\n${libraryCode}\n${backgroundBody}\n`,
   "utf8"
 );
 

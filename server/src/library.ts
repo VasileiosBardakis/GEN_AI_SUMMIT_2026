@@ -134,6 +134,55 @@ export async function loadLibrary(
   }
 }
 
+function signatureFromStoredEntry(raw: unknown): WorkflowSignature | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const sig = obj.signature as Partial<WorkflowSignature> | undefined;
+  if (sig && typeof sig.host === "string" && Array.isArray(sig.steps)) {
+    return { host: sig.host, steps: sig.steps };
+  }
+  const eyes = obj.eyes as { scope?: { apps?: unknown } } | undefined;
+  const script = obj.script as ActionScript | undefined;
+  if (!script || !Array.isArray(script.steps)) return null;
+
+  const apps = Array.isArray(eyes?.scope?.apps)
+    ? eyes.scope.apps.filter((a): a is string => typeof a === "string" && a.length > 0)
+    : [];
+  const switchHosts = script.steps
+    .filter((s): s is Extract<ActionScript["steps"][number], { action: "switchTab" }> => s.action === "switchTab")
+    .map((s) => s.host);
+  const host =
+    apps.length >= 2
+      ? `${apps[0]}->${apps[apps.length - 1]}`
+      : apps.length === 1 && switchHosts.length > 0 && switchHosts[0] !== apps[0]
+        ? `${apps[0]}->${switchHosts[0]}`
+        : apps[0] || switchHosts[0] || "browser";
+
+  const steps: string[] = [];
+  for (const s of script.steps) {
+    if (s.action === "switchTab" || s.action === "wait" || s.action === "waitFor") continue;
+    if (s.action === "forEach") {
+      for (const nested of s.steps) {
+        const mapped = nested.action === "insertText" ? "fill" : nested.action === "navigate" ? "nav" : nested.action;
+        const kind = "target" in nested && nested.target ? nested.target.kind : "none";
+        steps.push(`${mapped}:${kind}`);
+      }
+      continue;
+    }
+    const mapped =
+      s.action === "insertText"
+        ? "fill"
+        : s.action === "readText" || s.action === "readValue"
+          ? "copy"
+          : s.action === "navigate"
+            ? "nav"
+            : s.action;
+    const kind = "target" in s && s.target ? s.target.kind : "none";
+    steps.push(`${mapped}:${kind}`);
+  }
+  return { host, steps };
+}
+
 export async function matchLibrary(
   workflow: Workflow,
   opts?: LibraryOptions,
@@ -151,14 +200,11 @@ export async function matchLibrary(
 
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
-    if (
-      !entry?.signature ||
-      typeof entry.signature.host !== "string" ||
-      !Array.isArray(entry.signature.steps)
-    ) {
+    const entrySig = signatureFromStoredEntry(entry);
+    if (!entrySig) {
       continue;
     }
-    const d = normalizedEditDistance(sig, entry.signature);
+    const d = normalizedEditDistance(sig, entrySig);
     if (d < bestDistance) {
       bestDistance = d;
       bestEntry = entry;

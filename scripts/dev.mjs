@@ -109,6 +109,7 @@ async function main() {
   --no-browser          Start backend, demo app, watcher, and trace tail only
   --no-watch            Do not rebuild the extension on source changes
   --no-tail             Do not print captured events from traces/
+  --reset               Clear data/library.json before starting
   --headless            Launch the dev browser headless (if supported)
   --port=8787           Backend port (the extension defaults to 8787)
   --app-port=5173       Demo app port
@@ -125,8 +126,10 @@ async function main() {
   const dataDir = path.join(rootDir, "data");
   const libraryPath = path.join(dataDir, "library.json");
   fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(libraryPath, "[]\n", "utf8");
-  console.log("[dev] cleared data/library.json");
+  if (flag("reset") || !fs.existsSync(libraryPath)) {
+    fs.writeFileSync(libraryPath, "[]\n", "utf8");
+    console.log("[dev] initialized empty data/library.json");
+  }
 
   console.log("[dev] building extension...");
   await buildExtension();
@@ -139,7 +142,7 @@ async function main() {
       env: {
         ...process.env,
         PORT: String(backendPort),
-        BRAIN_AUTO_PROPOSE: process.env.BRAIN_AUTO_PROPOSE ?? "0",
+        BRAIN_AUTO_PROPOSE: process.env.BRAIN_AUTO_PROPOSE ?? "1",
       },
     });
     serverChild.on("exit", (code) => {

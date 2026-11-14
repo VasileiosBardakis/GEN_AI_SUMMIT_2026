@@ -745,17 +745,6 @@ function autoSaveRepeatedSnippet(element: HTMLElement, suggestion: Suggestion): 
     steps: [{ action: "insertText", value: snippetText }],
   };
 
-  const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
-  activeItem.title = name;
-  activeItem.description = solution;
-  activeItem.solution = solution;
-  activeItem.script = script;
-  sendLibraryMessage({
-    kind: "EYES_ACTIVATE_OPTIMIZATION",
-    id: activeItem.id,
-    item: activeItem,
-  });
-
   const { target } = extractTarget(element);
   const locators = (target?.locators ?? [])
     .filter(
@@ -809,6 +798,30 @@ function recordCommittedText(
     target?.locators.find((l) => l.kind === "testid" || l.kind === "css")?.value ??
     target?.label ??
     "";
+  const appHost = typeof location !== "undefined" ? location.hostname || "local-page" : "local-page";
+  const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
+    | {
+        runtime?: {
+          id?: string;
+          sendMessage?: (msg: unknown, cb?: (res?: { ok?: boolean; suggestion?: Suggestion | null }) => void) => void;
+        };
+      }
+    | undefined;
+  if (chromeGlobal?.runtime?.id && typeof chromeGlobal.runtime.sendMessage === "function") {
+    try {
+      chromeGlobal.runtime.sendMessage(
+        { kind: "EYES_RECORD_TEXT", value, scopeKey, appHost },
+        (res) => {
+          if (res?.suggestion) {
+            autoSaveRepeatedSnippet(element, res.suggestion);
+          }
+        }
+      );
+      return;
+    } catch {
+      // fall back to per-tab suggestion engine
+    }
+  }
   const detected = suggestionEngine.recordText(value, scopeKey);
   if (detected) {
     autoSaveRepeatedSnippet(element, detected);
@@ -1241,7 +1254,7 @@ export function setupEventListeners(): void {
         lastNonEmptyByElement.set(targetEl, currentVal);
       } else {
         const prevNonEmpty = lastNonEmptyByElement.get(targetEl);
-        if (prevNonEmpty && prevNonEmpty.trim().length >= 6) {
+        if (prevNonEmpty && prevNonEmpty.trim().length > 0) {
           recordCommittedText(targetEl, prevNonEmpty, privacyCheck);
         }
         lastNonEmptyByElement.delete(targetEl);
