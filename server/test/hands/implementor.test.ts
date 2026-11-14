@@ -297,4 +297,23 @@ describe("Stage 3: implementForLibrary & buildGroundedEyesSpec", () => {
     expect(eyes.guards.minSignals).toBeGreaterThanOrEqual(2);
     expect(eyes.guards.cooldownMs).toBeGreaterThanOrEqual(10_000);
   });
+
+  it("extracts label hints from plain aria locators used on real-world <label for> forms", () => {
+    const eyes = buildGroundedEyesSpec({
+      solution: "Fill From these owners with octokit on GitHub Advanced Search.",
+      context: { app: "github.com", url: "https://github.com/search/advanced" },
+      script: {
+        name: "GitHub filter",
+        steps: [
+          {
+            action: "fill",
+            target: { kind: "aria", value: "From these owners" },
+            value: "octokit",
+          },
+        ],
+      },
+    });
+
+    expect(eyes.targetHints.labelContains).toContain("from these owners");
+  });
 });
