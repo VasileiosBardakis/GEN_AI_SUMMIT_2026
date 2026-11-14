@@ -229,6 +229,103 @@ export const ActionScriptSchema = z
 
 export type ActionScript = z.infer<typeof ActionScriptSchema>;
 
+export const EyesDetectionSpecSchema = z.object({
+  intent: z.string().refine((s) => s.trim().length > 0, "expected non-empty intent"),
+  scope: z.object({
+    apps: z.array(z.string()).default([]),
+    urlPatterns: z.array(z.string()).default([]),
+    pageHints: z.array(z.string()).default([]),
+  }),
+  targetHints: z.object({
+    roles: z.array(z.string()).default([]),
+    labelContains: z.array(z.string()).default([]),
+    locators: z.array(ScriptLocatorSchema).default([]),
+  }),
+  textHints: z.object({
+    prefixHints: z.array(z.string()).default([]),
+    minCharsBeforeMatch: z.number().int().nonnegative().default(0),
+  }),
+  guards: z.object({
+    fieldEmptyOnly: z.boolean().default(true),
+    requireClipboard: z.boolean().default(false),
+    cooldownMs: z.number().int().nonnegative().default(60_000),
+    minSignals: z.number().int().min(1).max(4).default(2),
+  }),
+});
+
+export type EyesDetectionSpec = z.infer<typeof EyesDetectionSpecSchema>;
+
+export const LibraryEntryKindSchema = z.enum(["snippet", "workflow"]);
+export const LibraryEntryStatusSchema = z.enum(["suggested", "active", "paused"]);
+
+export type LibraryEntryKind = z.infer<typeof LibraryEntryKindSchema>;
+export type LibraryEntryStatus = z.infer<typeof LibraryEntryStatusSchema>;
+
+export const LibraryEntrySchema = z.object({
+  id: z.string().refine((s) => /^[A-Za-z0-9_-]+$/.test(s), "expected safe id"),
+  name: z.string().refine((s) => s.trim().length > 0, "expected non-empty name"),
+  description: z.string().refine((s) => s.trim().length > 0, "expected non-empty description"),
+  kind: LibraryEntryKindSchema,
+  status: LibraryEntryStatusSchema.default("suggested"),
+  solution: z.string().refine((s) => s.trim().length > 0, "expected non-empty solution"),
+  script: ActionScriptSchema,
+  eyes: EyesDetectionSpecSchema,
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  runCount: z.number().int().nonnegative().default(0),
+});
+
+export type LibraryEntry = z.infer<typeof LibraryEntrySchema>;
+
+export const ImplementedLibraryDraftSchema = z.object({
+  name: z.string().optional(),
+  description: z.string().optional(),
+  kind: LibraryEntryKindSchema.optional(),
+  script: ActionScriptSchema,
+  eyes: z
+    .object({
+      intent: z.string().optional(),
+      scope: z
+        .object({
+          apps: z.array(z.string()).default([]),
+          urlPatterns: z.array(z.string()).default([]),
+          pageHints: z.array(z.string()).default([]),
+        })
+        .default({}),
+      targetHints: z
+        .object({
+          roles: z.array(z.string()).default([]),
+          labelContains: z.array(z.string()).default([]),
+          locators: z
+            .array(
+              z.object({
+                kind: ScriptLocatorKindSchema,
+                value: z.string(),
+              }),
+            )
+            .default([]),
+        })
+        .default({}),
+      textHints: z
+        .object({
+          prefixHints: z.array(z.string()).default([]),
+          minCharsBeforeMatch: z.number().int().nonnegative().default(0),
+        })
+        .default({}),
+      guards: z
+        .object({
+          fieldEmptyOnly: z.boolean().default(true),
+          requireClipboard: z.boolean().default(false),
+          cooldownMs: z.number().int().nonnegative().default(60_000),
+          minSignals: z.number().int().min(1).max(4).default(2),
+        })
+        .default({}),
+    })
+    .optional(),
+});
+
+export type ImplementedLibraryDraft = z.infer<typeof ImplementedLibraryDraftSchema>;
+
 const _check: z.infer<typeof EventSchema> extends Event ? true : never = true;
 void _check;
 
