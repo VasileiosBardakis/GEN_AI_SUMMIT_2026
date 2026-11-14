@@ -59,4 +59,6 @@ process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
 console.log("[watch] watching extension/ (Ctrl+C to stop)");
-build("startup");
+if (!process.argv.includes("--no-initial-build")) {
+  build("startup");
+}
