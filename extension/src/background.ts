@@ -9,7 +9,11 @@ const MAX_BATCH_SIZE = 40;
 
 const DEMO_PLAN: Plan = {
   name: "Demo",
-  steps: [{ action: "insertText", value: "Hello from Hands" }],
+  steps: [
+    { action: "insertText", value: "Step 1: Hello" },
+    { action: "wait", ms: 300 },
+    { action: "insertText", value: " -> Step 2: from Hands" },
+  ],
 };
 
 interface ClipboardState {
@@ -38,7 +42,7 @@ interface ChromeApi {
       addListener: (
         cb: (
           msg: ChromeRuntimeMessage,
-          sender: { tab?: { id?: number } },
+          sender: { tab?: { id?: number }; frameId?: number },
           sendResponse: (res?: unknown) => void
         ) => boolean
       ) => void;
@@ -62,6 +66,7 @@ interface ChromeApi {
 
 let lastClipboard: ClipboardState | null = null;
 let lastActiveTab: { tabId: number; app: string; url?: string; title?: string } | null = null;
+const lastFieldFrameByTab = new Map<number, number>();
 const eventQueue: Event[] = [];
 const recentEvents: Event[] = [];
 const countsByType: Record<string, number> = {};
@@ -136,6 +141,13 @@ if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.kind === "EYES_EVENT" && msg.event) {
       recordEvent(msg.event);
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (msg?.kind === "HANDS_FIELD_FOCUSED") {
+      if (sender.tab?.id !== undefined && sender.frameId !== undefined) {
+        lastFieldFrameByTab.set(sender.tab.id, sender.frameId);
+      }
       sendResponse({ ok: true });
       return false;
     }
@@ -242,7 +254,50 @@ if (chromeApi?.tabs?.onUpdated) {
 }
 
 if (chromeApi?.sidePanel?.setPanelBehavior) {
-  chromeApi.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  chromeApi.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+}
+
+function injectHandsIntoOpenTabs(): void {
+  if (typeof chrome === "undefined" || !chrome.tabs?.query || !chrome.scripting?.executeScript) {
+    return;
+  }
+  void chrome.tabs
+    .query({})
+    .then((tabs) => {
+      for (const tab of tabs) {
+        if (tab.id === undefined || !tab.url || !/^(https?|file):/i.test(tab.url)) continue;
+        void chrome.scripting
+          .executeScript({
+            target: { tabId: tab.id, allFrames: true },
+            files: ["dist/content.js"],
+          })
+          .catch(() => {
+            // Restricted or discarded tab
+          });
+      }
+    })
+    .catch(() => {});
+}
+
+if (typeof chrome !== "undefined") {
+  chrome.runtime?.onInstalled?.addListener(() => {
+    injectHandsIntoOpenTabs();
+  });
+  injectHandsIntoOpenTabs();
+
+  chrome.action?.onClicked?.addListener((tab) => {
+    if (tab.id === undefined) return;
+    if (tab.url && /^(chrome|edge|about|chrome-extension):/i.test(tab.url)) {
+      console.warn(`Hands cannot run on restricted browser page: ${tab.url}`);
+      return;
+    }
+    const tabId = tab.id;
+    void runPlan(tabId, DEMO_PLAN).catch((error: unknown) => {
+      console.error(
+        `Hands plan failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
+  });
 }
 
 async function runPlan(tabId: number, plan: Plan): Promise<StepResult[]> {
@@ -315,8 +370,13 @@ async function runSteps(
 }
 
 async function executeDomStep(tabId: number, step: DomStep): Promise<StepResult> {
+  const knownFrameId = lastFieldFrameByTab.get(tabId);
+  const target =
+    knownFrameId !== undefined && !("target" in step && step.target)
+      ? { tabId, frameIds: [knownFrameId] }
+      : { tabId };
   const [injection] = await chrome.scripting.executeScript({
-    target: { tabId },
+    target,
     func: executeStep,
     args: [step],
   });

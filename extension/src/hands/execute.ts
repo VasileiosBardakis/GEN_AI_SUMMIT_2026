@@ -1,6 +1,9 @@
 import type { DomStep, Locator, StepResult } from "../types.js";
 
-export async function executeStep(step: DomStep): Promise<StepResult> {
+export async function executeStep(
+  step: DomStep,
+  targetOverride?: Element | null,
+): Promise<StepResult> {
   function escapeValue(value: string): string {
     if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
     return value.replace(/["\\]/g, "\\$&");
@@ -63,11 +66,17 @@ export async function executeStep(step: DomStep): Promise<StepResult> {
   function insertIntoEditable(element: HTMLElement, value: string): void {
     element.focus();
     const selection = window.getSelection();
-    if (selection && selection.rangeCount === 0) {
-      const range = document.createRange();
-      range.selectNodeContents(element);
-      range.collapse(false);
-      selection.addRange(range);
+    if (selection) {
+      const hasRangeInside =
+        selection.rangeCount > 0 &&
+        element.contains(selection.getRangeAt(0).commonAncestorContainer);
+      if (!hasRangeInside) {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
     }
     const inserted = document.execCommand("insertText", false, value);
     if (!inserted) {
@@ -78,6 +87,7 @@ export async function executeStep(step: DomStep): Promise<StepResult> {
 
   function insertText(element: Element, value: string): void {
     if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      element.focus();
       const start = element.selectionStart ?? element.value.length;
       const end = element.selectionEnd ?? element.value.length;
       setNativeValue(element, `${element.value.slice(0, start)}${value}${element.value.slice(end)}`);
@@ -91,22 +101,6 @@ export async function executeStep(step: DomStep): Promise<StepResult> {
     }
     if (element instanceof HTMLElement && element.isContentEditable) {
       insertIntoEditable(element, value);
-      return;
-    }
-    if (element instanceof HTMLElement) {
-      const range = document.createRange();
-      range.selectNodeContents(element);
-      range.collapse(false);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      const inserted = document.execCommand("insertText", false, value);
-      if (!inserted) {
-        element.textContent = `${element.textContent ?? ""}${value}`;
-        element.dispatchEvent(
-          new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
-        );
-      }
       return;
     }
     throw new Error("Target is not editable");
@@ -153,7 +147,14 @@ export async function executeStep(step: DomStep): Promise<StepResult> {
         return { ok: true, url: location.href, value: readValue(element) };
       }
       case "insertText": {
-        const element = step.target ? resolve(step.target) : document.activeElement;
+        let active: Element | null = document.activeElement;
+        while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+          active = active.shadowRoot.activeElement;
+        }
+        const remembered = (window as unknown as { __HANDS_LAST_EDITABLE__?: Element | null })
+          .__HANDS_LAST_EDITABLE__;
+        const lastEditable = remembered && remembered.isConnected ? remembered : null;
+        const element = targetOverride ?? (step.target ? resolve(step.target) : (lastEditable ?? active));
         if (!element) throw new Error("No target and nothing focused");
         insertText(element, step.value);
         return { ok: true, url: location.href, value: readValue(element) };

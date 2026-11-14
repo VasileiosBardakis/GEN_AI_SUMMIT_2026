@@ -1,4 +1,5 @@
 import type { Event, EventMeta, EventType } from "@gen/shared";
+import { executeStep } from "./hands/execute.ts";
 import { extractGridContext, extractMenuContext, extractTarget } from "./locators.ts";
 import { inspectElementPrivacy, sanitizeUrl, sanitizeValue } from "./privacy.ts";
 
@@ -26,6 +27,15 @@ interface GlobalEyesWindow {
   __EYES_CONFIG__?: Partial<WatcherConfig>;
   __EYES_COLLECT__?: (e: Event) => void;
   __EYES_FLUSH__?: () => Promise<void>;
+  __HANDS_LAST_EDITABLE__?: HTMLElement | null;
+  __HANDS_LAST_CSS__?: string | null;
+  __HANDS_CLEANUP__?: () => void;
+  __HANDS_CHROME_RUNTIME__?: unknown;
+  __HANDS_ON_MESSAGE__?: (
+    message: unknown,
+    sender: unknown,
+    sendResponse: (res?: unknown) => void
+  ) => boolean;
 }
 
 const SESSION_ID =
@@ -931,4 +941,151 @@ export function setupEventListeners(): void {
   }
 }
 
+const NON_TEXT_INPUT_TYPES = new Set([
+  "button",
+  "submit",
+  "reset",
+  "checkbox",
+  "radio",
+  "file",
+  "hidden",
+  "image",
+  "range",
+  "color",
+  "password",
+]);
+
+function resolveEditableField(raw: unknown): HTMLElement | null {
+  if (!(raw instanceof HTMLElement)) return null;
+  if (raw instanceof HTMLTextAreaElement) {
+    return raw.disabled || raw.readOnly ? null : raw;
+  }
+  if (raw instanceof HTMLInputElement) {
+    const inputType = (raw.getAttribute("type") || "text").toLowerCase();
+    if (NON_TEXT_INPUT_TYPES.has(inputType) || raw.disabled || raw.readOnly) return null;
+    return raw;
+  }
+  if (raw.isContentEditable) {
+    const root = raw.closest<HTMLElement>(
+      '[contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
+    );
+    return root ?? raw;
+  }
+  return null;
+}
+
+function getDeepActiveElement(): Element | null {
+  if (typeof document === "undefined") return null;
+  let active: Element | null = document.activeElement;
+  while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+    active = active.shadowRoot.activeElement;
+  }
+  return active;
+}
+
+function setupHandsTracker(): void {
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const win = window as unknown as GlobalEyesWindow;
+
+  win.__HANDS_CLEANUP__?.();
+
+  const chromeRuntime = (globalThis as Record<string, unknown>).chrome as
+    | {
+        runtime?: {
+          id?: string;
+          sendMessage?: (msg: unknown) => void;
+          onMessage?: {
+            addListener: (
+              cb: (
+                message: unknown,
+                sender: unknown,
+                sendResponse: (res?: unknown) => void
+              ) => boolean
+            ) => void;
+          };
+        };
+      }
+    | undefined;
+
+  function recordCandidate(raw: unknown, notifyBackground: boolean): void {
+    const editable = resolveEditableField(raw);
+    if (!editable) return;
+    win.__HANDS_LAST_EDITABLE__ = editable;
+    const { target } = extractTarget(editable);
+    win.__HANDS_LAST_CSS__ = target?.locators.find((locator) => locator.kind === "css")?.value ?? null;
+    if (notifyBackground && chromeRuntime?.runtime?.id && chromeRuntime.runtime.sendMessage) {
+      try {
+        chromeRuntime.runtime.sendMessage({ kind: "HANDS_FIELD_FOCUSED" });
+      } catch {
+        // ignore invalidated runtime
+      }
+    }
+  }
+
+  const onFieldInteraction = (e: globalThis.Event): void => {
+    const first = typeof e.composedPath === "function" ? e.composedPath()[0] : e.target;
+    recordCandidate(first ?? e.target, true);
+  };
+
+  const trackedEvents = ["focusin", "pointerdown", "click", "input", "keydown"] as const;
+  for (const evtName of trackedEvents) {
+    document.addEventListener(evtName, onFieldInteraction, true);
+  }
+
+  win.__HANDS_CLEANUP__ = () => {
+    for (const evtName of trackedEvents) {
+      document.removeEventListener(evtName, onFieldInteraction, true);
+    }
+  };
+
+  recordCandidate(getDeepActiveElement(), true);
+
+  win.__HANDS_ON_MESSAGE__ = (message, _sender, sendResponse) => {
+    if (!message || typeof message !== "object") return false;
+    const msg = message as { kind?: string; text?: string; requireResponse?: boolean };
+    if (msg.kind !== "HANDS_INSERT_LAST_FIELD" || typeof msg.text !== "string") return false;
+
+    let targetEl: HTMLElement | null =
+      win.__HANDS_LAST_EDITABLE__ && win.__HANDS_LAST_EDITABLE__.isConnected
+        ? win.__HANDS_LAST_EDITABLE__
+        : null;
+
+    if (!targetEl) {
+      targetEl = resolveEditableField(getDeepActiveElement());
+    }
+    if (!targetEl && win.__HANDS_LAST_CSS__) {
+      try {
+        targetEl = resolveEditableField(document.querySelector(win.__HANDS_LAST_CSS__));
+      } catch {
+        targetEl = null;
+      }
+    }
+
+    if (!targetEl) {
+      if (msg.requireResponse) {
+        sendResponse({ ok: false, error: "No recent editable field found" });
+      }
+      return false;
+    }
+
+    win.__HANDS_LAST_EDITABLE__ = targetEl;
+    void executeStep({ action: "insertText", value: msg.text }, targetEl)
+      .then((result) => sendResponse(result))
+      .catch((error: unknown) =>
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : "Insert failed" })
+      );
+    return true;
+  };
+
+  if (chromeRuntime?.runtime?.onMessage && win.__HANDS_CHROME_RUNTIME__ !== chromeRuntime.runtime) {
+    win.__HANDS_CHROME_RUNTIME__ = chromeRuntime.runtime;
+    chromeRuntime.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      return win.__HANDS_ON_MESSAGE__
+        ? win.__HANDS_ON_MESSAGE__(message, sender, sendResponse)
+        : false;
+    });
+  }
+}
+
+setupHandsTracker();
 setupEventListeners();
