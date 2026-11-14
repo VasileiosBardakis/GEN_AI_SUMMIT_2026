@@ -229,18 +229,7 @@ export const ActionScriptSchema = z
 
 export type ActionScript = z.infer<typeof ActionScriptSchema>;
 
-export const EyesTriggerEventSchema = z.enum([
-  "focus",
-  "typing_prefix",
-  "click",
-  "copy",
-  "nav",
-]);
-
-export type EyesTriggerEvent = z.infer<typeof EyesTriggerEventSchema>;
-
 export const EyesDetectionSpecSchema = z.object({
-  triggerEvent: EyesTriggerEventSchema,
   intent: z.string().refine((s) => s.trim().length > 0, "expected non-empty intent"),
   scope: z.object({
     apps: z.array(z.string()).default([]),
@@ -295,7 +284,6 @@ export const ImplementedLibraryDraftSchema = z.object({
   script: ActionScriptSchema,
   eyes: z
     .object({
-      triggerEvent: EyesTriggerEventSchema.default("focus"),
       intent: z.string().optional(),
       scope: z
         .object({

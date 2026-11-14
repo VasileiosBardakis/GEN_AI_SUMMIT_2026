@@ -211,7 +211,7 @@ describe("POST /implement, GET /script/latest, and /hands/* bridge", () => {
         name: string;
         kind: string;
         eyes: {
-          triggerEvent: string;
+          intent: string;
           scope: { apps: string[]; urlPatterns: string[]; pageHints: string[] };
           targetHints: { labelContains: string[] };
           textHints: { prefixHints: string[] };

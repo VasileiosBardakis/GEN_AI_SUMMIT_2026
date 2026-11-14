@@ -209,7 +209,6 @@ describe("Stage 3: implementForLibrary & buildGroundedEyesSpec", () => {
               ],
             },
             eyes: {
-              triggerEvent: "focus",
               intent: "Fill Supplier Profile",
               scope: {
                 apps: ["*"],
@@ -255,7 +254,7 @@ describe("Stage 3: implementForLibrary & buildGroundedEyesSpec", () => {
     expect(entry.eyes.guards.cooldownMs).toBeGreaterThanOrEqual(10_000);
   });
 
-  it("forces typing_prefix + multi-signal guards for unscoped snippet replies so Eyes does not hallucinate", () => {
+  it("forces prefix threshold + multi-signal guards for unscoped snippet replies so Eyes does not hallucinate", () => {
     const eyes = buildGroundedEyesSpec({
       solution: "Insert 'Hi, thanks for your order. It ships Friday.' into the reply box.",
       script: {
@@ -268,7 +267,6 @@ describe("Stage 3: implementForLibrary & buildGroundedEyesSpec", () => {
         ],
       },
       rawEyes: {
-        triggerEvent: "focus",
         intent: "shipping_reply",
         scope: { apps: ["*"], urlPatterns: [], pageHints: [] },
         targetHints: { roles: ["textbox"], labelContains: ["box", "text"], locators: [] },
@@ -277,7 +275,6 @@ describe("Stage 3: implementForLibrary & buildGroundedEyesSpec", () => {
       },
     });
 
-    expect(eyes.triggerEvent).toBe("typing_prefix");
     expect(eyes.scope.apps).toEqual([]);
     expect(eyes.targetHints.labelContains).toEqual([]);
     expect(eyes.textHints.prefixHints).toEqual(["hi, thanks for your"]);

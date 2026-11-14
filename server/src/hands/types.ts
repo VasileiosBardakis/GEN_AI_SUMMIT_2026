@@ -5,7 +5,6 @@ import {
   LibraryEntrySchema,
   type ActionScript,
   type EyesDetectionSpec,
-  type EyesTriggerEvent,
   type ImplementedLibraryDraft,
   type LibraryEntry,
   type LibraryEntryKind,
@@ -20,7 +19,6 @@ export type {
   ActionScript,
   DomStep,
   EyesDetectionSpec,
-  EyesTriggerEvent,
   ImplementedLibraryDraft,
   LibraryEntry,
   LibraryEntryKind,
@@ -135,10 +133,6 @@ export const IMPLEMENTED_LIBRARY_RESPONSE_SCHEMA = {
     eyes: {
       type: "object",
       properties: {
-        triggerEvent: {
-          type: "string",
-          enum: ["focus", "typing_prefix", "click", "copy", "nav"],
-        },
         intent: { type: "string" },
         scope: {
           type: "object",
@@ -173,7 +167,7 @@ export const IMPLEMENTED_LIBRARY_RESPONSE_SCHEMA = {
           },
         },
       },
-      required: ["triggerEvent", "intent"],
+      required: ["intent"],
     },
   },
   required: ["script", "eyes"],

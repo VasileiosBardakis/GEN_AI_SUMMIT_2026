@@ -14,7 +14,6 @@ import {
   parseImplementedLibraryDraft,
   type ActionScript,
   type EyesDetectionSpec,
-  type EyesTriggerEvent,
   type ImplementedLibraryDraft,
   type LibraryEntry,
   type LibraryEntryKind,
@@ -144,13 +143,7 @@ export const IMPLEMENT_LIBRARY_SYSTEM_INSTRUCTION = `${IMPLEMENTOR_SYSTEM_INSTRU
 
 In addition to \`script\`, output \`name\`, \`description\`, \`kind\`, and \`eyes\` so Eyes can recognize when the user is about to repeat this task BEFORE they finish doing it manually.
 
-Rules for \`eyes\` (non-brittle, low-hallucination detection):
-- \`triggerEvent\`:
-  - "focus": user focuses a matching input/textarea/field to fill it.
-  - "typing_prefix": user begins typing reusable text into a generic box (e.g. reply/notes) where prefix disambiguates intent.
-  - "click": user clicks a repeated action button/menu item.
-  - "copy": user copies source data before pasting/moving it elsewhere.
-  - "nav": user lands on a workflow page (e.g. table extraction / multi-row batch).
+Rules for \`eyes\` (condition-driven, non-brittle, low-hallucination detection):
 - \`intent\`: short snake_case semantic name, e.g. "insert_shipping_reply" or "fill_supplier_profile".
 - \`scope\`:
   - \`apps\`: hostnames ONLY if known or stated (never use "*" or invent domains).
@@ -520,28 +513,14 @@ export function buildGroundedEyesSpec(input: {
     4,
   );
 
-  let triggerEvent: EyesTriggerEvent =
-    rawEyes?.triggerEvent ??
-    (kind === "snippet" || signals.hasTargetlessInsert
-      ? "typing_prefix"
-      : signals.hasExtractList || signals.hasNavigate
-        ? "nav"
-        : signals.hasTextEntry
-          ? "focus"
-          : signals.hasClick
-            ? "click"
-            : "focus");
-
   let minCharsBeforeMatch = rawEyes?.textHints?.minCharsBeforeMatch ?? 0;
-  if (triggerEvent === "typing_prefix") {
-    minCharsBeforeMatch = Math.max(minCharsBeforeMatch, prefixHints.length > 0 ? 5 : 8);
-  }
-
   const hasScopeAnchor = apps.length > 0 || urlPatterns.length > 0 || pageHints.length > 0;
   const hasTargetAnchor = locators.length > 0 || labelContains.length > 0;
 
-  if (!hasScopeAnchor && prefixHints.length > 0 && (kind === "snippet" || signals.hasTargetlessInsert)) {
-    triggerEvent = "typing_prefix";
+  if (
+    prefixHints.length > 0 &&
+    (!hasScopeAnchor || kind === "snippet" || signals.hasTargetlessInsert)
+  ) {
     minCharsBeforeMatch = Math.max(minCharsBeforeMatch, 5);
   }
 
@@ -561,7 +540,6 @@ export function buildGroundedEyesSpec(input: {
   const intent = toIntentSlug(rawEyes?.intent?.trim() || name || script.name || solution);
 
   return EyesDetectionSpecSchema.parse({
-    triggerEvent,
     intent,
     scope: { apps, urlPatterns, pageHints },
     targetHints: { roles, labelContains, locators },
