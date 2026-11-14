@@ -195,7 +195,7 @@ function encodeWebmFromJpegs(
         "-i",
         "pipe:0",
         "-c:v",
-        "libvpx-vp9",
+        "libvpx",
         "-b:v",
         "1200k",
         "-deadline",
@@ -211,7 +211,6 @@ function encodeWebmFromJpegs(
     proc.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
-    proc.stdin.on("error", () => {});
     proc.on("error", reject);
     proc.on("close", (code) => {
       if (code === 0) resolve();
@@ -220,12 +219,11 @@ function encodeWebmFromJpegs(
 
     (async () => {
       for (const frame of frames) {
-        if (proc.stdin.destroyed) break;
         if (!proc.stdin.write(frame)) {
           await new Promise<void>((res) => proc.stdin.once("drain", res));
         }
       }
-      if (!proc.stdin.destroyed) proc.stdin.end();
+      proc.stdin.end();
     })().catch(reject);
   });
 }
