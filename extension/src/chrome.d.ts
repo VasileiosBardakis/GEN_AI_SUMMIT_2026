@@ -22,10 +22,21 @@ declare namespace chrome {
     function get(tabId: number): Promise<Tab>;
     function query(queryInfo: { active?: boolean; currentWindow?: boolean }): Promise<Tab[]>;
     function update(tabId: number, updateProperties: { url?: string }): Promise<Tab>;
+    function sendMessage(
+      tabId: number,
+      message: unknown,
+      options?: { frameId?: number },
+    ): Promise<unknown>;
 
     const onUpdated: {
       addListener(callback: (tabId: number, changeInfo: TabChangeInfo, tab: Tab) => void): void;
       removeListener(callback: (tabId: number, changeInfo: TabChangeInfo, tab: Tab) => void): void;
+    };
+  }
+
+  namespace runtime {
+    const onInstalled: {
+      addListener(callback: () => void): void;
     };
   }
 
@@ -37,10 +48,17 @@ declare namespace chrome {
 
     function executeScript<TArgs extends unknown[], TResult>(
       injection: {
-        target: { tabId: number };
+        target: { tabId: number; allFrames?: boolean; frameIds?: number[] };
         func: (...args: TArgs) => TResult | Promise<TResult>;
         args?: TArgs;
       },
     ): Promise<InjectionResult<Awaited<TResult>>[]>;
+
+    function executeScript(
+      injection: {
+        target: { tabId: number; allFrames?: boolean; frameIds?: number[] };
+        files: string[];
+      },
+    ): Promise<InjectionResult<unknown>[]>;
   }
 }
