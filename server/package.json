@@ -1,0 +1,8 @@
+{
+  "name": "@gen/server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@gen/shared": "*"
+  }
+}

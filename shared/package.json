@@ -1,0 +1,6 @@
+{
+  "name": "@gen/shared",
+  "private": true,
+  "type": "module",
+  "exports": "./contract.ts"
+}
