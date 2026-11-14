@@ -2,6 +2,9 @@ import type { Event, EventMeta, EventType } from "@gen/shared";
 import { executeStep } from "./hands/execute.ts";
 import { extractGridContext, extractMenuContext, extractTarget } from "./locators.ts";
 import { inspectElementPrivacy, sanitizeUrl, sanitizeValue } from "./privacy.ts";
+import { createSuggestionEngine } from "./suggestion.ts";
+import type { FlowNode, Suggestion } from "./suggestion.ts";
+import { suggestionToOptimization } from "./library.ts";
 
 export type WatcherMode = "all_raw" | "all_throttled" | "semantic";
 
@@ -10,6 +13,7 @@ export interface WatcherConfig {
   endpoint: string;
   batchMs: number;
   maxBatchSize: number;
+  clickReplayUrl?: string;
 }
 
 interface TypingSession {
@@ -68,6 +72,612 @@ function uuid(): string {
     return crypto.randomUUID();
   }
   return "evt_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 9);
+}
+
+const SUGGESTION_HOST_ID = "__eyes_suggestion_host__";
+
+function extensionAssetUrl(assetPath: string): string | undefined {
+  const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
+    | { runtime?: { id?: string; getURL?: (path: string) => string } }
+    | undefined;
+  if (chromeGlobal?.runtime?.id && typeof chromeGlobal.runtime.getURL === "function") {
+    return chromeGlobal.runtime.getURL(assetPath);
+  }
+  return undefined;
+}
+
+const suggestionEngine = createSuggestionEngine({
+  clickReplayUrl:
+    extensionAssetUrl("dist/replay-demo.mp4") ?? getConfig().clickReplayUrl,
+});
+const committedTextByElement = new WeakMap<HTMLElement, string>();
+let lastSuggestionShownAt = 0;
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    switch (char) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
+}
+
+function nodeKindIcon(kind: FlowNode["kind"]): string {
+  switch (kind) {
+    case "click":
+      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 1.8l6.8 3.6-3.1 1-1.3 3.1-2.4-7.7Z"/></svg>';
+    case "input":
+      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><path d="M2 3.5h8M2 6h6M2 8.5h4.5"/></svg>';
+    case "tab":
+      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="9" height="7" rx="1.2"/><path d="M1.5 5h9M5.5 2.5V5"/></svg>';
+    case "paste":
+      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="6.5" height="7.5" rx="1"/><path d="M4.5 3V2a1 1 0 0 1 1-1h1.5a1 1 0 0 1 1 1v1"/></svg>';
+    case "loop":
+      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 4.5A3.8 3.8 0 0 0 3 3.4M2.5 7.5A3.8 3.8 0 0 0 9 8.6"/><path d="M9.7 2.4v2.2H7.5M2.3 9.6V7.4h2.2"/></svg>';
+    case "ai":
+      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" aria-hidden="true"><path d="M1.5 6c1.2-2 2.8-3 4.5-3s3.3 1 4.5 3c-1.2 2-2.8 3-4.5 3S2.7 8 1.5 6Z" stroke="currentColor" stroke-width="1.3"/><circle cx="6" cy="6" r="1.3" fill="currentColor"/></svg>';
+    case "done":
+      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="4.3"/><path d="M4.2 6.1l1.2 1.2 2.5-2.5"/></svg>';
+  }
+}
+
+function nodeKindTitle(kind: FlowNode["kind"]): string {
+  switch (kind) {
+    case "ai":
+      return "Eyes";
+    case "loop":
+      return "Loop";
+    default:
+      return kind[0].toUpperCase() + kind.slice(1);
+  }
+}
+
+function renderFlowNodes(nodes: FlowNode[]): string {
+  const arrowSvg = `
+    <svg class="flow-arrow" viewBox="0 0 14 10" width="12" height="10" aria-hidden="true">
+      <path d="M1 5h10M8.5 2.5L11.5 5l-3 2.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  `;
+  return nodes
+    .map((node, index) => {
+      const arrow = index < nodes.length - 1 ? arrowSvg : "";
+      const kindClass = node.kind === "ai" ? "eyes-step" : node.kind;
+      return `
+        <div class="flow-node ${kindClass}" title="${escapeHtml(node.label)}">
+          <div class="flow-kind">${nodeKindIcon(node.kind)}<span>${escapeHtml(nodeKindTitle(node.kind))}</span></div>
+          <div class="flow-label">${escapeHtml(node.label)}</div>
+        </div>${arrow}
+      `;
+    })
+    .join("");
+}
+
+function renderFlows(suggestion: Suggestion): string {
+  const hasLoop = suggestion.flows.user.some((node) => node.kind === "loop");
+  const loopArc = hasLoop
+    ? `
+      <svg class="loop-arc" viewBox="0 0 360 16" preserveAspectRatio="none" aria-hidden="true">
+        <path d="M 318 1 C 318 12, 308 13, 294 13 L 52 13 C 40 13, 34 11, 34 3" fill="none" stroke="#B7AEA0" stroke-width="1.1" stroke-dasharray="3 2.5"/>
+        <path d="M 31 6 L 34 2 L 37 6" fill="none" stroke="#9C9385" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    `
+    : "";
+
+  return `
+    <div class="dag-canvas">
+      <div class="flow" data-eyes-flow="user">
+        <div class="flow-head">
+          <span>Your flow</span>
+          <span class="flow-sub">Manual cycle</span>
+        </div>
+        <div class="flow-track">${renderFlowNodes(suggestion.flows.user)}</div>
+        ${loopArc}
+      </div>
+      <div class="dag-divider"></div>
+      <div class="flow" data-eyes-flow="proposed">
+        <div class="flow-head">
+          <span class="flow-head-eyes">Eyes flow</span>
+          <span class="flow-sub">Single pass</span>
+        </div>
+        <div class="flow-track">${renderFlowNodes(suggestion.flows.proposed)}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderReplay(suggestion: Suggestion): string {
+  if (suggestion.kind === "text" || !suggestion.videoUrl) return "";
+  return `
+    <div class="replay" data-eyes-replay>
+      <video src="${escapeHtml(suggestion.videoUrl)}" autoplay muted loop playsinline preload="metadata"></video>
+      <div class="replay-bar">
+        <span class="replay-caption">Automation replay</span>
+      </div>
+    </div>
+  `;
+}
+
+function isEyesUiTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest("[data-eyes-ui]"));
+}
+
+function sendLibraryMessage(message: unknown): void {
+  const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
+    | { runtime?: { id?: string; sendMessage?: (msg: unknown) => void } }
+    | undefined;
+  if (chromeGlobal?.runtime?.id && typeof chromeGlobal.runtime.sendMessage === "function") {
+    try {
+      chromeGlobal.runtime.sendMessage(message);
+    } catch {
+      // ignore invalidated runtime
+    }
+  }
+}
+
+function showSuggestion(suggestion: Suggestion | null): void {
+  if (!suggestion) return;
+  if (typeof document === "undefined" || !document.documentElement) return;
+  if (window.top !== window.self) return;
+
+  const existing = document.getElementById(SUGGESTION_HOST_ID);
+  if (existing && Date.now() - lastSuggestionShownAt < 800) return;
+  existing?.remove();
+  lastSuggestionShownAt = Date.now();
+
+  const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
+  sendLibraryMessage({
+    kind: "EYES_UPSERT_OPTIMIZATION",
+    item: suggestionToOptimization(suggestion, { app: appHost, status: "suggested" }),
+  });
+
+  const host = document.createElement("div");
+  host.id = SUGGESTION_HOST_ID;
+  host.setAttribute("data-eyes-ui", "true");
+  host.setAttribute("data-eyes-suggestion", suggestion.kind);
+  host.style.position = "fixed";
+  host.style.right = "20px";
+  host.style.bottom = "20px";
+  host.style.zIndex = "2147483647";
+
+  const shadow = host.attachShadow({ mode: "open" });
+  const previewClass = suggestion.kind === "text" ? "snippet" : "keycap";
+  const eyesMark = `
+    <svg class="eyes-mark" data-eyes-brand-mark viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true">
+      <path d="M2 10c2.2-3.6 5-5.4 8-5.4s5.8 1.8 8 5.4c-2.2 3.6-5 5.4-8 5.4S4.2 13.6 2 10Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      <circle cx="10" cy="10" r="2.3" fill="currentColor"/>
+    </svg>
+  `;
+
+  shadow.innerHTML = `
+    <style>
+      :host {
+        all: initial;
+        --shell: #f1ede4;
+        --canvas: #faf8f4;
+        --surface-node: #fcfbf8;
+        --surface-graph: #f3efe7;
+        --surface-eyes: #f4e8d8;
+        --ink: #1a1917;
+        --ink-2: #57524b;
+        --ink-muted: #7b756d;
+        --brown: #8a5a2b;
+        --brown-border: #ccb08d;
+        --line: #e2dcd0;
+        --line-strong: #d0c8b9;
+        --ok: #2e6b43;
+      }
+      *, *::before, *::after { box-sizing: border-box; }
+      .card {
+        display: flex;
+        flex-direction: column;
+        width: min(444px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        overflow: hidden;
+        border: 1px solid rgba(26, 25, 23, 0.14);
+        border-radius: 12px;
+        background: var(--canvas);
+        color: var(--ink);
+        box-shadow: 0 22px 48px rgba(26, 25, 23, 0.18), 0 2px 6px rgba(26, 25, 23, 0.08);
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 13px;
+        line-height: 1.42;
+        -webkit-font-smoothing: antialiased;
+        animation: eyes-in 190ms cubic-bezier(.2, .8, .2, 1);
+      }
+      @keyframes eyes-in {
+        from { opacity: 0; transform: translateY(10px) scale(.99); }
+        to { opacity: 1; transform: none; }
+      }
+      .top {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--line);
+        background: var(--shell);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      .eyes-mark {
+        color: var(--ink);
+        flex: 0 0 auto;
+      }
+      .product {
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
+      }
+      .top-right {
+        display: flex;
+        align-items: center;
+      }
+      .close {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--ink-muted);
+        font-size: 17px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .close:hover {
+        background: rgba(26, 25, 23, 0.06);
+        color: var(--ink);
+      }
+      .content {
+        padding: 14px;
+        overflow-y: auto;
+      }
+      .head-block {
+        margin-bottom: 11px;
+      }
+      h2 {
+        margin: 0 0 3px;
+        color: var(--ink);
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.3;
+        letter-spacing: -0.015em;
+      }
+      p {
+        margin: 0;
+        color: var(--ink-2);
+        font-size: 12.5px;
+      }
+      .preview {
+        margin-bottom: 11px;
+      }
+      .preview.snippet {
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--shell);
+        color: var(--ink-2);
+        font-size: 12px;
+      }
+      .preview.keycap {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 9px;
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        background: var(--surface-node);
+        box-shadow: 0 1px 0 var(--line-strong);
+        color: var(--ink);
+        font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+        font-size: 11.5px;
+        font-weight: 500;
+      }
+      .replay {
+        margin-bottom: 11px;
+        overflow: hidden;
+        border: 1px solid #2d2a26;
+        border-radius: 8px;
+        background: #171614;
+      }
+      .replay video {
+        display: block;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: contain;
+        background: #171614;
+      }
+      .replay-bar {
+        display: flex;
+        align-items: center;
+        padding: 6px 10px;
+        border-top: 1px solid #2b2824;
+        color: #b8b0a4;
+        font-size: 10.5px;
+      }
+      .dag-canvas {
+        padding: 10px 11px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background-color: var(--surface-graph);
+        background-image: radial-gradient(#d8d1c5 0.9px, transparent 0.9px);
+        background-size: 11px 11px;
+      }
+      .flow-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 7px;
+        color: var(--ink-2);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .flow-head-eyes {
+        color: var(--brown);
+      }
+      .flow-sub {
+        color: var(--ink-muted);
+        font-weight: 500;
+        letter-spacing: 0.02em;
+        text-transform: none;
+      }
+      .flow-track {
+        display: flex;
+        align-items: stretch;
+        gap: 3px;
+      }
+      .flow-node {
+        flex: 1 1 0;
+        min-width: 0;
+        padding: 5px 6px;
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        background: var(--surface-node);
+        box-shadow: 0 1px 1px rgba(26, 25, 23, 0.04);
+      }
+      .flow-node.eyes-step {
+        border-color: var(--brown-border);
+        background: var(--surface-eyes);
+      }
+      .flow-node.loop {
+        border-style: dashed;
+        background: rgba(250, 248, 244, 0.65);
+      }
+      .flow-node.done {
+        border-color: var(--line-strong);
+        background: var(--surface-node);
+      }
+      .flow-kind {
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        margin-bottom: 2px;
+        color: var(--ink-muted);
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      .flow-node.eyes-step .flow-kind {
+        color: var(--brown);
+      }
+      .flow-node.done .flow-kind {
+        color: var(--ok);
+      }
+      .flow-label {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        color: var(--ink);
+        font-size: 10.5px;
+        line-height: 1.25;
+      }
+      .flow-arrow {
+        flex: 0 0 auto;
+        align-self: center;
+        color: #9e968b;
+      }
+      .loop-arc {
+        display: block;
+        width: 100%;
+        height: 15px;
+        margin-top: 2px;
+      }
+      .dag-divider {
+        height: 1px;
+        margin: 9px 0;
+        background: var(--line);
+      }
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .meta {
+        color: var(--ink-muted);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+      .actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+      button {
+        border-radius: 6px;
+        font: inherit;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .primary {
+        padding: 7px 13px;
+        border: 1px solid var(--ink);
+        background: var(--ink);
+        color: var(--canvas);
+        box-shadow: 0 1px 2px rgba(26, 25, 23, 0.16);
+      }
+      .primary:hover {
+        background: #2f2d29;
+      }
+      .ghost {
+        padding: 7px 10px;
+        border: 1px solid var(--line-strong);
+        background: var(--surface-node);
+        color: var(--ink-2);
+      }
+      .ghost:hover {
+        background: var(--shell);
+        color: var(--ink);
+      }
+      .success {
+        display: grid;
+        gap: 4px;
+        padding: 18px 16px;
+      }
+      .success[hidden] { display: none; }
+      .success strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .success span {
+        color: var(--ink-2);
+      }
+    </style>
+    <section class="card" aria-live="polite" aria-label="Eyes workflow suggestion">
+      <header class="top">
+        <div class="brand">
+          ${eyesMark}
+          <span class="product">Eyes</span>
+        </div>
+        <div class="top-right">
+          <button class="close" type="button" data-eyes-dismiss aria-label="Dismiss suggestion">&times;</button>
+        </div>
+      </header>
+      <div class="content" data-eyes-content>
+        <div class="head-block">
+          <h2>${escapeHtml(suggestion.headline)}</h2>
+          <p>${escapeHtml(suggestion.detail)}</p>
+        </div>
+        <div class="preview ${previewClass}">${escapeHtml(suggestion.preview)}</div>
+        ${renderReplay(suggestion)}
+        ${renderFlows(suggestion)}
+        <div class="footer">
+          <div class="meta">${escapeHtml(suggestion.meta)}</div>
+          <div class="actions">
+            <button class="ghost" type="button" data-eyes-dismiss>Not now</button>
+            <button class="primary" type="button" data-eyes-primary>Trial it live</button>
+          </div>
+        </div>
+      </div>
+      <div class="success" data-eyes-success hidden>
+        <strong>Trial started.</strong>
+        <span>Eyes will keep this shortcut ready for this session.</span>
+      </div>
+    </section>
+  `;
+
+  const dismiss = (): void => host.remove();
+  for (const button of Array.from(shadow.querySelectorAll("[data-eyes-dismiss]"))) {
+    button.addEventListener("click", dismiss);
+  }
+  shadow.querySelector("[data-eyes-primary]")?.addEventListener("click", () => {
+    sendLibraryMessage({
+      kind: "EYES_ACTIVATE_OPTIMIZATION",
+      id: suggestion.id,
+      item: suggestionToOptimization(suggestion, { app: appHost, status: "active" }),
+      recordRun: true,
+    });
+    const content = shadow.querySelector<HTMLElement>("[data-eyes-content]");
+    const success = shadow.querySelector<HTMLElement>("[data-eyes-success]");
+    if (content) content.hidden = true;
+    if (success) success.hidden = false;
+    setTimeout(dismiss, 2200);
+  });
+  shadow.querySelector("video")?.addEventListener("error", () => {
+    shadow.querySelector("[data-eyes-replay]")?.remove();
+  });
+
+  document.documentElement.appendChild(host);
+}
+
+function clearCommittedTextIfChanged(
+  element: HTMLElement | null,
+  rawValue: string | undefined,
+  privacyCheck: ReturnType<typeof inspectElementPrivacy>
+): void {
+  if (!element) return;
+  const committed = committedTextByElement.get(element);
+  if (committed === undefined) return;
+  const { value } = sanitizeValue(rawValue ?? "", privacyCheck);
+  if (value !== committed) {
+    committedTextByElement.delete(element);
+  }
+}
+
+function recordCommittedText(
+  element: HTMLElement | null,
+  rawValue: string | undefined,
+  privacyCheck: ReturnType<typeof inspectElementPrivacy>,
+  force = false
+): void {
+  if (!element || !rawValue) return;
+
+  const { value, privacy } = sanitizeValue(rawValue, privacyCheck);
+  if (!value || privacy.redacted) return;
+
+  if (!force && committedTextByElement.get(element) === value) return;
+  committedTextByElement.set(element, value);
+
+  showSuggestion(suggestionEngine.recordText(value));
+}
+
+function recordRepeatedClick(rawTarget: EventTarget | null, event: MouseEvent): void {
+  if (
+    event.button !== 0 ||
+    event.detail !== 1 ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.altKey ||
+    event.shiftKey ||
+    isEyesUiTarget(rawTarget)
+  ) {
+    return;
+  }
+
+  const { element, target } = extractTarget(rawTarget);
+  if (!element || !target) return;
+  if (!element.matches('button, a, [role="button"], input[type="submit"]')) return;
+  if (element instanceof HTMLButtonElement && element.disabled) return;
+
+  const label =
+    target.label || target.locators.find((locator) => locator.kind === "text")?.value;
+  if (!label) return;
+
+  const primary = target.locators[0];
+  const key = `${target.tag ?? "element"}:${primary?.kind ?? "none"}:${primary?.value ?? label}`;
+  showSuggestion(suggestionEngine.recordClick(key, label, Date.now()));
 }
 
 function getElementValue(el: HTMLElement | null): string | undefined {
@@ -179,6 +789,8 @@ export function setupEventListeners(): void {
     extraMeta?: EventMeta,
     clipboard?: Event["clipboard"]
   ): void {
+    if (isEyesUiTarget(rawTarget)) return;
+
     const { element, target } = extractTarget(rawTarget);
     const privacyCheck = inspectElementPrivacy(element);
     const { value, privacy } = sanitizeValue(rawValue, privacyCheck);
@@ -285,6 +897,7 @@ export function setupEventListeners(): void {
         clientY: Math.round(e.clientY),
         dwellMs: dwellMs < 15000 ? dwellMs : undefined,
       });
+      recordRepeatedClick(e.target, e);
     },
     true
   );
@@ -485,10 +1098,10 @@ export function setupEventListeners(): void {
         sess.lastInputType = ie.inputType;
       }
 
-      if (getConfig().mode === "semantic") return;
-
       const privacyCheck = inspectElementPrivacy(targetEl);
       const currentVal = getElementValue(targetEl) ?? "";
+      clearCommittedTextIfChanged(targetEl, currentVal, privacyCheck);
+      if (getConfig().mode === "semantic") return;
       const durationMs = sess ? Math.max(1, Date.now() - sess.startedAt) : 1;
       const keystrokeCount = sess ? sess.keystrokeCount : 0;
       const isAutofill =
@@ -538,6 +1151,7 @@ export function setupEventListeners(): void {
           inputTypeAttr: targetEl.getAttribute("type") || undefined,
         },
       });
+      recordCommittedText(targetEl, currentVal, privacyCheck);
     },
     true
   );
@@ -548,13 +1162,15 @@ export function setupEventListeners(): void {
       lastFocusInTs = Date.now();
       const targetEl = e.target instanceof HTMLElement ? e.target : null;
       if (targetEl) {
+        const currentVal = getElementValue(targetEl) ?? "";
+        clearCommittedTextIfChanged(targetEl, currentVal, inspectElementPrivacy(targetEl));
         typingSessions.set(targetEl, {
           el: targetEl,
           startedAt: Date.now(),
           lastKeyAt: Date.now(),
           keystrokeCount: 0,
           backspaceCount: 0,
-          initialValue: getElementValue(targetEl) ?? "",
+          initialValue: currentVal,
         });
       }
       if (getConfig().mode === "semantic") return;
@@ -596,6 +1212,7 @@ export function setupEventListeners(): void {
               inputTypeAttr: targetEl.getAttribute("type") || undefined,
             },
           });
+          recordCommittedText(targetEl, currentVal, privacyCheck);
         }
         typingSessions.delete(targetEl);
         return;
@@ -622,6 +1239,9 @@ export function setupEventListeners(): void {
             }
           : undefined,
       });
+      if (targetEl && sess && (currentVal !== sess.initialValue || sess.keystrokeCount > 0)) {
+        recordCommittedText(targetEl, currentVal, privacyCheck);
+      }
       if (targetEl) typingSessions.delete(targetEl);
     },
     true
@@ -719,6 +1339,12 @@ export function setupEventListeners(): void {
           text: cleanText,
           textHash: privacy.valueHash,
         }
+      );
+      recordCommittedText(
+        e.target instanceof HTMLElement ? e.target : null,
+        cleanText,
+        elCheck,
+        true
       );
     },
     true

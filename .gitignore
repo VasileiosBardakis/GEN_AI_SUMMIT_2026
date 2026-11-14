@@ -20,4 +20,6 @@ blob-report/
 # Editors and OS
 .DS_Store
 *.swp
-/traces
+# Live session & probe trace recordings (keep committed test fixtures like real_reply_x3.jsonl)
+traces/sess_*.jsonl
+traces/probe_*.jsonl

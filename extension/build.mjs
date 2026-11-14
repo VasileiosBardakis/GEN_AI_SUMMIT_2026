@@ -24,24 +24,26 @@ const locatorsCode = compileTs(path.join(srcDir, "locators.ts"))
   .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/privacy\.js["'];?/g, "")
   .replace(/export\s+/g, "");
 const handsCode = compileTs(path.join(srcDir, "hands", "execute.ts")).replace(/export\s+/g, "");
+const suggestionCode = compileTs(path.join(srcDir, "suggestion.ts")).replace(/export\s+/g, "");
+const libraryCode = compileTs(path.join(srcDir, "library.ts")).replace(/export\s+/g, "");
 
 const contentCode = compileTs(path.join(srcDir, "content.ts"))
-  .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/(locators|privacy)\.js["'];?/g, "")
+  .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/(locators|privacy|suggestion|library)\.js["'];?/g, "")
   .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/hands\/execute\.(ts|js)["'];?/g, "")
   .replace(/export\s+/g, "");
 
-const bundledContent = `(() => {\n"use strict";\n${privacyCode}\n${locatorsCode}\n${handsCode}\n${contentCode}\n})();\n`;
+const bundledContent = `(() => {\n"use strict";\n${privacyCode}\n${locatorsCode}\n${handsCode}\n${suggestionCode}\n${libraryCode}\n${contentCode}\n})();\n`;
 fs.writeFileSync(path.join(distDir, "content.js"), bundledContent, "utf8");
 
 const backgroundSource = compileTs(path.join(srcDir, "background.ts")).replace(
-  /import\s+\{[^}]*\}\s+from\s+["']\.\/privacy\.js["'];?/g,
+  /import\s+\{[^}]*\}\s+from\s+["']\.\/(privacy|library)\.js["'];?/g,
   ""
 );
 const backgroundImports = backgroundSource.match(/^import .*;$/gm) ?? [];
 const backgroundBody = backgroundSource.replace(/^import .*;$/gm, "");
 fs.writeFileSync(
   path.join(distDir, "background.js"),
-  `${backgroundImports.join("\n")}\n${privacyCode}\n${backgroundBody}\n`,
+  `${backgroundImports.join("\n")}\n${privacyCode}\n${libraryCode}\n${backgroundBody}\n`,
   "utf8"
 );
 
@@ -53,8 +55,16 @@ fs.writeFileSync(
   "utf8"
 );
 
-const panelCode = compileTs(path.join(srcDir, "panel.ts"));
+const panelSource = compileTs(path.join(srcDir, "panel.ts"))
+  .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/library\.js["'];?/g, "")
+  .replace(/export\s+/g, "");
+const panelCode = `(() => {\n"use strict";\n${libraryCode}\n${panelSource}\n})();\n`;
 fs.writeFileSync(path.join(distDir, "panel.js"), panelCode, "utf8");
 fs.copyFileSync(path.join(srcDir, "panel.html"), path.join(distDir, "panel.html"));
 
-console.log("Built extension/dist/{content.js, background.js, panel.js, panel.html, hands/execute.js}");
+const assetsDir = path.join(__dirname, "assets");
+if (fs.existsSync(assetsDir)) {
+  fs.cpSync(assetsDir, distDir, { recursive: true });
+}
+
+console.log("Built extension/dist/{content.js, background.js, panel.js, panel.html, hands/execute.js, assets}");

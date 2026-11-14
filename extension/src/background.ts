@@ -2,6 +2,13 @@ import { executeStep } from "./hands/execute.js";
 import type { ActionScript, BindingValue, DomStep, Step, StepResult } from "./types.js";
 import type { Event } from "@gen/shared";
 import { sanitizeUrl } from "./privacy.ts";
+import {
+  createDefaultOptimizations,
+  LIBRARY_STORAGE_KEY,
+  recordOptimizationRun,
+  upsertOptimizationItem,
+  type OptimizationItem,
+} from "./library.ts";
 
 const SERVER_URL = "http://localhost:8787";
 const BATCH_INTERVAL_MS = 300;
@@ -29,9 +36,13 @@ interface ChromeRuntimeMessage {
   kind?: string;
   event?: Event;
   script?: ActionScript;
+  id?: string;
+  item?: OptimizationItem;
+  recordRun?: boolean;
 }
 
 interface ChromeTab {
+  id?: number;
   url?: string;
   title?: string;
 }
@@ -50,6 +61,12 @@ interface ChromeApi {
   };
   tabs?: {
     get: (tabId: number) => Promise<ChromeTab>;
+    query?: (queryInfo: { active?: boolean; currentWindow?: boolean }) => Promise<ChromeTab[]>;
+    sendMessage?: (
+      tabId: number,
+      message: unknown,
+      options?: { frameId?: number }
+    ) => Promise<unknown>;
     onActivated?: {
       addListener: (cb: (activeInfo: { tabId: number; windowId: number }) => void) => void;
     };
@@ -61,6 +78,12 @@ interface ChromeApi {
   };
   sidePanel?: {
     setPanelBehavior?: (opts: { openPanelOnActionClick: boolean }) => Promise<void>;
+  };
+  storage?: {
+    local?: {
+      get: (keys?: string | string[] | null) => Promise<Record<string, unknown>>;
+      set: (items: Record<string, unknown>) => Promise<void>;
+    };
   };
 }
 
@@ -138,6 +161,87 @@ const flushTimer = setInterval(() => {
 
 const chromeApi = (globalThis as Record<string, unknown>).chrome as ChromeApi | undefined;
 
+let cachedLibrary: OptimizationItem[] | null = null;
+
+async function loadLibrary(): Promise<OptimizationItem[]> {
+  if (cachedLibrary) return cachedLibrary;
+  try {
+    const stored = await chromeApi?.storage?.local?.get(LIBRARY_STORAGE_KEY);
+    const raw = stored?.[LIBRARY_STORAGE_KEY];
+    if (Array.isArray(raw) && raw.length > 0) {
+      cachedLibrary = raw as OptimizationItem[];
+      return cachedLibrary;
+    }
+  } catch {
+    // ignore storage read error
+  }
+  const defaults = createDefaultOptimizations();
+  await saveLibrary(defaults);
+  return defaults;
+}
+
+async function saveLibrary(items: OptimizationItem[]): Promise<OptimizationItem[]> {
+  cachedLibrary = items;
+  try {
+    await chromeApi?.storage?.local?.set({ [LIBRARY_STORAGE_KEY]: items });
+  } catch {
+    // ignore storage write error
+  }
+  return items;
+}
+
+async function resolveTargetTabId(senderTabId?: number): Promise<number | undefined> {
+  if (senderTabId !== undefined) return senderTabId;
+  try {
+    const activeTabs = await chromeApi?.tabs?.query?.({ active: true, currentWindow: true });
+    const active = activeTabs?.[0];
+    if (active?.id !== undefined && active.url && /^(https?|file):/i.test(active.url)) {
+      return active.id;
+    }
+  } catch {
+    // ignore tab query errors
+  }
+  return lastActiveTab?.tabId;
+}
+
+async function runOptimizationOnTab(
+  item: OptimizationItem,
+  tabId?: number
+): Promise<{ ok: boolean; appliedToPage: boolean; note: string }> {
+  if (item.snippetText) {
+    if (tabId !== undefined && chromeApi?.tabs?.sendMessage) {
+      const frameId = lastFieldFrameByTab.get(tabId);
+      try {
+        const res = (await chromeApi.tabs.sendMessage(
+          tabId,
+          { kind: "HANDS_INSERT_LAST_FIELD", text: item.snippetText, requireResponse: true },
+          frameId !== undefined ? { frameId } : undefined
+        )) as { ok?: boolean } | undefined;
+        if (res?.ok) {
+          return { ok: true, appliedToPage: true, note: "Inserted into active field" };
+        }
+      } catch {
+        // fall through to clipboard fallback in panel
+      }
+    }
+    return { ok: true, appliedToPage: false, note: "Copied to clipboard" };
+  }
+
+  if (item.script) {
+    if (tabId === undefined) {
+      return { ok: false, appliedToPage: false, note: "Open a matching page to run this flow" };
+    }
+    try {
+      await runActionScript(tabId, item.script);
+      return { ok: true, appliedToPage: true, note: "Completed on current page" };
+    } catch {
+      return { ok: false, appliedToPage: false, note: "Open a matching page to run this flow" };
+    }
+  }
+
+  return { ok: true, appliedToPage: false, note: "Completed" };
+}
+
 if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     void pollHandsBridge();
@@ -145,6 +249,85 @@ if (chromeApi?.runtime?.onMessage) {
       recordEvent(msg.event);
       sendResponse({ ok: true });
       return false;
+    }
+    if (msg?.kind === "EYES_GET_LIBRARY") {
+      void loadLibrary().then((items) => sendResponse({ ok: true, items }));
+      return true;
+    }
+    if (msg?.kind === "EYES_UPSERT_OPTIMIZATION" && msg.item) {
+      const incoming = msg.item;
+      void loadLibrary()
+        .then((items) => saveLibrary(upsertOptimizationItem(items, incoming)))
+        .then((items) => sendResponse({ ok: true, items }));
+      return true;
+    }
+    if (msg?.kind === "EYES_ACTIVATE_OPTIMIZATION" && (msg.id || msg.item)) {
+      const incoming = msg.item;
+      const targetId = msg.id ?? incoming?.id;
+      const shouldRecordRun = Boolean(msg.recordRun);
+      void loadLibrary()
+        .then((items) => {
+          let next = incoming
+            ? upsertOptimizationItem(items, incoming, { forceActivate: true })
+            : items.map((item) =>
+                item.id === targetId ? { ...item, status: "active" as const } : item
+              );
+          if (shouldRecordRun && targetId) {
+            next = recordOptimizationRun(next, targetId);
+          }
+          return saveLibrary(next);
+        })
+        .then((items) => sendResponse({ ok: true, items }));
+      return true;
+    }
+    if (msg?.kind === "EYES_TOGGLE_OPTIMIZATION" && msg.id) {
+      const targetId = msg.id;
+      void loadLibrary()
+        .then((items) =>
+          saveLibrary(
+            items.map((item) => {
+              if (item.id !== targetId) return item;
+              return {
+                ...item,
+                status: item.status === "active" ? ("paused" as const) : ("active" as const),
+              };
+            })
+          )
+        )
+        .then((items) => sendResponse({ ok: true, items }));
+      return true;
+    }
+    if (msg?.kind === "EYES_DISMISS_OPTIMIZATION" && msg.id) {
+      const targetId = msg.id;
+      void loadLibrary()
+        .then((items) => saveLibrary(items.filter((item) => item.id !== targetId)))
+        .then((items) => sendResponse({ ok: true, items }));
+      return true;
+    }
+    if (msg?.kind === "EYES_RUN_OPTIMIZATION" && msg.id) {
+      const targetId = msg.id;
+      void (async () => {
+        const items = await loadLibrary();
+        const found = items.find((item) => item.id === targetId);
+        if (!found) {
+          sendResponse({ ok: false, error: "Optimization not found", items });
+          return;
+        }
+        const tabId = await resolveTargetTabId(sender.tab?.id);
+        const exec = await runOptimizationOnTab(found, tabId);
+        if (!exec.ok) {
+          sendResponse({ ok: false, error: exec.note, items });
+          return;
+        }
+        const updated = await saveLibrary(recordOptimizationRun(items, targetId));
+        sendResponse({
+          ok: true,
+          appliedToPage: exec.appliedToPage,
+          note: exec.note,
+          items: updated,
+        });
+      })();
+      return true;
     }
     if (msg?.kind === "HANDS_FIELD_FOCUSED") {
       if (sender.tab?.id !== undefined && sender.frameId !== undefined) {
@@ -275,7 +458,7 @@ if (chromeApi?.tabs?.onUpdated) {
 }
 
 if (chromeApi?.sidePanel?.setPanelBehavior) {
-  chromeApi.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
+  chromeApi.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 }
 
 function injectHandsIntoOpenTabs(): void {
@@ -306,25 +489,6 @@ if (typeof chrome !== "undefined") {
   });
   injectHandsIntoOpenTabs();
   void pollHandsBridge();
-
-  chrome.action?.onClicked?.addListener((tab) => {
-    if (tab.id === undefined) return;
-    if (tab.url && /^(chrome|edge|about|chrome-extension):/i.test(tab.url)) {
-      console.warn(`Hands cannot run on restricted browser page: ${tab.url}`);
-      return;
-    }
-    const tabId = tab.id;
-    void fetchAndRunLatestScript(tabId)
-      .then((ran) => {
-        if (!ran) return runActionScript(tabId, DEMO_SCRIPT);
-        return ran.results;
-      })
-      .catch((error: unknown) => {
-        console.error(
-          `Hands script failed: ${error instanceof Error ? error.message : String(error)}`
-        );
-      });
-  });
 }
 
 function isRunnablePageUrl(url?: string): boolean {
