@@ -482,6 +482,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         });
         const { entry } = await upsertLibraryEntry(dataDir, built);
         latestScript = entry.script;
+        reportCache.clear();
         const suppressMs =
           typeof body.suppressRecallMs === "number" && Number.isFinite(body.suppressRecallMs)
             ? Math.max(0, body.suppressRecallMs)
