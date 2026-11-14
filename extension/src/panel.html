@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Eyes</title>
   <style>
     :root {
@@ -9,28 +10,35 @@
       --canvas: #faf8f4;
       --surface-node: #fcfbf8;
       --surface-graph: #f3efe7;
+      --surface-eyes: #f4e8d8;
       --ink: #1a1917;
       --ink-2: #57524b;
       --ink-muted: #7b756d;
       --brown: #8a5a2b;
+      --brown-border: #ccb08d;
       --line: #e2dcd0;
       --line-strong: #d0c8b9;
+      --ok: #2e6b43;
       --danger: #b42318;
     }
-    * { box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: border-box; }
     body {
-      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       margin: 0;
       background: var(--canvas);
       color: var(--ink);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       font-size: 13px;
       line-height: 1.42;
       -webkit-font-smoothing: antialiased;
     }
-    header {
+    header.top {
+      position: sticky;
+      top: 0;
+      z-index: 10;
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      justify-content: space-between;
+      gap: 10px;
       padding: 11px 14px;
       background: var(--shell);
       border-bottom: 1px solid var(--line);
@@ -42,99 +50,494 @@
       font-size: 13px;
       font-weight: 600;
       letter-spacing: -0.015em;
+      color: var(--ink);
     }
-    .badge {
-      padding: 2px 7px;
-      border: 1px solid var(--line-strong);
-      border-radius: 5px;
-      background: var(--surface-node);
+    .status-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
       color: var(--ink-2);
+      font-size: 11.5px;
       font-weight: 500;
-      font-size: 10.5px;
     }
-    main { padding: 14px; }
-    .stats {
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--ok);
+    }
+    main {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .intro h1 {
+      margin: 0 0 2px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      line-height: 1.3;
+      color: var(--ink);
+    }
+    .intro p {
+      margin: 0;
+      color: var(--ink-2);
+      font-size: 12.5px;
+    }
+    .summary-grid {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
-      margin-bottom: 14px;
     }
     .stat-box {
       padding: 9px 10px;
       border: 1px solid var(--line);
-      border-radius: 7px;
+      border-radius: 8px;
       background: var(--surface-node);
+      box-shadow: 0 1px 1px rgba(26, 25, 23, 0.03);
     }
     .stat-val {
-      font-size: 15px;
+      font-size: 16px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.015em;
+      color: var(--ink);
+      line-height: 1.25;
+    }
+    .stat-val.accent {
+      color: var(--brown);
+    }
+    .stat-lbl {
+      margin-top: 2px;
+      font-size: 11px;
+      color: var(--ink-muted);
+    }
+    .controls {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .filter-bar {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 3px;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--shell);
+    }
+    .filter-tab {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 5px 8px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--ink-2);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .filter-tab:hover {
+      color: var(--ink);
+    }
+    .filter-tab.active {
+      background: var(--surface-node);
+      border-color: var(--line-strong);
+      color: var(--ink);
+      box-shadow: 0 1px 1px rgba(26, 25, 23, 0.04);
+    }
+    .tab-count {
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      color: var(--ink-muted);
+    }
+    .search-input {
+      width: 100%;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface-node);
+      color: var(--ink);
+      font: inherit;
+      font-size: 12.5px;
+    }
+    .search-input::placeholder {
+      color: var(--ink-muted);
+    }
+    .search-input:focus {
+      outline: none;
+      border-color: var(--line-strong);
+      box-shadow: 0 0 0 2px rgba(138, 90, 43, 0.14);
+    }
+    .library-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .opt-card {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-node);
+      box-shadow: 0 1px 2px rgba(26, 25, 23, 0.04);
+    }
+    .opt-card.paused {
+      opacity: 0.78;
+    }
+    .opt-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .opt-title {
+      margin: 0 0 2px;
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.3;
+      color: var(--ink);
+    }
+    .opt-desc {
+      margin: 0;
+      font-size: 12px;
+      color: var(--ink-2);
+    }
+    .switch {
+      flex: 0 0 auto;
+      position: relative;
+      width: 34px;
+      height: 20px;
+      padding: 0;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--shell);
+      cursor: pointer;
+      transition: background 140ms ease, border-color 140ms ease;
+    }
+    .switch::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--surface-node);
+      border: 1px solid var(--line-strong);
+      transition: transform 140ms ease;
+    }
+    .switch[aria-checked="true"] {
+      background: var(--ink);
+      border-color: var(--ink);
+    }
+    .switch[aria-checked="true"]::after {
+      transform: translateX(14px);
+      background: var(--canvas);
+      border-color: var(--canvas);
+    }
+    .suggested-tag {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--brown);
+    }
+    .suggested-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--brown);
+    }
+    .preview-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .preview-snippet {
+      flex: 1 1 180px;
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--shell);
+      color: var(--ink-2);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .keycap {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 8px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      background: var(--surface-node);
+      box-shadow: 0 1px 0 var(--line-strong);
+      color: var(--ink);
+      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .opt-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--canvas);
+    }
+    .metric-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      min-width: 0;
+    }
+    .metric-val {
+      font-size: 12.5px;
       font-weight: 600;
       font-variant-numeric: tabular-nums;
       color: var(--ink);
     }
-    .stat-lbl { font-size: 11px; color: var(--ink-muted); }
-    .section-title {
-      font-size: 10px;
+    .metric-val.saved {
+      color: var(--brown);
+    }
+    .metric-lbl {
+      font-size: 10.5px;
+      color: var(--ink-muted);
+    }
+    .dag-canvas {
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background-color: var(--surface-graph);
+      background-image: radial-gradient(#d8d1c5 0.9px, transparent 0.9px);
+      background-size: 11px 11px;
+    }
+    .dag-canvas[hidden] {
+      display: none;
+    }
+    .flow-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+      color: var(--ink-2);
+      font-size: 9.5px;
       font-weight: 600;
       letter-spacing: 0.06em;
       text-transform: uppercase;
-      color: var(--ink-muted);
-      margin: 14px 0 7px;
     }
-    .event-list, .finding-list { display: flex; flex-direction: column; gap: 6px; }
-    .card {
-      padding: 9px 10px;
-      border: 1px solid var(--line);
-      border-radius: 7px;
+    .flow-head-eyes {
+      color: var(--brown);
+    }
+    .flow-sub {
+      color: var(--ink-muted);
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      text-transform: none;
+    }
+    .flow-track {
+      display: flex;
+      align-items: stretch;
+      gap: 3px;
+    }
+    .flow-node {
+      flex: 1 1 0;
+      min-width: 0;
+      padding: 4px 6px;
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
       background: var(--surface-node);
+    }
+    .flow-node.eyes-step {
+      border-color: var(--brown-border);
+      background: var(--surface-eyes);
+    }
+    .flow-node.loop {
+      border-style: dashed;
+      background: rgba(250, 248, 244, 0.68);
+    }
+    .flow-kind {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      margin-bottom: 1px;
+      color: var(--ink-muted);
+      font-size: 9.5px;
+      font-weight: 600;
+    }
+    .flow-node.eyes-step .flow-kind {
+      color: var(--brown);
+    }
+    .flow-node.done .flow-kind {
+      color: var(--ok);
+    }
+    .flow-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--ink);
+      font-size: 10.5px;
+    }
+    .flow-arrow {
+      flex: 0 0 auto;
+      align-self: center;
+      color: #9e968b;
+    }
+    .dag-divider {
+      height: 1px;
+      margin: 8px 0;
+      background: var(--line);
+    }
+    .opt-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding-top: 2px;
+    }
+    .opt-meta {
+      color: var(--ink-muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .opt-meta.ok {
+      color: var(--ok);
+      font-weight: 500;
+    }
+    .opt-meta.err {
+      color: var(--danger);
+    }
+    .opt-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    button.btn {
+      border-radius: 6px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 5px 10px;
+    }
+    button.btn.primary {
+      border: 1px solid var(--ink);
+      background: var(--ink);
+      color: var(--canvas);
+      box-shadow: 0 1px 2px rgba(26, 25, 23, 0.14);
+    }
+    button.btn.primary:hover {
+      background: #2f2d29;
+    }
+    button.btn.ghost {
+      border: 1px solid var(--line-strong);
+      background: var(--surface-node);
+      color: var(--ink-2);
+    }
+    button.btn.ghost:hover {
+      background: var(--shell);
+      color: var(--ink);
+    }
+    .empty-state {
+      padding: 20px 14px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background-color: var(--surface-graph);
+      background-image: radial-gradient(#d8d1c5 0.9px, transparent 0.9px);
+      background-size: 11px 11px;
+      text-align: center;
       color: var(--ink-2);
       font-size: 12.5px;
     }
-    .card strong { color: var(--ink); font-weight: 600; display: block; margin-bottom: 2px; }
-    .evt-row {
-      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-      font-size: 11px;
-      background: var(--surface-graph);
-      border: 1px solid var(--line);
-      color: var(--ink-2);
-      padding: 6px 8px;
-      border-radius: 6px;
-      border-left: 3px solid var(--line-strong);
-      word-break: break-all;
+    .empty-state strong {
+      display: block;
+      margin-bottom: 3px;
+      font-weight: 600;
+      color: var(--ink);
     }
-    .evt-row strong { color: var(--ink); font-weight: 500; }
-    .evt-row.redacted { border-left-color: var(--danger); }
-    .evt-row.auth { border-left-color: var(--brown); }
   </style>
 </head>
 <body>
-  <header>
+  <header class="top">
     <div class="brand">
-      <svg viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true">
+      <svg data-eyes-brand-mark viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true">
         <path d="M2 10c2.2-3.6 5-5.4 8-5.4s5.8 1.8 8 5.4c-2.2 3.6-5 5.4-8 5.4S4.2 13.6 2 10Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
         <circle cx="10" cy="10" r="2.3" fill="currentColor"/>
       </svg>
-      <span>Eyes</span>
+      <span class="product">Eyes</span>
     </div>
-    <span class="badge">Local only</span>
+    <span class="status-indicator" aria-label="Eyes is watching for repeated workflows">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Watching</span>
+    </span>
   </header>
+
   <main>
-    <div class="stats">
+    <div class="intro">
+      <h1>Optimization Library</h1>
+      <p>Saved shortcuts and workflows learned from your routine.</p>
+    </div>
+
+    <section class="summary-grid" aria-label="Time savings summary">
       <div class="stat-box">
-        <div class="stat-val" id="stat-events">0</div>
-        <div class="stat-lbl">Captured Events</div>
+        <div class="stat-val accent" id="sum-saved">0s</div>
+        <div class="stat-lbl">Time saved</div>
       </div>
       <div class="stat-box">
-        <div class="stat-val" id="stat-bytes">0 KB</div>
-        <div class="stat-lbl">Trace Volume</div>
+        <div class="stat-val" id="sum-runs">0</div>
+        <div class="stat-lbl">Times run</div>
       </div>
+      <div class="stat-box">
+        <div class="stat-val" id="sum-active">0</div>
+        <div class="stat-lbl">Active</div>
+      </div>
+    </section>
+
+    <div class="controls">
+      <div class="filter-bar" role="tablist" aria-label="Filter optimizations">
+        <button class="filter-tab active" type="button" role="tab" aria-selected="true" data-filter="all">
+          <span>All</span>
+          <span class="tab-count" id="count-all">0</span>
+        </button>
+        <button class="filter-tab" type="button" role="tab" aria-selected="false" data-filter="active">
+          <span>Active</span>
+          <span class="tab-count" id="count-active">0</span>
+        </button>
+        <button class="filter-tab" type="button" role="tab" aria-selected="false" data-filter="suggested">
+          <span>Suggested</span>
+          <span class="tab-count" id="count-suggested">0</span>
+        </button>
+      </div>
+      <input
+        class="search-input"
+        id="library-search"
+        type="search"
+        placeholder="Search optimizations..."
+        aria-label="Search optimizations"
+      />
     </div>
-    <div class="section-title">Findings</div>
-    <div class="finding-list" id="findings">
-      <div class="card">Watching workflow...</div>
-    </div>
-    <div class="section-title">Live Event Stream</div>
-    <div class="event-list" id="events"></div>
+
+    <section class="library-list" id="library-list" aria-label="Saved optimizations"></section>
   </main>
+
   <script src="panel.js"></script>
 </body>
 </html>
