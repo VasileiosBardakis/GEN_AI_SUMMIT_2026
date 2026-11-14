@@ -370,6 +370,81 @@ describe("createLibraryRecallMatcher", () => {
       matcher.matchEvents([baseReplyEvent({ type: "click", value: "" })], [replyEntry], 2_700)?.id,
     ).toBe(replyEntry.id);
   });
+
+  it("matches snippets on combobox and searchbox text inputs across sites while rejecting select dropdowns", () => {
+    const matcher = createLibraryRecallMatcher();
+    const query = "asjgskgnsadjgnasdjgasdgbn";
+    const searchEntry = buildLibraryEntryFromScript({
+      name: `Insert "${query}"`,
+      solution: `Insert '${query}' into the currently focused field.`,
+      script: {
+        name: `Insert "${query}"`,
+        steps: [{ action: "insertText", value: query }],
+      },
+      context: {
+        app: "www.youtube.com",
+        url: "https://www.youtube.com/",
+        title: "YouTube",
+        targetLabel: "Search",
+        targetRole: "combobox",
+        locators: [
+          { kind: "css", value: 'input[name="search_query"]' },
+          { kind: "aria", value: 'combobox[name="Search"]' },
+        ],
+      },
+      status: "active",
+      now: 1_000,
+    });
+
+    // Focusing or clicking an empty <input role="combobox"> or <input role="searchbox"> triggers recall
+    expect(
+      matcher.matchEvents(
+        [
+          makeEvent({
+            app: "www.youtube.com",
+            url: "https://www.youtube.com/",
+            window: "YouTube",
+            type: "focus",
+            value: "",
+            target: {
+              locators: [
+                { kind: "aria", value: 'combobox[name="Search"]' },
+                { kind: "css", value: 'input[name="search_query"]' },
+              ],
+              tag: "input",
+              label: "Search",
+              role: "combobox",
+            },
+          }),
+        ],
+        [searchEntry],
+        2_000,
+      )?.id,
+    ).toBe(searchEntry.id);
+
+    // Native <select> combobox must still be rejected for text snippets
+    expect(
+      matcher.matchEvents(
+        [
+          makeEvent({
+            app: "www.youtube.com",
+            url: "https://www.youtube.com/",
+            window: "YouTube",
+            type: "focus",
+            value: "",
+            target: {
+              locators: [{ kind: "css", value: 'select[name="search_query"]' }],
+              tag: "select",
+              label: "Search",
+              role: "combobox",
+            },
+          }),
+        ],
+        [searchEntry],
+        2_500,
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("POST /events -> library half-detection -> /decide bridge", () => {

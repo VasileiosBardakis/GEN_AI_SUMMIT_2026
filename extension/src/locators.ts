@@ -152,7 +152,7 @@ export function extractTarget(rawEl: EventTarget | null): {
 
   const interactive =
     rawEl.closest<HTMLElement>(
-      'button, a, input, select, textarea, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [role="gridcell"], [data-testid], [data-cell], td, th, [contenteditable="true"]'
+      'button, a, input, select, textarea, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [role="gridcell"], [role="textbox"], [role="searchbox"], [role="combobox"], [data-testid], [data-cell], td, th, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
     ) || rawEl;
 
   const locators: Locator[] = [];
@@ -160,7 +160,9 @@ export function extractTarget(rawEl: EventTarget | null): {
   const inputType = (interactive.getAttribute("type") || "text").toLowerCase();
   const role =
     interactive.getAttribute("role") ||
-    (tag === "input" ? (INPUT_TYPE_ROLES[inputType] ?? "textbox") : TAG_ROLES[tag]);
+    (tag === "input"
+      ? (INPUT_TYPE_ROLES[inputType] ?? "textbox")
+      : (TAG_ROLES[tag] ?? (interactive.isContentEditable ? "textbox" : undefined)));
 
   for (const attr of TEST_ID_ATTRS) {
     const val = interactive.getAttribute(attr);
