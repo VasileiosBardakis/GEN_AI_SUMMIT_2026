@@ -4,6 +4,7 @@ import { extractGridContext, extractMenuContext, extractTarget } from "./locator
 import { inspectElementPrivacy, sanitizeUrl, sanitizeValue } from "./privacy.ts";
 import { createSuggestionEngine } from "./suggestion.ts";
 import type { FlowNode, Suggestion } from "./suggestion.ts";
+import { suggestionToOptimization } from "./library.ts";
 
 export type WatcherMode = "all_raw" | "all_throttled" | "semantic";
 
@@ -208,6 +209,19 @@ function isEyesUiTarget(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest("[data-eyes-ui]"));
 }
 
+function sendLibraryMessage(message: unknown): void {
+  const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
+    | { runtime?: { id?: string; sendMessage?: (msg: unknown) => void } }
+    | undefined;
+  if (chromeGlobal?.runtime?.id && typeof chromeGlobal.runtime.sendMessage === "function") {
+    try {
+      chromeGlobal.runtime.sendMessage(message);
+    } catch {
+      // ignore invalidated runtime
+    }
+  }
+}
+
 function showSuggestion(suggestion: Suggestion | null): void {
   if (!suggestion) return;
   if (typeof document === "undefined" || !document.documentElement) return;
@@ -217,6 +231,12 @@ function showSuggestion(suggestion: Suggestion | null): void {
   if (existing && Date.now() - lastSuggestionShownAt < 800) return;
   existing?.remove();
   lastSuggestionShownAt = Date.now();
+
+  const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
+  sendLibraryMessage({
+    kind: "EYES_UPSERT_OPTIMIZATION",
+    item: suggestionToOptimization(suggestion, { app: appHost, status: "suggested" }),
+  });
 
   const host = document.createElement("div");
   host.id = SUGGESTION_HOST_ID;
@@ -583,6 +603,12 @@ function showSuggestion(suggestion: Suggestion | null): void {
     button.addEventListener("click", dismiss);
   }
   shadow.querySelector("[data-eyes-primary]")?.addEventListener("click", () => {
+    sendLibraryMessage({
+      kind: "EYES_ACTIVATE_OPTIMIZATION",
+      id: suggestion.id,
+      item: suggestionToOptimization(suggestion, { app: appHost, status: "active" }),
+      recordRun: true,
+    });
     const content = shadow.querySelector<HTMLElement>("[data-eyes-content]");
     const success = shadow.querySelector<HTMLElement>("[data-eyes-success]");
     if (content) content.hidden = true;

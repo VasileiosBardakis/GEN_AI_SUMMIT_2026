@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, utimes } from "node:fs/promises";
 import type http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Event, Report } from "@gen/shared";
 import { EventSchema, ReportSchema } from "@gen/shared/schema.ts";
 import { createServer } from "../src/app.ts";
-import { buildReport } from "../src/report.ts";
+import { buildCombinedReport, buildReport } from "../src/report.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -33,6 +33,41 @@ describe("buildReport", () => {
 
     expect(ReportSchema.parse(report)).toEqual(report);
     expect(report.session).toBe("sess_reply_x3");
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].verdict).toBe("rung1");
+    expect(report.findings[0].stats.repetitions).toBe(3);
+  });
+});
+
+describe("buildCombinedReport", () => {
+  it("combines findings across sessions and deduplicates by finding.id", async () => {
+    const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+    const navOnlyEvents: Event[] = [
+      {
+        v: 1,
+        id: "10000000-0000-4000-8000-000000000001",
+        ts: 1740000030000,
+        session: "sess_browser",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:3000/inbox",
+        type: "nav",
+      },
+    ];
+    const duplicateSessionEvents = replyX3Events.map((e, i) => ({
+      ...e,
+      id: `20000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      session: "sess_reply_x3_dup",
+    }));
+
+    const report = buildCombinedReport([
+      replyX3Events,
+      navOnlyEvents,
+      duplicateSessionEvents,
+    ]);
+
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.session).toBe("all");
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0].verdict).toBe("rung1");
     expect(report.findings[0].stats.repetitions).toBe(3);
@@ -83,7 +118,7 @@ describe("GET /report HTTP integration", () => {
     expect(bySessionReport.findings[0].stats.repetitions).toBe(3);
   });
 
-  it("falls back to latestSession for GET /report without ?session= after POSTing reply-x3.jsonl", async () => {
+  it("returns combined session === 'all' for GET /report without ?session= after POSTing reply-x3.jsonl", async () => {
     const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
 
     const postRes = await fetch(`${baseUrl}/events`, {
@@ -97,10 +132,106 @@ describe("GET /report HTTP integration", () => {
     expect(latestRes.status).toBe(200);
     const latestReport = (await latestRes.json()) as Report;
     expect(ReportSchema.parse(latestReport)).toEqual(latestReport);
-    expect(latestReport.session).toBe("sess_reply_x3");
+    expect(latestReport.session).toBe("all");
     expect(latestReport.findings).toHaveLength(1);
     expect(latestReport.findings[0].verdict).toBe("rung1");
     expect(latestReport.findings[0].stats.repetitions).toBe(3);
+  });
+
+  it("returns session: 'all' and rung1 finding when reply-x3.jsonl is followed by nav-only sess_browser events", async () => {
+    const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+    const browserNavEvents: Event[] = [
+      {
+        v: 1,
+        id: "30000000-0000-4000-8000-000000000001",
+        ts: 1740000050000,
+        session: "sess_browser",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:3000/inbox",
+        type: "nav",
+      },
+    ];
+
+    const postReplyRes = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(replyX3Events),
+    });
+    expect(postReplyRes.status).toBe(200);
+
+    const postBrowserRes = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(browserNavEvents),
+    });
+    expect(postBrowserRes.status).toBe(200);
+
+    const allRes = await fetch(`${baseUrl}/report`);
+    expect(allRes.status).toBe(200);
+    const allReport = (await allRes.json()) as Report;
+    expect(ReportSchema.parse(allReport)).toEqual(allReport);
+    expect(allReport.session).toBe("all");
+    expect(allReport.findings).toHaveLength(1);
+    expect(allReport.findings[0].verdict).toBe("rung1");
+
+    const browserOnlyRes = await fetch(
+      `${baseUrl}/report?session=sess_browser`,
+    );
+    expect(browserOnlyRes.status).toBe(200);
+    const browserOnlyReport = (await browserOnlyRes.json()) as Report;
+    expect(browserOnlyReport.session).toBe("sess_browser");
+    expect(browserOnlyReport.findings).toEqual([]);
+  });
+
+  it("deduplicates identical finding ids across two sessions in GET /report", async () => {
+    const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+    const secondSessionEvents = replyX3Events.map((e, i) => ({
+      ...e,
+      id: `40000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      session: "sess_reply_x3_copy",
+    }));
+
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(replyX3Events),
+    });
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(secondSessionEvents),
+    });
+
+    const reportRes = await fetch(`${baseUrl}/report`);
+    expect(reportRes.status).toBe(200);
+    const report = (await reportRes.json()) as Report;
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.session).toBe("all");
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].verdict).toBe("rung1");
+  });
+
+  it("ignores session .jsonl files with mtime older than 30 minutes in GET /report without ?session=", async () => {
+    const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+
+    const postRes = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(replyX3Events),
+    });
+    expect(postRes.status).toBe(200);
+
+    const oldTime = new Date(Date.now() - 31 * 60 * 1000);
+    const sessionFile = path.join(tracesDir, "sess_reply_x3.jsonl");
+    await utimes(sessionFile, oldTime, oldTime);
+
+    const reportRes = await fetch(`${baseUrl}/report`);
+    expect(reportRes.status).toBe(200);
+    const report = (await reportRes.json()) as Report;
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.session).toBe("all");
+    expect(report.findings).toEqual([]);
   });
 
   it("returns findings: [] for GET /report?session=sess_one_off after POSTing one-off.jsonl", async () => {

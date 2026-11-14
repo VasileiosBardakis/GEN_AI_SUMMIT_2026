@@ -350,4 +350,50 @@ describe("snippet persistence and GET /artifact/:id integration", () => {
       error: "Artifact not found",
     });
   });
+
+  it("defaults dataDir inside tracesDir when createServer({ tracesDir }) is called without dataDir and supports combined GET /report", async () => {
+    const defaultTracesDir = path.join(rootDir, "only-traces");
+    const defaultServer = createServer({ tracesDir: defaultTracesDir });
+    await new Promise<void>((resolve) => {
+      defaultServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const defaultPort = (defaultServer.address() as AddressInfo).port;
+    const defaultBaseUrl = `http://127.0.0.1:${defaultPort}`;
+
+    try {
+      const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+      const postRes = await fetch(`${defaultBaseUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(replyX3Events),
+      });
+      expect(postRes.status).toBe(200);
+
+      const reportRes = await fetch(`${defaultBaseUrl}/report`);
+      expect(reportRes.status).toBe(200);
+      const report = (await reportRes.json()) as Report;
+      expect(report.session).toBe("all");
+      expect(report.findings).toHaveLength(1);
+      const [finding] = report.findings;
+      expect(finding.artifact?.verified).toBe(true);
+
+      expect(
+        existsSync(
+          path.join(defaultTracesDir, "data", "snippets", `${finding.id}.txt`),
+        ),
+      ).toBe(true);
+
+      const artifactRes = await fetch(
+        `${defaultBaseUrl}/artifact/${finding.id}`,
+      );
+      expect(artifactRes.status).toBe(200);
+      const artifact = (await artifactRes.json()) as SnippetArtifact;
+      expect(artifact.id).toBe(finding.id);
+      expect(artifact.text.length).toBeGreaterThan(40);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        defaultServer.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+  });
 });

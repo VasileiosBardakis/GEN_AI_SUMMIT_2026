@@ -2,9 +2,11 @@ import http from "node:http";
 import path from "node:path";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
-import { buildReport } from "./report.ts";
-import { appendEvents, readEvents } from "./trace.ts";
+import { buildCombinedReport, buildReport } from "./report.ts";
+import { appendEvents, listSessions, readEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
+
+const RECENT_SESSION_WINDOW_MS = 30 * 60 * 1000;
 
 function setCorsHeaders(res: http.ServerResponse): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -28,8 +30,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 }
 
 export function createServer(opts: { tracesDir: string; dataDir?: string }): http.Server {
-  const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
-  let latestSession = "none";
+  const dataDir = opts.dataDir ?? path.join(opts.tracesDir, "data");
 
   return http.createServer(async (req, res) => {
     setCorsHeaders(res);
@@ -75,9 +76,20 @@ export function createServer(opts: { tracesDir: string; dataDir?: string }): htt
 
       if (req.method === "GET" && url.pathname === "/report") {
         const sessionParam = url.searchParams.get("session");
-        const session = sessionParam && sessionParam.length > 0 ? sessionParam : latestSession;
-        const events = await readEvents(opts.tracesDir, session);
-        const parsed = ReportSchema.safeParse(buildReport(session, events, { dataDir }));
+        let report: unknown;
+        if (sessionParam && sessionParam.length > 0) {
+          const events = await readEvents(opts.tracesDir, sessionParam);
+          report = buildReport(sessionParam, events, { dataDir });
+        } else {
+          const cutoffMs = Date.now() - RECENT_SESSION_WINDOW_MS;
+          const sessions = await listSessions(opts.tracesDir);
+          const recentSessions = sessions.filter((s) => s.mtimeMs >= cutoffMs);
+          const sessionEvents = await Promise.all(
+            recentSessions.map((s) => readEvents(opts.tracesDir, s.session)),
+          );
+          report = buildCombinedReport(sessionEvents, { dataDir });
+        }
+        const parsed = ReportSchema.safeParse(report);
         if (!parsed.success) {
           sendJson(res, 500, { ok: false, error: parsed.error.message });
           return;
@@ -103,9 +115,6 @@ export function createServer(opts: { tracesDir: string; dataDir?: string }): htt
         }
 
         await appendEvents(opts.tracesDir, validation.events);
-        if (validation.events.length > 0) {
-          latestSession = validation.events[validation.events.length - 1].session;
-        }
         sendJson(res, 200, { ok: true, n: validation.events.length });
         return;
       }
