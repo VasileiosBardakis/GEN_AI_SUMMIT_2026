@@ -1,6 +1,7 @@
 import http from "node:http";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { buildReport } from "./report.ts";
+import { scrubEvents } from "./scrub.ts";
 import { appendEvents, readEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
 
@@ -74,11 +75,15 @@ export function createServer(opts: { tracesDir: string }): http.Server {
           return;
         }
 
-        await appendEvents(opts.tracesDir, validation.events);
+        const events = scrubEvents(validation.events);
+        const original = new Set(validation.events);
+        const scrubbed = validation.events.length - events.filter((e) => original.has(e)).length;
+
+        await appendEvents(opts.tracesDir, events);
         if (validation.events.length > 0) {
           latestSession = validation.events[validation.events.length - 1].session;
         }
-        sendJson(res, 200, { ok: true, n: validation.events.length });
+        sendJson(res, 200, { ok: true, n: events.length, scrubbed });
         return;
       }
 

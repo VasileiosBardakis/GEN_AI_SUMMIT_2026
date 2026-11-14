@@ -72,7 +72,7 @@ describe("server events & report routes", () => {
     });
     expect(postValidRes.status).toBe(200);
     expect(postValidRes.headers.get("access-control-allow-origin")).toBe("*");
-    expect(await postValidRes.json()).toEqual({ ok: true, n: 3 });
+    expect(await postValidRes.json()).toEqual({ ok: true, n: 3, scrubbed: 0 });
 
     const stored = await readEvents(tracesDir, "sess-test-1");
     expect(stored).toEqual(events);
