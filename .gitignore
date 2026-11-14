@@ -18,3 +18,4 @@ blob-report/
 # Editors and OS
 .DS_Store
 *.swp
+pnpm-lock.yaml
