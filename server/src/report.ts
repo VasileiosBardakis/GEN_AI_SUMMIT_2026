@@ -3,6 +3,7 @@ import { ReportSchema } from "@gen/shared/schema.ts";
 import { writeSnippetArtifact } from "./artifacts.ts";
 import { normalize } from "./detect/normalize.ts";
 import { detectSharedEdgesWithText } from "./detect/shared-edges.ts";
+import { detectShortValues } from "./detect/short-values.ts";
 import { detectSnippetsWithText } from "./detect/snippet.ts";
 
 export interface BuildReportOptions {
@@ -30,6 +31,12 @@ export function buildReport(
           ? writeSnippetArtifact(dataDir, finding, text)
           : finding,
       );
+    }
+  }
+  for (const finding of detectShortValues(steps, events)) {
+    if (!seenIds.has(finding.id)) {
+      seenIds.add(finding.id);
+      findings.push(finding);
     }
   }
   return ReportSchema.parse({
@@ -61,6 +68,12 @@ export function buildCombinedReport(
             ? writeSnippetArtifact(dataDir, finding, text)
             : finding,
         );
+      }
+    }
+    for (const finding of detectShortValues(steps, events)) {
+      if (!seenIds.has(finding.id)) {
+        seenIds.add(finding.id);
+        findings.push(finding);
       }
     }
   }
