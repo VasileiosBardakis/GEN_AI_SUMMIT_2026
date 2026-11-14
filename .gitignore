@@ -1,0 +1,20 @@
+# Secrets (keep a committed .env.example instead)
+.env
+.env.*
+!.env.example
+
+# Node / TypeScript
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+coverage/
+
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+
+# Editors and OS
+.DS_Store
+*.swp
