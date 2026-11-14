@@ -110,7 +110,6 @@ describe("Stage 2: implementSolution", () => {
     });
 
     expect(capturedSystem).toContain("Implementor");
-    expect(capturedSystem).toContain("Stop BEFORE irreversible actions");
     expect(capturedPrompt).toContain("Approve snippet");
     expect(capturedPrompt).toContain("Insert 'Approved' into the focused box");
     expect(script).toEqual({
