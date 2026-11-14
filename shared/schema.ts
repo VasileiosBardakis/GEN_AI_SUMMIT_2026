@@ -1,10 +1,12 @@
 import { z } from "zod";
-import type { Event } from "./contract.ts";
+import { ALL_EVENT_TYPES, type Event } from "./contract.ts";
 
 export const LocatorSchema = z.object({
   kind: z.enum(["testid", "aria", "css", "text", "uia"]),
   value: z.string(),
 });
+
+export const EventTypeSchema = z.enum(ALL_EVENT_TYPES);
 
 export const EventSchema = z.object({
   v: z.literal(1),
@@ -15,12 +17,13 @@ export const EventSchema = z.object({
   app: z.string().min(1),
   window: z.string().optional(),
   url: z.string().optional(),
-  type: z.enum(["click", "input", "paste", "copy", "nav", "submit", "key", "tool_call"]),
+  type: EventTypeSchema,
   target: z
     .object({
       locators: z.array(LocatorSchema),
       tag: z.string().optional(),
       label: z.string().optional(),
+      role: z.string().optional(),
     })
     .optional(),
   value: z.string().optional(),
@@ -28,7 +31,11 @@ export const EventSchema = z.object({
     .object({
       fromApp: z.string().optional(),
       toApp: z.string().optional(),
+      fromUrl: z.string().optional(),
+      fromCell: z.string().optional(),
       text: z.string().optional(),
+      textHash: z.string().optional(),
+      timeSinceCopyMs: z.number().optional(),
     })
     .optional(),
   meta: z.record(z.string(), z.unknown()).optional(),
