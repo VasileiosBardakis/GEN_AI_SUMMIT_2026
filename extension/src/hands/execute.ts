@@ -30,6 +30,35 @@ export async function executeStep(
       return Array.from(root.querySelectorAll(`[data-testid="${escapeValue(locator.value)}"]`));
     }
     if (locator.kind === "aria") {
+      const roleNameMatch = /^([a-z]+)\[name="(.+)"\]$/i.exec(locator.value.trim());
+      if (roleNameMatch) {
+        const wantedRaw = roleNameMatch[2]!.replace(/\\"/g, '"');
+        const wantedLabel = wantedRaw.toLowerCase();
+        const byAria = Array.from(
+          root.querySelectorAll(`[aria-label="${escapeValue(wantedRaw)}"]`),
+        );
+        if (byAria.length > 0) return byAria;
+        const fields = Array.from(
+          root.querySelectorAll<HTMLElement>("input, textarea, select, button, a, [role]"),
+        );
+        return fields.filter((el) => {
+          const aria = el.getAttribute("aria-label")?.trim().toLowerCase();
+          if (aria === wantedLabel) return true;
+          if (
+            el instanceof HTMLInputElement ||
+            el instanceof HTMLTextAreaElement ||
+            el instanceof HTMLSelectElement
+          ) {
+            const labelText = Array.from(el.labels ?? [])
+              .map((l) => l.textContent?.trim() || "")
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+            if (labelText === wantedLabel) return true;
+          }
+          return false;
+        });
+      }
       return Array.from(root.querySelectorAll(`[aria-label="${escapeValue(locator.value)}"]`));
     }
     const wanted = locator.value.trim();
@@ -88,10 +117,20 @@ export async function executeStep(
   function insertText(element: Element, value: string): void {
     if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
       element.focus();
-      const start = element.selectionStart ?? element.value.length;
-      const end = element.selectionEnd ?? element.value.length;
-      setNativeValue(element, `${element.value.slice(0, start)}${value}${element.value.slice(end)}`);
-      const caret = start + value.length;
+      const existingNorm = element.value.trim().toLowerCase();
+      const incomingNorm = value.trim().toLowerCase();
+      if (
+        existingNorm.length > 0 &&
+        incomingNorm.length > 0 &&
+        incomingNorm.startsWith(existingNorm)
+      ) {
+        setNativeValue(element, value);
+      } else {
+        const start = element.selectionStart ?? element.value.length;
+        const end = element.selectionEnd ?? element.value.length;
+        setNativeValue(element, `${element.value.slice(0, start)}${value}${element.value.slice(end)}`);
+      }
+      const caret = element.value.length;
       try {
         element.setSelectionRange(caret, caret);
       } catch {

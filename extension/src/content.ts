@@ -86,11 +86,14 @@ function extensionAssetUrl(assetPath: string): string | undefined {
 }
 
 const suggestionEngine = createSuggestionEngine({
+  minTextLength: 6,
   clickReplayUrl:
     extensionAssetUrl("dist/replay-demo.mp4") ?? getConfig().clickReplayUrl,
 });
 const committedTextByElement = new WeakMap<HTMLElement, string>();
+const lastNonEmptyByElement = new WeakMap<HTMLElement, string>();
 let lastSuggestionShownAt = 0;
+let activePopupDismiss: (() => void) | null = null;
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => {
@@ -237,6 +240,11 @@ function showSuggestion(
 
   const existing = document.getElementById(SUGGESTION_HOST_ID);
   if (existing && !options.force && Date.now() - lastSuggestionShownAt < 800) return;
+  if (activePopupDismiss) {
+    const prevDismiss = activePopupDismiss;
+    activePopupDismiss = null;
+    prevDismiss();
+  }
   existing?.remove();
   lastSuggestionShownAt = Date.now();
 
@@ -244,6 +252,9 @@ function showSuggestion(
   const resolveDecision = (decision: "approved" | "dismissed"): void => {
     if (settled) return;
     settled = true;
+    if (activePopupDismiss === dismiss) {
+      activePopupDismiss = null;
+    }
     console.log("[eyes-content] decider decision:", decision, suggestion.id);
     options.onDecision?.(decision);
   };
@@ -679,6 +690,7 @@ function showSuggestion(
     resolveDecision("dismissed");
     host.remove();
   };
+  activePopupDismiss = dismiss;
   for (const button of Array.from(shadow.querySelectorAll("[data-eyes-dismiss]"))) {
     button.addEventListener("click", dismiss);
   }
@@ -696,7 +708,7 @@ function showSuggestion(
     const success = shadow.querySelector<HTMLElement>("[data-eyes-success]");
     if (content) content.hidden = true;
     if (success) success.hidden = false;
-    setTimeout(() => host.remove(), 2200);
+    setTimeout(() => host.remove(), 1000);
   });
   shadow.querySelector("video")?.addEventListener("error", () => {
     shadow.querySelector("[data-eyes-replay]")?.remove();
@@ -745,12 +757,20 @@ function autoSaveRepeatedSnippet(element: HTMLElement, suggestion: Suggestion): 
   });
 
   const { target } = extractTarget(element);
-  const locators = (target?.locators ?? []).filter(
-    (loc): loc is { kind: "testid" | "aria" | "css" | "text"; value: string } =>
-      loc.kind === "testid" || loc.kind === "aria" || loc.kind === "css" || loc.kind === "text"
-  );
+  const locators = (target?.locators ?? [])
+    .filter(
+      (loc): loc is { kind: "testid" | "aria" | "css" | "text"; value: string } =>
+        loc.kind === "testid" || loc.kind === "aria" || loc.kind === "css" || loc.kind === "text"
+    )
+    .sort((a, b) => {
+      const rank = (k: string): number =>
+        k === "testid" ? 0 : k === "css" ? 1 : k === "aria" ? 2 : 3;
+      return rank(a.kind) - rank(b.kind);
+    });
   const cleanUrl =
     typeof location !== "undefined" ? sanitizeUrl(location.href).url : undefined;
+
+  console.log("[eyes-snippet] learned", name, "on", locators[0]?.value ?? target?.tag);
 
   sendLibraryMessage({
     kind: "EYES_AUTO_SAVE_LIBRARY",
@@ -782,8 +802,14 @@ function recordCommittedText(
 
   if (!force && committedTextByElement.get(element) === value) return;
   committedTextByElement.set(element, value);
+  lastNonEmptyByElement.set(element, value);
 
-  const detected = suggestionEngine.recordText(value);
+  const { target } = extractTarget(element);
+  const scopeKey =
+    target?.locators.find((l) => l.kind === "testid" || l.kind === "css")?.value ??
+    target?.label ??
+    "";
+  const detected = suggestionEngine.recordText(value, scopeKey);
   if (detected) {
     autoSaveRepeatedSnippet(element, detected);
   }
@@ -1210,7 +1236,17 @@ export function setupEventListeners(): void {
 
       const privacyCheck = inspectElementPrivacy(targetEl);
       const currentVal = getElementValue(targetEl) ?? "";
-      clearCommittedTextIfChanged(targetEl, currentVal, privacyCheck);
+      if (currentVal.trim().length > 0) {
+        clearCommittedTextIfChanged(targetEl, currentVal, privacyCheck);
+        lastNonEmptyByElement.set(targetEl, currentVal);
+      } else {
+        const prevNonEmpty = lastNonEmptyByElement.get(targetEl);
+        if (prevNonEmpty && prevNonEmpty.trim().length >= 6) {
+          recordCommittedText(targetEl, prevNonEmpty, privacyCheck);
+        }
+        lastNonEmptyByElement.delete(targetEl);
+        committedTextByElement.delete(targetEl);
+      }
       if (getConfig().mode === "semantic") return;
       const durationMs = sess ? Math.max(1, Date.now() - sess.startedAt) : 1;
       const keystrokeCount = sess ? sess.keystrokeCount : 0;
@@ -1274,6 +1310,11 @@ export function setupEventListeners(): void {
       if (targetEl) {
         const currentVal = getElementValue(targetEl) ?? "";
         clearCommittedTextIfChanged(targetEl, currentVal, inspectElementPrivacy(targetEl));
+        if (currentVal.trim().length > 0) {
+          lastNonEmptyByElement.set(targetEl, currentVal);
+        } else {
+          lastNonEmptyByElement.delete(targetEl);
+        }
         typingSessions.set(targetEl, {
           el: targetEl,
           startedAt: Date.now(),
@@ -1450,12 +1491,14 @@ export function setupEventListeners(): void {
           textHash: privacy.valueHash,
         }
       );
-      recordCommittedText(
-        e.target instanceof HTMLElement ? e.target : null,
-        cleanText,
-        elCheck,
-        true
-      );
+      const pasteEl =
+        resolveEditableField(e.target) ??
+        (e.target instanceof HTMLElement
+          ? e.target
+          : e.target instanceof Node
+            ? e.target.parentElement
+            : null);
+      recordCommittedText(pasteEl, cleanText, elCheck, true);
     },
     true
   );
@@ -1466,6 +1509,10 @@ export function setupEventListeners(): void {
   document.addEventListener(
     "submit",
     (e: SubmitEvent) => {
+      const activeEl = resolveEditableField(getDeepActiveElement());
+      if (activeEl && (!(e.target instanceof Node) || e.target.contains(activeEl))) {
+        recordCommittedText(activeEl, getElementValue(activeEl), inspectElementPrivacy(activeEl));
+      }
       emit("submit", e.target);
     },
     true
@@ -1474,6 +1521,14 @@ export function setupEventListeners(): void {
   document.addEventListener(
     "reset",
     (e: globalThis.Event) => {
+      if (e.target instanceof HTMLFormElement) {
+        for (const el of Array.from(e.target.elements)) {
+          if (el instanceof HTMLElement) {
+            committedTextByElement.delete(el);
+            lastNonEmptyByElement.delete(el);
+          }
+        }
+      }
       emit("reset", e.target);
     },
     true

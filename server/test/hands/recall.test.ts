@@ -295,6 +295,71 @@ describe("createLibraryRecallMatcher", () => {
       ),
     ).toBeNull();
 
+    // Clicking a button sharing label words ("Clear reply") must NOT trigger a textbox snippet
+    expect(
+      matcher.matchEvents(
+        [
+          makeEvent({
+            app: "localhost",
+            url: "http://localhost:5173/",
+            window: "Automation Ladder — Local Demo",
+            type: "click",
+            target: {
+              locators: [{ kind: "css", value: "#clear-reply" }],
+              tag: "button",
+              label: "Clear reply",
+              role: "button",
+            },
+          }),
+        ],
+        [replyEntry],
+        2_520,
+      ),
+    ).toBeNull();
+
+    // Focusing/clicking while field ALREADY contains the snippet must NOT trigger
+    expect(
+      matcher.matchEvents([baseReplyEvent({ type: "focus", value: snippet })], [replyEntry], 2_540),
+    ).toBeNull();
+    expect(
+      matcher.matchEvents([baseReplyEvent({ type: "click", value: snippet })], [replyEntry], 2_550),
+    ).toBeNull();
+
+    // Deleting to empty (Backspace -> input value="") must NOT trigger mid-delete
+    expect(
+      matcher.matchEvents(
+        [baseReplyEvent({ type: "input", value: "", meta: { typing: { inputType: "deleteContentBackward" } } })],
+        [replyEntry],
+        2_560,
+      ),
+    ).toBeNull();
+
+    // A "Company name" snippet must NEVER match other [name="..."] selectors via the word "name"
+    const companyEntry = buildLibraryEntryFromScript({
+      name: "Insert Nikolaidis logistics",
+      solution: "Insert 'Nikolaidis logistics' into the currently focused field.",
+      script: {
+        name: "Insert Nikolaidis logistics",
+        steps: [{ action: "insertText", value: "Nikolaidis logistics" }],
+      },
+      context: {
+        app: "localhost",
+        url: "http://localhost:5173/",
+        title: "Automation Ladder — Local Demo",
+        targetLabel: "Company name",
+        targetRole: "textbox",
+        locators: [
+          { kind: "aria", value: 'textbox[name="Company name"]' },
+          { kind: "css", value: 'input[name="company_name"]' },
+        ],
+      },
+      status: "active",
+      now: 1_000,
+    });
+    expect(
+      matcher.matchEvents([baseReplyEvent({ type: "focus", value: "" })], [companyEntry], 2_580),
+    ).toBeNull();
+
     // Clicking the target field while already filled with unrelated text must NOT trigger
     expect(
       matcher.matchEvents([baseReplyEvent({ type: "click", value: "Already wrote something else" })], [replyEntry], 2_600),
@@ -514,5 +579,29 @@ describe("POST /events -> library half-detection -> /decide bridge", () => {
     expect(decideCmd.kind).toBe("decide");
     expect(decideCmd.name).toBe("Insert shipping reply");
     expect(decideCmd.script.steps).toEqual([{ action: "insertText", value: snippet }]);
+
+    // Approving targets the concrete CSS locator (skipping aria) and does not lock out for 60s
+    const pollRunPromise = fetch(`${baseUrl}/hands/next?waitMs=2000`);
+    await fetch(`${baseUrl}/hands/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: decideCmd.id, ok: true, decision: "approved" }),
+    });
+    const runCmd = (await (await pollRunPromise).json()) as {
+      id: string;
+      script: LibraryEntry["script"];
+    };
+    expect(runCmd.script.steps).toEqual([
+      {
+        action: "insertText",
+        value: snippet,
+        target: { kind: "css", value: 'textarea[name="customer_reply"]' },
+      },
+    ]);
+    await fetch(`${baseUrl}/hands/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: runCmd.id, ok: true, results: [{ ok: true }] }),
+    });
   });
 });
