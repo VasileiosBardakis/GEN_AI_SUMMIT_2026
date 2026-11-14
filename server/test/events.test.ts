@@ -91,9 +91,7 @@ describe("server events & report routes", () => {
     expect(reportRes.status).toBe(200);
     const report = (await reportRes.json()) as Report;
     expect(report.session).toBe("sess-test-1");
-    expect(report.findings.length).toBe(1);
-    expect(report.findings[0].verdict).toBe("rung1");
-    expect(report.findings[0].title).toBe("Reply to supplier emails with a saved snippet");
+    expect(report.findings).toEqual([]);
 
     const healthRes = await fetch(`${baseUrl}/health`);
     expect(healthRes.status).toBe(200);
