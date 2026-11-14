@@ -157,7 +157,6 @@ describe("LibraryEntrySchema", () => {
         steps: [{ action: "insertText", value: "Thanks, your order ships Friday." }],
       },
       eyes: {
-        triggerEvent: "typing_prefix",
         intent: "shipping_reply",
         scope: {
           apps: ["mail.example.com"],
