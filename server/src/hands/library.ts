@@ -79,6 +79,28 @@ export async function upsertLibraryEntry(
   return { entry: merged, items: next };
 }
 
+export async function recordLibraryRun(
+  dataDir: string,
+  id: string,
+  now = Date.now(),
+): Promise<LibraryEntry | null> {
+  const existingItems = await readLibrary(dataDir);
+  const idx = existingItems.findIndex((item) => item.id === id);
+  if (idx === -1) return null;
+
+  const existing = existingItems[idx];
+  const updated: LibraryEntry = {
+    ...existing,
+    status: "active",
+    runCount: existing.runCount + 1,
+    updatedAt: now,
+  };
+  const next = existingItems.slice();
+  next[idx] = updated;
+  await writeLibrary(dataDir, next);
+  return updated;
+}
+
 export async function deleteLibraryEntry(
   dataDir: string,
   id: string,
