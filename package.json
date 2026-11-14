@@ -9,7 +9,7 @@
     "test": "vitest run --passWithNoTests",
     "smoke": "playwright test --pass-with-no-tests",
     "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run smoke",
-    "build:extension": "tsc -p extension/tsconfig.json",
+    "build:extension": "pnpm --filter @gen/extension build",
     "server": "pnpm --filter @gen/server start"
   },
   "devDependencies": {
