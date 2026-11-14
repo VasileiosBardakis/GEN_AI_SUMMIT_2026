@@ -23,6 +23,7 @@ import {
   type LibraryEntry,
 } from "./hands/types.ts";
 import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
+import { createProposer, type HandsDecision, type HandsOutcome } from "./propose.ts";
 import { buildCombinedReport, buildReport } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
 import { appendEvents, listSessions, readEvents } from "./trace.ts";
@@ -60,13 +61,13 @@ export type CreateServerOptions = {
     solution: string,
     opts?: { name?: string; context?: ImplementContext },
   ) => Promise<LibraryEntry>;
+  autoPropose?: boolean;
+  proposeDebounceMs?: number;
 };
 
-type HandsDecision = "approved" | "dismissed";
 type HandsCommand =
   | { id: string; kind?: "run"; script: ActionScript }
   | { id: string; kind: "decide"; name: string; solution: string; script: ActionScript };
-type HandsOutcome = { ok: boolean; results?: unknown; decision?: HandsDecision; error?: string };
 
 export function createServer(opts: CreateServerOptions): http.Server {
   const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
@@ -110,17 +111,24 @@ export function createServer(opts: CreateServerOptions): http.Server {
     }
   }
 
-  function enqueueAndAwait(
+  function awaitHands(
     cmd: HandsCommand,
     timeoutMs: number,
-    timeoutError: string,
+    timeoutError?: string,
   ): Promise<HandsOutcome> {
-    const outcomePromise = new Promise<HandsOutcome>((resolve) => {
+    return new Promise<HandsOutcome>((resolve) => {
       const timer = setTimeout(() => {
         waiters.delete(cmd.id);
         const idx = commandQueue.findIndex((c) => c.id === cmd.id);
         if (idx >= 0) commandQueue.splice(idx, 1);
-        resolve({ ok: false, error: timeoutError });
+        resolve({
+          ok: false,
+          error:
+            timeoutError ??
+            (cmd.kind === "decide"
+              ? "Timed out waiting for user decision"
+              : "Timed out waiting for extension to execute script"),
+        });
       }, timeoutMs);
       timer.unref?.();
       waiters.set(cmd.id, (outcome) => {
@@ -128,9 +136,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
         waiters.delete(cmd.id);
         resolve(outcome);
       });
+      dispatchNext(cmd);
     });
-    dispatchNext(cmd);
-    return outcomePromise;
   }
 
   async function requestDecision(input: {
@@ -144,7 +151,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
     console.log(
       `[server] decide id=${id} name="${input.name}" steps=${input.script.steps.length}`,
     );
-    const outcome = await enqueueAndAwait(
+    const outcome = await awaitHands(
       { id, kind: "decide", name: input.name, solution: input.solution, script: input.script },
       timeoutMs,
       "Timed out waiting for user decision",
@@ -170,7 +177,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         console.log(
           `[server] library recall approved id=${entry.id} -> running script runId=${runId}`,
         );
-        void enqueueAndAwait(
+        void awaitHands(
           { id: runId, script: entry.script },
           30000,
           "Timed out waiting for extension to execute script",
@@ -183,7 +190,32 @@ export function createServer(opts: CreateServerOptions): http.Server {
     }
   }
 
-  return http.createServer(async (req, res) => {
+  const autoPropose = opts.autoPropose ?? process.env.BRAIN_AUTO_PROPOSE !== "0";
+  const proposer = autoPropose
+    ? createProposer({
+        runReport: async (sessionId) => {
+          const events = await readEvents(opts.tracesDir, sessionId);
+          const report = await buildReport(sessionId, events, {
+            dataDir,
+            llm: true,
+            gemini: opts.gemini,
+            implement,
+            scriptStore: scriptsByFindingId,
+          });
+          return { findings: report.findings, scripts: scriptsByFindingId };
+        },
+        requestDecision: (name, solution, script) =>
+          awaitHands(
+            { id: crypto.randomUUID(), kind: "decide", name, solution, script },
+            60000,
+          ),
+        runScript: (script) => awaitHands({ id: crypto.randomUUID(), script }, 30000),
+        debounceMs: opts.proposeDebounceMs,
+        log: (line) => console.log(line),
+      })
+    : null;
+
+  const server = http.createServer(async (req, res) => {
     setCorsHeaders(res);
 
     if (req.method === "OPTIONS") {
@@ -290,6 +322,12 @@ export function createServer(opts: CreateServerOptions): http.Server {
           }
         }
         sendJson(res, 200, { ok: true, n: events.length, scrubbed });
+        if (proposer) {
+          const sessionIds = new Set(events.map((e) => e.session));
+          for (const sessionId of sessionIds) {
+            proposer.onEvents(sessionId);
+          }
+        }
         return;
       }
 
@@ -515,7 +553,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const id = crypto.randomUUID();
         const timeoutMs = Number(url.searchParams.get("timeoutMs")) || 30000;
         console.log(`[server] POST /hands/run id=${id} steps=${script.steps.length}`);
-        const outcome = await enqueueAndAwait(
+        const outcome = await awaitHands(
           { id, script },
           timeoutMs,
           "Timed out waiting for extension to execute script",
@@ -613,4 +651,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
       sendJson(res, 500, { ok: false, error: message });
     }
   });
+
+  server.on("close", () => {
+    proposer?.close();
+    for (const resolve of [...waiters.values()]) {
+      resolve({ ok: false, error: "Server closed" });
+    }
+    waiters.clear();
+    commandQueue.length = 0;
+  });
+
+  return server;
 }
