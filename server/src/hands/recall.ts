@@ -92,12 +92,37 @@ function extractImplicitRoles(evt: Event): Set<string> {
   return roles;
 }
 
+const GENERIC_LABEL_STOPWORDS = new Set([
+  "name",
+  "names",
+  "input",
+  "field",
+  "box",
+  "textbox",
+  "textarea",
+  "button",
+  "text",
+  "value",
+  "form",
+]);
+
 function extractTargetTextCorpus(evt: Event, roles: Set<string>): string[] {
   const parts: string[] = [];
   if (evt.target?.label) parts.push(evt.target.label.toLowerCase());
   if (evt.target?.locators) {
     for (const loc of evt.target.locators) {
-      parts.push(loc.value.toLowerCase());
+      if (loc.kind === "testid" || loc.kind === "text") {
+        parts.push(loc.value.toLowerCase());
+        continue;
+      }
+      const attrMatches = loc.value.matchAll(
+        /(?:name|aria-label|placeholder|data-testid)\s*[*^$~]?=\s*["']([^"']+)["']/gi,
+      );
+      for (const m of attrMatches) {
+        if (m[1]) parts.push(m[1].toLowerCase());
+      }
+      const idMatch = /^#([A-Za-z][A-Za-z0-9_-]{2,})$/.exec(loc.value.trim());
+      if (idMatch?.[1]) parts.push(idMatch[1].toLowerCase());
     }
   }
   if (roles.has("gridcell")) {
@@ -110,6 +135,31 @@ function extractTargetTextCorpus(evt: Event, roles: Set<string>): string[] {
     }
   }
   return parts;
+}
+
+function containsHintPhrase(text: string, rawHint: string): boolean {
+  const hint = rawHint.trim().toLowerCase();
+  if (!hint || GENERIC_LABEL_STOPWORDS.has(hint)) return false;
+  const escaped = hint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "[\\s_-]+");
+  return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i").test(text);
+}
+
+function locatorsMatch(
+  hintLoc: LibraryEntry["eyes"]["targetHints"]["locators"][number],
+  evtLoc: NonNullable<Event["target"]>["locators"][number],
+): boolean {
+  const hv = hintLoc.value.trim().toLowerCase();
+  const ev = evtLoc.value.trim().toLowerCase();
+  if (!hv || !ev) return false;
+  if (ev === hv) return true;
+  if (hintLoc.kind !== evtLoc.kind) return false;
+  if (hintLoc.kind === "css") {
+    return hv
+      .split(",")
+      .map((s) => s.trim())
+      .some((part) => part.length > 0 && part === ev);
+  }
+  return false;
 }
 
 function matchEntryToEvent(
@@ -129,10 +179,15 @@ function matchEntryToEvent(
     return 0;
   }
 
+  const normalizedVal = (evt.value ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+
   if (evt.type === "input") {
+    const inputType = evt.meta?.typing?.inputType ?? "";
     if (
+      normalizedVal.length === 0 ||
+      inputType.startsWith("delete") ||
       evt.meta?.subType === "blur_commit" ||
-      evt.meta?.typing?.inputType === "insertFromPaste"
+      inputType === "insertFromPaste"
     ) {
       return 0;
     }
@@ -174,43 +229,62 @@ function matchEntryToEvent(
     eyes.targetHints.roles.length > 0 &&
     eyes.targetHints.roles.some((role) => eventRoles.has(role.trim().toLowerCase()));
 
+  if (
+    (entry.kind === "snippet" &&
+      (eventRoles.has("button") || eventRoles.has("link") || eventRoles.has("combobox"))) ||
+    (eyes.targetHints.roles.length > 0 && eventRoles.size > 0 && !roleMatched)
+  ) {
+    return 0;
+  }
+
   const targetCorpus = extractTargetTextCorpus(evt, eventRoles);
   const labelMatched =
     eyes.targetHints.labelContains.length > 0 &&
-    eyes.targetHints.labelContains.some((tok) => {
-      const needle = tok.toLowerCase();
-      return targetCorpus.some((part) => part.includes(needle));
-    });
+    eyes.targetHints.labelContains.some((tok) =>
+      targetCorpus.some((part) => containsHintPhrase(part, tok)),
+    );
 
   const locatorMatched =
     eyes.targetHints.locators.length > 0 &&
     Boolean(evt.target?.locators?.length) &&
     eyes.targetHints.locators.some((hintLoc) =>
-      evt.target!.locators.some((evtLoc) => {
-        const hv = hintLoc.value.toLowerCase();
-        const ev = evtLoc.value.toLowerCase();
-        return ev === hv || (hintLoc.kind === evtLoc.kind && (ev.includes(hv) || hv.includes(ev)));
-      }),
+      evt.target!.locators.some((evtLoc) => locatorsMatch(hintLoc, evtLoc)),
     );
 
-  const normalizedVal = (evt.value ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+  const firstStep = entry.script.steps[0];
+  const fullSnippetNorm =
+    firstStep?.action === "insertText" && typeof firstStep.value === "string"
+      ? firstStep.value.toLowerCase().replace(/\s+/g, " ").trim()
+      : "";
+  const alreadyHasSnippet =
+    fullSnippetNorm.length > 0 &&
+    (normalizedVal === fullSnippetNorm || normalizedVal.includes(fullSnippetNorm));
+
   const prefixMatched =
+    evt.type === "input" &&
     hasPrefixHints &&
+    !alreadyHasSnippet &&
     normalizedVal.length >= eyes.textHints.minCharsBeforeMatch &&
     eyes.textHints.prefixHints.some(
-      (prefix) => normalizedVal.startsWith(prefix) || normalizedVal.includes(prefix),
+      (prefix) => normalizedVal.startsWith(prefix) || prefix.startsWith(normalizedVal),
     );
 
-  if (
-    eyes.guards.fieldEmptyOnly &&
-    normalizedVal.length > 0 &&
-    !prefixMatched &&
-    (evt.type === "input" ||
-      evt.type === "focus" ||
-      evt.type === "click" ||
-      evt.type === "dblclick")
-  ) {
-    return 0;
+  if (eyes.guards.fieldEmptyOnly) {
+    if (
+      (evt.type === "focus" || evt.type === "click" || evt.type === "dblclick") &&
+      normalizedVal.length > 0
+    ) {
+      return 0;
+    }
+    if (evt.type === "input" && !prefixMatched) {
+      return 0;
+    }
+  }
+
+  if (entry.kind === "snippet" && eyes.targetHints.locators.length > 0 && appMatched) {
+    if (!locatorMatched && !prefixMatched) {
+      return 0;
+    }
   }
 
   const hasSpecificTargetHints =
@@ -238,32 +312,79 @@ function matchEntryToEvent(
   return totalSignals >= eyes.guards.minSignals ? totalSignals : 0;
 }
 
+export interface LibraryRecallMatch {
+  entry: LibraryEntry;
+  event: Event;
+  score: number;
+}
+
 export interface LibraryRecallMatcher {
   matchEvents(events: Event[], entries: LibraryEntry[], now?: number): LibraryEntry | null;
+  matchEventsWithEvent(
+    events: Event[],
+    entries: LibraryEntry[],
+    now?: number,
+  ): LibraryRecallMatch | null;
   markTriggered(entryId: string, now?: number): void;
   suppressEntry(entryId: string, durationMs: number, now?: number): void;
+  suppressOnTarget(
+    entryId: string,
+    targetKey: string | null,
+    durationMs: number,
+    now?: number,
+  ): void;
+  notifyTargetVisited(targetKey: string | null): void;
 }
 
 export function createLibraryRecallMatcher(): LibraryRecallMatcher {
   let lastClipboardAt: number | null = null;
   const lastTriggeredAt = new Map<string, number>();
   const suppressedUntil = new Map<string, number>();
+  const suppressedTargetByEntry = new Map<string, string>();
 
   function markTriggered(entryId: string, now = Date.now()): void {
     lastTriggeredAt.set(entryId, now);
   }
 
   function suppressEntry(entryId: string, durationMs: number, now = Date.now()): void {
+    suppressedTargetByEntry.delete(entryId);
     if (durationMs > 0) {
       suppressedUntil.set(entryId, now + durationMs);
+    } else {
+      suppressedUntil.delete(entryId);
     }
   }
 
-  function matchEvents(
+  function suppressOnTarget(
+    entryId: string,
+    targetKey: string | null,
+    durationMs: number,
+    now = Date.now(),
+  ): void {
+    if (durationMs <= 0) return;
+    suppressedUntil.set(entryId, now + durationMs);
+    if (targetKey) {
+      suppressedTargetByEntry.set(entryId, targetKey);
+    } else {
+      suppressedTargetByEntry.delete(entryId);
+    }
+  }
+
+  function notifyTargetVisited(targetKey: string | null): void {
+    if (!targetKey) return;
+    for (const [entryId, dismissedTarget] of suppressedTargetByEntry.entries()) {
+      if (dismissedTarget !== targetKey) {
+        suppressedTargetByEntry.delete(entryId);
+        suppressedUntil.delete(entryId);
+      }
+    }
+  }
+
+  function matchEventsWithEvent(
     events: Event[],
     entries: LibraryEntry[],
     now = Date.now(),
-  ): LibraryEntry | null {
+  ): LibraryRecallMatch | null {
     for (const evt of events) {
       if (evt.type === "copy" || evt.type === "cut") {
         const copyTs = evt.ts || now;
@@ -277,13 +398,14 @@ export function createLibraryRecallMatcher(): LibraryRecallMatcher {
       if (until !== undefined) {
         if (now < until) return false;
         suppressedUntil.delete(entry.id);
+        suppressedTargetByEntry.delete(entry.id);
       }
       const last = lastTriggeredAt.get(entry.id);
       return last === undefined || now - last >= entry.eyes.guards.cooldownMs;
     });
     if (candidates.length === 0) return null;
 
-    let best: { entry: LibraryEntry; score: number } | null = null;
+    let best: LibraryRecallMatch | null = null;
     for (const evt of events) {
       for (const entry of candidates) {
         const score = matchEntryToEvent(entry, evt, lastClipboardAt, now);
@@ -295,13 +417,28 @@ export function createLibraryRecallMatcher(): LibraryRecallMatcher {
             ((entry.status === "active" && best.entry.status !== "active") ||
               (entry.status === best.entry.status && entry.updatedAt > best.entry.updatedAt)))
         ) {
-          best = { entry, score };
+          best = { entry, event: evt, score };
         }
       }
     }
 
-    return best?.entry ?? null;
+    return best;
   }
 
-  return { matchEvents, markTriggered, suppressEntry };
+  function matchEvents(
+    events: Event[],
+    entries: LibraryEntry[],
+    now = Date.now(),
+  ): LibraryEntry | null {
+    return matchEventsWithEvent(events, entries, now)?.entry ?? null;
+  }
+
+  return {
+    matchEvents,
+    matchEventsWithEvent,
+    markTriggered,
+    suppressEntry,
+    suppressOnTarget,
+    notifyTargetVisited,
+  };
 }

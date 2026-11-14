@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
-import type { Report } from "@gen/shared";
+import type { Event, Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import {
@@ -22,6 +22,7 @@ import {
   parseActionScript,
   type ActionScript,
   type LibraryEntry,
+  type Locator,
 } from "./hands/types.ts";
 import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
 import { createProposer, type HandsDecision, type HandsOutcome } from "./propose.ts";
@@ -115,7 +116,73 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const waiters = new Map<string, (outcome: HandsOutcome) => void>();
   let nextPollResolver: ((cmd: HandsCommand | null) => void) | null = null;
   const recallMatcher = createLibraryRecallMatcher();
-  let activeLibraryDecideId: string | null = null;
+  let activeLibraryDecide: {
+    entryId: string;
+    commandId: string;
+    targetKey: string | null;
+  } | null = null;
+
+  function toHandsLocator(raw?: { kind: string; value: string }): Locator | undefined {
+    if (!raw || !raw.value.trim()) return undefined;
+    if (
+      raw.kind === "testid" ||
+      raw.kind === "css" ||
+      raw.kind === "xpath" ||
+      raw.kind === "aria" ||
+      raw.kind === "text"
+    ) {
+      return { kind: raw.kind, value: raw.value };
+    }
+    return undefined;
+  }
+
+  function pickPreferredLocator(
+    candidates: ReadonlyArray<{ kind: string; value: string }>,
+  ): Locator | undefined {
+    const valid = candidates.map(toHandsLocator).filter((l): l is Locator => Boolean(l));
+    return (
+      valid.find((l) => l.kind === "testid") ??
+      valid.find(
+        (l) =>
+          l.kind === "css" &&
+          !/^(html|body|main|section|header|footer|div)(\s|>|:|$)/i.test(l.value.trim()),
+      ) ??
+      valid.find((l) => l.kind === "xpath") ??
+      valid.find((l) => l.kind === "css") ??
+      valid.find((l) => l.kind === "aria") ??
+      valid[0]
+    );
+  }
+
+  function pickExecutableLocator(evt: Event | undefined, entry: LibraryEntry): Locator | undefined {
+    const fromEntry = pickPreferredLocator(entry.eyes.targetHints.locators);
+    if (fromEntry && (fromEntry.kind === "testid" || fromEntry.kind === "css" || fromEntry.kind === "xpath")) {
+      return fromEntry;
+    }
+    const fromEvent = evt?.target?.locators ? pickPreferredLocator(evt.target.locators) : undefined;
+    return fromEvent ?? fromEntry;
+  }
+
+  function extractEditableTargetKey(evt: Event): string | null {
+    const tag = evt.target?.tag?.toLowerCase();
+    const role = evt.target?.role?.toLowerCase();
+    const isEditable =
+      tag === "input" ||
+      tag === "textarea" ||
+      tag === "select" ||
+      role === "textbox" ||
+      role === "gridcell" ||
+      role === "combobox";
+    if (!isEditable || !evt.target?.locators?.length) return null;
+    const loc = pickPreferredLocator(evt.target.locators);
+    return loc ? `${loc.kind}:${loc.value}` : null;
+  }
+
+  function cancelCommand(commandId: string, error: string): void {
+    const idx = commandQueue.findIndex((c) => c.id === commandId);
+    if (idx >= 0) commandQueue.splice(idx, 1);
+    waiters.get(commandId)?.({ ok: false, error });
+  }
 
   function dispatchNext(cmd: HandsCommand): void {
     if (nextPollResolver) {
@@ -157,12 +224,13 @@ export function createServer(opts: CreateServerOptions): http.Server {
   }
 
   async function requestDecision(input: {
+    id?: string;
     name: string;
     solution: string;
     script: ActionScript;
     timeoutMs?: number;
   }): Promise<{ id: string; outcome: HandsOutcome }> {
-    const id = crypto.randomUUID();
+    const id = input.id ?? crypto.randomUUID();
     const timeoutMs = input.timeoutMs ?? 60000;
     console.log(
       `[server] decide id=${id} name="${input.name}" steps=${input.script.steps.length}`,
@@ -176,34 +244,94 @@ export function createServer(opts: CreateServerOptions): http.Server {
     return { id, outcome };
   }
 
-  async function triggerLibraryRecall(entry: LibraryEntry): Promise<void> {
-    if (activeLibraryDecideId) return;
-    activeLibraryDecideId = entry.id;
-    recallMatcher.markTriggered(entry.id);
+  async function triggerLibraryRecall(entry: LibraryEntry, matchedEvent?: Event): Promise<void> {
+    if (activeLibraryDecide) return;
+    const commandId = crypto.randomUUID();
+    const targetLocator = pickExecutableLocator(matchedEvent, entry);
+    const targetKey = targetLocator ? `${targetLocator.kind}:${targetLocator.value}` : null;
+    activeLibraryDecide = { entryId: entry.id, commandId, targetKey };
     try {
       const { outcome } = await requestDecision({
+        id: commandId,
         name: entry.name,
         solution: entry.solution,
         script: entry.script,
       });
-      recallMatcher.markTriggered(entry.id);
+      if (
+        !outcome.ok &&
+        (outcome.error === "Superseded" || outcome.error === "Page navigated before decision")
+      ) {
+        return;
+      }
       if (outcome.ok && outcome.decision === "approved") {
+        recallMatcher.suppressEntry(entry.id, 1000);
+        if (activeLibraryDecide?.commandId === commandId) {
+          activeLibraryDecide = null;
+        }
         await recordLibraryRun(dataDir, entry.id).catch(() => {});
         const runId = crypto.randomUUID();
+        const firstStep = entry.script.steps[0];
+        const scriptToRun: ActionScript =
+          entry.kind === "snippet" &&
+          entry.script.steps.length === 1 &&
+          firstStep?.action === "insertText" &&
+          !firstStep.target &&
+          targetLocator
+            ? {
+                ...entry.script,
+                steps: [{ ...firstStep, target: targetLocator }],
+              }
+            : entry.script;
         console.log(
-          `[server] library recall approved id=${entry.id} -> running script runId=${runId}`,
+          `[server] library recall approved id=${entry.id} -> running script runId=${runId} target=${targetLocator?.value ?? "focused"}`,
         );
         void awaitHands(
-          { id: runId, script: entry.script },
+          { id: runId, script: scriptToRun },
           30000,
           "Timed out waiting for extension to execute script",
-        );
+        ).then((runRes) => {
+          console.log(
+            `[server] library recall run id=${entry.id} ok=${runRes.ok}${runRes.error ? ` err=${runRes.error}` : ""}`,
+          );
+        });
+      } else {
+        recallMatcher.suppressOnTarget(entry.id, targetKey, 10_000);
       }
     } finally {
-      if (activeLibraryDecideId === entry.id) {
-        activeLibraryDecideId = null;
+      if (activeLibraryDecide?.commandId === commandId) {
+        activeLibraryDecide = null;
       }
     }
+  }
+
+  async function filterAlreadySavedSnippets(
+    findings: Report["findings"],
+  ): Promise<Report["findings"]> {
+    const libraryEntries = await readLibrary(dataDir).catch(() => []);
+    if (libraryEntries.length === 0) return findings;
+    const savedNorms = new Set<string>();
+    for (const entry of libraryEntries) {
+      if (entry.status !== "active" || entry.kind !== "snippet") continue;
+      const step = entry.script.steps[0];
+      if (step?.action === "insertText" && typeof step.value === "string") {
+        savedNorms.add(step.value.trim().toLowerCase().replace(/\s+/g, " "));
+      }
+    }
+    if (savedNorms.size === 0) return findings;
+    return findings.filter((f) => {
+      if (f.verdict !== "rung1") return true;
+      const script = scriptsByFindingId.get(f.id);
+      const step = script?.steps[0];
+      if (
+        script?.steps.length === 1 &&
+        step?.action === "insertText" &&
+        typeof step.value === "string"
+      ) {
+        const norm = step.value.trim().toLowerCase().replace(/\s+/g, " ");
+        if (savedNorms.has(norm)) return false;
+      }
+      return true;
+    });
   }
 
   const autoPropose = opts.autoPropose ?? process.env.BRAIN_AUTO_PROPOSE !== "0";
@@ -223,13 +351,19 @@ export function createServer(opts: CreateServerOptions): http.Server {
             const targetSession = targetSessions[0] ?? sessionId;
             const events = await readEvents(opts.tracesDir, targetSession);
             const report = await buildReport(targetSession, events, reportOpts);
-            return { findings: report.findings, scripts: scriptsByFindingId };
+            return {
+              findings: await filterAlreadySavedSnippets(report.findings),
+              scripts: scriptsByFindingId,
+            };
           }
           const allEvents = await Promise.all(
             targetSessions.map((s) => readEvents(opts.tracesDir, s)),
           );
           const report = await buildCombinedReport(allEvents, reportOpts);
-          return { findings: report.findings, scripts: scriptsByFindingId };
+          return {
+            findings: await filterAlreadySavedSnippets(report.findings),
+            scripts: scriptsByFindingId,
+          };
         },
         requestDecision: (name, solution, script) =>
           awaitHands(
@@ -367,18 +501,31 @@ export function createServer(opts: CreateServerOptions): http.Server {
               }
             }
           }
-          if (commandQueue.every((c) => c.kind !== "decide") && waiters.size === 0) {
-            activeLibraryDecideId = null;
+          if (activeLibraryDecide) {
+            cancelCommand(activeLibraryDecide.commandId, "Page navigated before decision");
+            activeLibraryDecide = null;
           }
         }
-        if (!activeLibraryDecideId) {
-          const entries = await readLibrary(dataDir).catch(() => []);
-          const matched = recallMatcher.matchEvents(events, entries);
+        for (const evt of events) {
+          if (evt.type === "focus" || evt.type === "click") {
+            const visitedKey = extractEditableTargetKey(evt);
+            if (visitedKey) recallMatcher.notifyTargetVisited(visitedKey);
+          }
+        }
+        const entries = await readLibrary(dataDir).catch(() => []);
+        if (entries.length > 0) {
+          const matched = recallMatcher.matchEventsWithEvent(events, entries);
           if (matched) {
-            console.log(
-              `[server] half-detected library match id=${matched.id} name="${matched.name}" -> /decide`,
-            );
-            void triggerLibraryRecall(matched);
+            if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
+              cancelCommand(activeLibraryDecide.commandId, "Superseded");
+              activeLibraryDecide = null;
+            }
+            if (!activeLibraryDecide) {
+              console.log(
+                `[server] half-detected library match id=${matched.entry.id} name="${matched.entry.name}" -> /decide`,
+              );
+              void triggerLibraryRecall(matched.entry, matched.event);
+            }
           }
         }
         sendJson(res, 200, { ok: true, n: events.length, scrubbed });
@@ -483,6 +630,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const { entry } = await upsertLibraryEntry(dataDir, built);
         latestScript = entry.script;
         reportCache.clear();
+        console.log(
+          `[server] saved snippet id=${entry.id} name="${entry.name}" locators=${entry.eyes.targetHints.locators.map((l) => `${l.kind}:${l.value}`).join(",")}`,
+        );
         const suppressMs =
           typeof body.suppressRecallMs === "number" && Number.isFinite(body.suppressRecallMs)
             ? Math.max(0, body.suppressRecallMs)

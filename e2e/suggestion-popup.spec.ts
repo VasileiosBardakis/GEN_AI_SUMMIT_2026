@@ -170,6 +170,18 @@ test("silently saves repeated snippets and only prompts to actually insert when 
     expect(popupState.userFlowHead).toContain("Your flow");
     expect(popupState.proposedFlowHead).toContain("Eyes flow");
 
+    const viewport = page.viewportSize();
+    const popupBox = await popup.boundingBox();
+    expect(popupBox).not.toBeNull();
+    if (popupBox && viewport) {
+      expect(popupBox.x).toBeGreaterThanOrEqual(0);
+      expect(popupBox.y).toBeGreaterThanOrEqual(0);
+      expect(popupBox.y).toBeLessThanOrEqual(24);
+      expect(popupBox.width).toBeLessThanOrEqual(336);
+      expect(popupBox.x + popupBox.width).toBeLessThanOrEqual(viewport.width);
+      expect(popupBox.y + popupBox.height).toBeLessThanOrEqual(viewport.height);
+    }
+
     // 4. Approving executes insertText directly into the focused textarea
     await popup.evaluate((host) => {
       (host.shadowRoot!.querySelector("[data-eyes-primary]") as HTMLButtonElement).click();
@@ -177,6 +189,73 @@ test("silently saves repeated snippets and only prompts to actually insert when 
     await expect(page.locator('textarea[name="customer_reply"]')).toHaveValue(SAMPLE_REPLY, {
       timeout: 10_000,
     });
+
+    // 5. Clearing & re-focusing after accept suggests again without a 60s lockout
+    await page.waitForTimeout(1100);
+    await page.locator("#clear-reply").click();
+    await expect(popup).toBeVisible({ timeout: 10_000 });
+    await popup.evaluate((host) => {
+      (host.shadowRoot!.querySelector("[data-eyes-dismiss]") as HTMLButtonElement).click();
+    });
+    await expect(popup).toHaveCount(0);
+
+    // 6. Short values (<20 chars) + "Company name" vs "Owner email":
+    //    - no cross-field contamination from "name" attribute selectors
+    //    - clicking another field (City) before Insert still pastes into Owner email
+    for (let i = 0; i < 3; i += 1) {
+      await dispatchPaste(page, 'input[name="company_name"]', "Nikolaidis logistics");
+      await page.waitForTimeout(250);
+      await page.locator('input[name="company_name"]').fill("");
+    }
+    for (let i = 0; i < 3; i += 1) {
+      await dispatchPaste(page, 'input[name="owner_email"]', "ops@example.com");
+      await page.waitForTimeout(250);
+      await page.locator('input[name="owner_email"]').fill("");
+    }
+
+    await expect
+      .poll(async () => {
+        const res = await fetch(`${apiBaseUrl}/library`);
+        const json = (await res.json()) as { items?: Array<{ name: string }> };
+        return (
+          Boolean(json.items?.some((item) => item.name.includes("ops@example.com"))) &&
+          Boolean(json.items?.some((item) => item.name.includes("Nikolaidis logistics")))
+        );
+      })
+      .toBe(true);
+
+    const emailInput = page.locator('input[name="owner_email"]');
+    await emailInput.click();
+    await expect(popup).toBeVisible({ timeout: 10_000 });
+    await expect
+      .poll(() =>
+        popup.evaluate((host) => host.shadowRoot?.querySelector("h2")?.textContent?.trim() ?? "")
+      )
+      .toContain("ops@example.com");
+
+    // Move focus to City (which has no snippet), then click Insert -> must fill Owner email, NOT City
+    await page.locator('input[name="city"]').click();
+    await popup.evaluate((host) => {
+      (host.shadowRoot!.querySelector("[data-eyes-primary]") as HTMLButtonElement).click();
+    });
+    await expect(emailInput).toHaveValue("ops@example.com", { timeout: 10_000 });
+    await expect(page.locator('input[name="city"]')).toHaveValue("");
+
+    // 7. Switching directly between two empty fields with saved snippets smoothly replaces the popup
+    await page.waitForTimeout(1100);
+    await page.locator('input[name="company_name"]').click();
+    await expect
+      .poll(() =>
+        popup.evaluate((host) => host.shadowRoot?.querySelector("h2")?.textContent?.trim() ?? "")
+      )
+      .toContain("Nikolaidis logistics");
+
+    await page.locator('textarea[name="customer_reply"]').click();
+    await expect
+      .poll(() =>
+        popup.evaluate((host) => host.shadowRoot?.querySelector("h2")?.textContent?.trim() ?? "")
+      )
+      .toContain("Hi, thanks for your order");
   } finally {
     await context.close().catch(() => {});
     apiServer.closeAllConnections?.();

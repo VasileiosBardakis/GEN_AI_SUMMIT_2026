@@ -41,11 +41,12 @@ export interface Suggestion {
 }
 
 export interface SuggestionEngine {
-  recordText(value: string): Suggestion | null;
+  recordText(value: string, scopeKey?: string): Suggestion | null;
   recordClick(key: string, label: string | undefined, ts?: number): Suggestion | null;
 }
 
 interface TextCluster {
+  scopeKey: string;
   repRaw: string;
   repNorm: string;
   members: string[];
@@ -112,16 +113,18 @@ export function createSuggestionEngine(options: SuggestionOptions = {}): Suggest
   const textClusters: TextCluster[] = [];
   const clickClusters: ClickCluster[] = [];
 
-  function recordText(value: string): Suggestion | null {
+  function recordText(value: string, scopeKey = ""): Suggestion | null {
     const raw = value.trim();
     const norm = normalizeText(raw);
     if (norm.length < minTextLength || norm.includes("[redacted")) return null;
 
     let cluster = textClusters.find(
-      (candidate) => trigramJaccard(candidate.repNorm, norm) >= similarityThreshold
+      (candidate) =>
+        candidate.scopeKey === scopeKey &&
+        trigramJaccard(candidate.repNorm, norm) >= similarityThreshold
     );
     if (!cluster) {
-      cluster = { repRaw: raw, repNorm: norm, members: [], notified: false };
+      cluster = { scopeKey, repRaw: raw, repNorm: norm, members: [], notified: false };
       textClusters.push(cluster);
     }
 
@@ -133,9 +136,10 @@ export function createSuggestionEngine(options: SuggestionOptions = {}): Suggest
     const avgChars =
       cluster.members.reduce((sum, member) => sum + member.length, 0) / count;
     const minutesPerWeek = Number((count * (avgChars / 200)).toFixed(1));
+    const hashInput = scopeKey ? `${scopeKey}::${cluster.repNorm}` : cluster.repNorm;
 
     return {
-      id: `text_${shortHash(cluster.repNorm)}`,
+      id: `text_${shortHash(hashInput)}`,
       kind: "text",
       count,
       preview: collapsePreview(cluster.repRaw),
