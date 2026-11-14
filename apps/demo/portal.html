@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Supplier portal</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #0f172a; color: #e2e8f0; }
+    header { padding: 20px 28px; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+    h1 { font-size: 20px; margin: 0; }
+    .badge { background: #0ea5e9; color: #082f49; font-weight: 700; font-size: 12px; padding: 3px 8px; border-radius: 999px; }
+    main { max-width: 1100px; margin: 0 auto; padding: 24px 28px 60px; display: grid; gap: 24px; }
+    section { background: #111c33; border: 1px solid #1e293b; border-radius: 10px; padding: 20px; }
+    section h2 { margin: 0 0 4px; font-size: 15px; }
+    section p { margin: 0 0 16px; color: #94a3b8; font-size: 13px; }
+    button { font: inherit; background: #1d4ed8; border: 0; color: white; border-radius: 6px; padding: 9px 14px; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    button.ghost { background: #1e293b; border: 1px solid #334155; padding: 5px 10px; font-size: 12px; }
+    button.ghost:hover { background: #334155; }
+    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid #1e293b; padding: 8px 10px; text-align: left; }
+    th { background: #0b1325; color: #94a3b8; font-weight: 600; }
+    .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    .hint { color: #64748b; font-size: 12px; }
+    .chip { display: inline-block; background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 6px 9px; font-family: ui-monospace, monospace; font-size: 12px; user-select: text; }
+    .status { font-size: 12px; color: #38bdf8; min-height: 18px; }
+    .detail-field { background: #0b1325; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; display: grid; gap: 8px; }
+    .field-label { font-size: 12px; color: #94a3b8; }
+    .field-value-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .cell-wrap { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .cell-text { user-select: text; font-family: ui-monospace, monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Supplier portal</h1>
+      <div class="hint">Made-up supplier invoices for cross-tab copy/paste testing.</div>
+    </div>
+    <span class="badge">PORTAL</span>
+  </header>
+
+  <main>
+    <section aria-labelledby="detail-heading">
+      <h2 id="detail-heading">First invoice detail</h2>
+      <p>Select any value and press Ctrl+C, or use Copy to copy via DOM selection.</p>
+      <div class="row">
+        <div class="detail-field">
+          <span class="field-label">Invoice ID</span>
+          <div class="field-value-row">
+            <span class="chip" id="portal-invoice-id" data-testid="portal-invoice-id">INV-2026-001</span>
+            <button type="button" class="ghost copy-btn" data-copy-target="portal-invoice-id" data-testid="copy-portal-invoice-id">Copy</button>
+          </div>
+        </div>
+        <div class="detail-field">
+          <span class="field-label">Vendor</span>
+          <div class="field-value-row">
+            <span class="chip" id="portal-vendor" data-testid="portal-vendor">Acme Industrial</span>
+            <button type="button" class="ghost copy-btn" data-copy-target="portal-vendor" data-testid="copy-portal-vendor">Copy</button>
+          </div>
+        </div>
+        <div class="detail-field">
+          <span class="field-label">Amount</span>
+          <div class="field-value-row">
+            <span class="chip" id="portal-amount" data-testid="portal-amount">1250.00 EUR</span>
+            <button type="button" class="ghost copy-btn" data-copy-target="portal-amount" data-testid="copy-portal-amount">Copy</button>
+          </div>
+        </div>
+        <div class="detail-field">
+          <span class="field-label">Date</span>
+          <div class="field-value-row">
+            <span class="chip" id="portal-date" data-testid="portal-date">2026-03-01</span>
+            <button type="button" class="ghost copy-btn" data-copy-target="portal-date" data-testid="copy-portal-date">Copy</button>
+          </div>
+        </div>
+      </div>
+      <div class="toolbar" style="margin-top: 12px; margin-bottom: 0;">
+        <span class="status" id="copy-status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section aria-labelledby="table-heading">
+      <h2 id="table-heading">Pending invoices</h2>
+      <p>Copy each cell into the ERP tab and save.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Invoice ID</th>
+            <th>Vendor</th>
+            <th>Amount</th>
+            <th>Date</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-invoice-id-1" data-testid="portal-invoice-id-1">INV-2026-001</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-invoice-id-1" data-testid="copy-portal-invoice-id-1">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-vendor-1" data-testid="portal-vendor-1">Acme Industrial</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-vendor-1" data-testid="copy-portal-vendor-1">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-amount-1" data-testid="portal-amount-1">1250.00 EUR</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-amount-1" data-testid="copy-portal-amount-1">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-date-1" data-testid="portal-date-1">2026-03-01</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-date-1" data-testid="copy-portal-date-1">Copy</button>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-invoice-id-2" data-testid="portal-invoice-id-2">INV-2026-002</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-invoice-id-2" data-testid="copy-portal-invoice-id-2">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-vendor-2" data-testid="portal-vendor-2">Globex Corp</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-vendor-2" data-testid="copy-portal-vendor-2">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-amount-2" data-testid="portal-amount-2">840.50 EUR</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-amount-2" data-testid="copy-portal-amount-2">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-date-2" data-testid="portal-date-2">2026-03-04</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-date-2" data-testid="copy-portal-date-2">Copy</button>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-invoice-id-3" data-testid="portal-invoice-id-3">INV-2026-003</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-invoice-id-3" data-testid="copy-portal-invoice-id-3">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-vendor-3" data-testid="portal-vendor-3">Initech LLC</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-vendor-3" data-testid="copy-portal-vendor-3">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-amount-3" data-testid="portal-amount-3">2190.00 EUR</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-amount-3" data-testid="copy-portal-amount-3">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-date-3" data-testid="portal-date-3">2026-03-08</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-date-3" data-testid="copy-portal-date-3">Copy</button>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-invoice-id-4" data-testid="portal-invoice-id-4">INV-2026-004</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-invoice-id-4" data-testid="copy-portal-invoice-id-4">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-vendor-4" data-testid="portal-vendor-4">Umbrella Supplies</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-vendor-4" data-testid="copy-portal-vendor-4">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-amount-4" data-testid="portal-amount-4">475.25 EUR</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-amount-4" data-testid="copy-portal-amount-4">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-date-4" data-testid="portal-date-4">2026-03-11</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-date-4" data-testid="copy-portal-date-4">Copy</button>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-invoice-id-5" data-testid="portal-invoice-id-5">INV-2026-005</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-invoice-id-5" data-testid="copy-portal-invoice-id-5">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-vendor-5" data-testid="portal-vendor-5">Stark Logistics</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-vendor-5" data-testid="copy-portal-vendor-5">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-amount-5" data-testid="portal-amount-5">3600.00 EUR</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-amount-5" data-testid="copy-portal-amount-5">Copy</button>
+              </div>
+            </td>
+            <td>
+              <div class="cell-wrap">
+                <span class="cell-text" id="portal-date-5" data-testid="portal-date-5">2026-03-15</span>
+                <button type="button" class="ghost copy-btn" data-copy-target="portal-date-5" data-testid="copy-portal-date-5">Copy</button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    const copyStatus = document.getElementById("copy-status");
+
+    document.querySelectorAll(".copy-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        const targetId = button.getAttribute("data-copy-target");
+        const targetEl = targetId ? document.getElementById(targetId) : null;
+        if (!targetEl) return;
+
+        const selection = window.getSelection();
+        if (!selection) return;
+        const range = document.createRange();
+        range.selectNodeContents(targetEl);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        const copied = document.execCommand("copy");
+        if (copyStatus) {
+          copyStatus.textContent = copied
+            ? `Copied "${targetEl.textContent.trim()}"`
+            : "Selection ready — press Ctrl+C to copy.";
+        }
+      });
+    });
+  </script>
+</body>
+</html>

@@ -86,11 +86,14 @@ function extensionAssetUrl(assetPath: string): string | undefined {
 }
 
 const suggestionEngine = createSuggestionEngine({
+  minTextLength: 6,
   clickReplayUrl:
     extensionAssetUrl("dist/replay-demo.mp4") ?? getConfig().clickReplayUrl,
 });
 const committedTextByElement = new WeakMap<HTMLElement, string>();
+const lastNonEmptyByElement = new WeakMap<HTMLElement, string>();
 let lastSuggestionShownAt = 0;
+let activePopupDismiss: (() => void) | null = null;
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => {
@@ -237,6 +240,11 @@ function showSuggestion(
 
   const existing = document.getElementById(SUGGESTION_HOST_ID);
   if (existing && !options.force && Date.now() - lastSuggestionShownAt < 800) return;
+  if (activePopupDismiss) {
+    const prevDismiss = activePopupDismiss;
+    activePopupDismiss = null;
+    prevDismiss();
+  }
   existing?.remove();
   lastSuggestionShownAt = Date.now();
 
@@ -244,40 +252,66 @@ function showSuggestion(
   const resolveDecision = (decision: "approved" | "dismissed"): void => {
     if (settled) return;
     settled = true;
+    if (activePopupDismiss === dismiss) {
+      activePopupDismiss = null;
+    }
     console.log("[eyes-content] decider decision:", decision, suggestion.id);
     options.onDecision?.(decision);
   };
 
   const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
-  const suggestedItem = suggestionToOptimization(suggestion, { app: appHost, status: "suggested" });
-  if (options.script) suggestedItem.script = options.script;
-  sendLibraryMessage({
-    kind: "EYES_UPSERT_OPTIMIZATION",
-    item: suggestedItem,
-  });
+  if (!options.onDecision) {
+    const suggestedItem = suggestionToOptimization(suggestion, { app: appHost, status: "suggested" });
+    if (options.script) suggestedItem.script = options.script;
+    sendLibraryMessage({
+      kind: "EYES_UPSERT_OPTIMIZATION",
+      item: suggestedItem,
+    });
+  }
 
   const host = document.createElement("div");
   host.id = SUGGESTION_HOST_ID;
   host.setAttribute("data-eyes-ui", "true");
   host.setAttribute("data-eyes-suggestion", suggestion.kind);
   host.style.position = "fixed";
-  host.style.right = "20px";
-  host.style.bottom = "20px";
+  host.style.top = "12px";
+  host.style.right = "12px";
+  host.style.bottom = "auto";
+  host.style.left = "auto";
+  host.style.display = "flex";
+  host.style.flexDirection = "column";
+  host.style.width = "min(336px, calc(100% - 24px))";
+  host.style.maxWidth = "calc(100% - 24px)";
+  host.style.maxHeight = "calc(100% - 24px)";
+  host.style.margin = "0";
+  host.style.padding = "0";
+  host.style.border = "0";
+  host.style.boxSizing = "border-box";
+  host.style.transform = "none";
   host.style.zIndex = "2147483647";
 
   const shadow = host.attachShadow({ mode: "open" });
   const previewClass = suggestion.kind === "text" ? "snippet" : "keycap";
   const eyesMark = `
-    <svg class="eyes-mark" data-eyes-brand-mark viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true">
+    <svg class="eyes-mark" data-eyes-brand-mark viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
       <path d="M2 10c2.2-3.6 5-5.4 8-5.4s5.8 1.8 8 5.4c-2.2 3.6-5 5.4-8 5.4S4.2 13.6 2 10Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
       <circle cx="10" cy="10" r="2.3" fill="currentColor"/>
     </svg>
   `;
 
+  const primaryButtonLabel = suggestion.kind === "text" ? "Insert" : "Run";
+  const successTitle = suggestion.kind === "text" ? "Inserted." : "Running.";
+  const successSubtitle =
+    suggestion.kind === "text"
+      ? "Text pasted into the active field."
+      : "Eyes is executing this shortcut now.";
+
   shadow.innerHTML = `
     <style>
       :host {
         all: initial;
+        display: flex;
+        flex-direction: column;
         --shell: #f1ede4;
         --canvas: #faf8f4;
         --surface-node: #fcfbf8;
@@ -296,22 +330,26 @@ function showSuggestion(
       .card {
         display: flex;
         flex-direction: column;
-        width: min(444px, calc(100vw - 32px));
-        max-height: calc(100vh - 32px);
+        flex: 0 1 auto;
+        width: 100%;
+        max-width: 100%;
+        min-height: 0;
+        max-height: calc(100vh - 24px);
+        max-height: calc(100dvh - 24px);
         overflow: hidden;
         border: 1px solid rgba(26, 25, 23, 0.14);
-        border-radius: 12px;
+        border-radius: 10px;
         background: var(--canvas);
         color: var(--ink);
-        box-shadow: 0 22px 48px rgba(26, 25, 23, 0.18), 0 2px 6px rgba(26, 25, 23, 0.08);
+        box-shadow: 0 16px 36px rgba(26, 25, 23, 0.16), 0 2px 6px rgba(26, 25, 23, 0.08);
         font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-        font-size: 13px;
-        line-height: 1.42;
+        font-size: 12px;
+        line-height: 1.38;
         -webkit-font-smoothing: antialiased;
         animation: eyes-in 190ms cubic-bezier(.2, .8, .2, 1);
       }
       @keyframes eyes-in {
-        from { opacity: 0; transform: translateY(10px) scale(.99); }
+        from { opacity: 0; transform: translateY(-6px) scale(.99); }
         to { opacity: 1; transform: none; }
       }
       .top {
@@ -319,15 +357,15 @@ function showSuggestion(
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 10px;
-        padding: 10px 14px;
+        gap: 8px;
+        padding: 7px 10px;
         border-bottom: 1px solid var(--line);
         background: var(--shell);
       }
       .brand {
         display: flex;
         align-items: center;
-        gap: 7px;
+        gap: 6px;
       }
       .eyes-mark {
         color: var(--ink);
@@ -335,7 +373,7 @@ function showSuggestion(
       }
       .product {
         color: var(--ink);
-        font-size: 13px;
+        font-size: 12px;
         font-weight: 600;
         letter-spacing: -0.015em;
       }
@@ -347,14 +385,14 @@ function showSuggestion(
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 24px;
-        height: 24px;
+        width: 22px;
+        height: 22px;
         padding: 0;
         border: 0;
         border-radius: 5px;
         background: transparent;
         color: var(--ink-muted);
-        font-size: 17px;
+        font-size: 16px;
         line-height: 1;
         cursor: pointer;
       }
@@ -363,60 +401,76 @@ function showSuggestion(
         color: var(--ink);
       }
       .content {
-        padding: 14px;
+        flex: 1 1 auto;
+        min-height: 0;
+        padding: 10px 12px;
         overflow-y: auto;
+        overflow-x: hidden;
       }
       .head-block {
-        margin-bottom: 11px;
+        margin-bottom: 8px;
       }
       h2 {
-        margin: 0 0 3px;
+        margin: 0 0 2px;
         color: var(--ink);
-        font-size: 15px;
+        font-size: 13.5px;
         font-weight: 600;
-        line-height: 1.3;
+        line-height: 1.28;
         letter-spacing: -0.015em;
+        overflow-wrap: anywhere;
       }
       p {
         margin: 0;
         color: var(--ink-2);
-        font-size: 12.5px;
+        font-size: 11.5px;
+        overflow-wrap: anywhere;
       }
       .preview {
-        margin-bottom: 11px;
+        margin-bottom: 8px;
+        max-width: 100%;
       }
       .preview.snippet {
-        padding: 8px 10px;
+        padding: 6px 8px;
         border: 1px solid var(--line);
-        border-radius: 7px;
+        border-radius: 6px;
         background: var(--shell);
         color: var(--ink-2);
-        font-size: 12px;
+        font-size: 11px;
+        line-height: 1.35;
+        max-height: 54px;
+        overflow-y: auto;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }
       .preview.keycap {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        padding: 4px 9px;
+        gap: 5px;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding: 3px 7px;
         border: 1px solid var(--line-strong);
-        border-radius: 6px;
+        border-radius: 5px;
         background: var(--surface-node);
         box-shadow: 0 1px 0 var(--line-strong);
         color: var(--ink);
         font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
-        font-size: 11.5px;
+        font-size: 11px;
         font-weight: 500;
       }
       .replay {
-        margin-bottom: 11px;
+        margin-bottom: 8px;
         overflow: hidden;
         border: 1px solid #2d2a26;
-        border-radius: 8px;
+        border-radius: 7px;
         background: #171614;
       }
       .replay video {
         display: block;
         width: 100%;
+        max-height: 118px;
         aspect-ratio: 16 / 9;
         object-fit: contain;
         background: #171614;
@@ -424,28 +478,30 @@ function showSuggestion(
       .replay-bar {
         display: flex;
         align-items: center;
-        padding: 6px 10px;
+        padding: 4px 8px;
         border-top: 1px solid #2b2824;
         color: #b8b0a4;
-        font-size: 10.5px;
+        font-size: 10px;
       }
       .dag-canvas {
-        padding: 10px 11px;
+        padding: 7px 8px;
         border: 1px solid var(--line);
-        border-radius: 8px;
+        border-radius: 7px;
         background-color: var(--surface-graph);
         background-image: radial-gradient(#d8d1c5 0.9px, transparent 0.9px);
         background-size: 11px 11px;
+        overflow: hidden;
       }
       .flow-head {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        margin-bottom: 7px;
+        gap: 6px;
+        margin-bottom: 5px;
         color: var(--ink-2);
-        font-size: 10px;
+        font-size: 9.5px;
         font-weight: 600;
-        letter-spacing: 0.06em;
+        letter-spacing: 0.05em;
         text-transform: uppercase;
       }
       .flow-head-eyes {
@@ -460,14 +516,17 @@ function showSuggestion(
       .flow-track {
         display: flex;
         align-items: stretch;
-        gap: 3px;
+        gap: 2px;
+        min-width: 0;
+        max-width: 100%;
       }
       .flow-node {
         flex: 1 1 0;
         min-width: 0;
-        padding: 5px 6px;
+        overflow: hidden;
+        padding: 4px 5px;
         border: 1px solid var(--line-strong);
-        border-radius: 6px;
+        border-radius: 5px;
         background: var(--surface-node);
         box-shadow: 0 1px 1px rgba(26, 25, 23, 0.04);
       }
@@ -487,11 +546,13 @@ function showSuggestion(
         display: flex;
         align-items: center;
         gap: 3px;
-        margin-bottom: 2px;
+        margin-bottom: 1px;
         color: var(--ink-muted);
-        font-size: 9.5px;
+        font-size: 9px;
         font-weight: 600;
         letter-spacing: 0.02em;
+        white-space: nowrap;
+        overflow: hidden;
       }
       .flow-node.eyes-step .flow-kind {
         color: var(--brown);
@@ -504,53 +565,61 @@ function showSuggestion(
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
+        overflow-wrap: anywhere;
+        word-break: break-word;
         color: var(--ink);
-        font-size: 10.5px;
-        line-height: 1.25;
+        font-size: 9.5px;
+        line-height: 1.2;
       }
       .flow-arrow {
         flex: 0 0 auto;
         align-self: center;
+        width: 10px;
+        height: 8px;
         color: #9e968b;
       }
       .loop-arc {
         display: block;
         width: 100%;
-        height: 15px;
+        height: 12px;
         margin-top: 2px;
       }
       .dag-divider {
         height: 1px;
-        margin: 9px 0;
+        margin: 6px 0;
         background: var(--line);
       }
       .footer {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         justify-content: space-between;
-        gap: 10px;
-        margin-top: 12px;
+        gap: 6px 8px;
+        margin-top: 9px;
       }
       .meta {
         color: var(--ink-muted);
-        font-size: 11px;
+        font-size: 10.5px;
         font-variant-numeric: tabular-nums;
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
       .actions {
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: 5px;
+        margin-left: auto;
         flex-shrink: 0;
       }
       button {
-        border-radius: 6px;
+        border-radius: 5px;
         font: inherit;
-        font-size: 12px;
+        font-size: 11.5px;
         font-weight: 500;
         cursor: pointer;
       }
       .primary {
-        padding: 7px 13px;
+        padding: 5px 10px;
         border: 1px solid var(--ink);
         background: var(--ink);
         color: var(--canvas);
@@ -560,7 +629,7 @@ function showSuggestion(
         background: #2f2d29;
       }
       .ghost {
-        padding: 7px 10px;
+        padding: 5px 8px;
         border: 1px solid var(--line-strong);
         background: var(--surface-node);
         color: var(--ink-2);
@@ -571,8 +640,8 @@ function showSuggestion(
       }
       .success {
         display: grid;
-        gap: 4px;
-        padding: 18px 16px;
+        gap: 3px;
+        padding: 12px;
       }
       .success[hidden] { display: none; }
       .success strong {
@@ -581,6 +650,7 @@ function showSuggestion(
       }
       .success span {
         color: var(--ink-2);
+        font-size: 11.5px;
       }
     </style>
     <section class="card" aria-live="polite" aria-label="Eyes workflow suggestion">
@@ -605,13 +675,13 @@ function showSuggestion(
           <div class="meta">${escapeHtml(suggestion.meta)}</div>
           <div class="actions">
             <button class="ghost" type="button" data-eyes-dismiss>Not now</button>
-            <button class="primary" type="button" data-eyes-primary>Trial it live</button>
+            <button class="primary" type="button" data-eyes-primary>${primaryButtonLabel}</button>
           </div>
         </div>
       </div>
       <div class="success" data-eyes-success hidden>
-        <strong>Trial started.</strong>
-        <span>Eyes will keep this shortcut ready for this session.</span>
+        <strong>${successTitle}</strong>
+        <span>${successSubtitle}</span>
       </div>
     </section>
   `;
@@ -620,6 +690,7 @@ function showSuggestion(
     resolveDecision("dismissed");
     host.remove();
   };
+  activePopupDismiss = dismiss;
   for (const button of Array.from(shadow.querySelectorAll("[data-eyes-dismiss]"))) {
     button.addEventListener("click", dismiss);
   }
@@ -637,7 +708,7 @@ function showSuggestion(
     const success = shadow.querySelector<HTMLElement>("[data-eyes-success]");
     if (content) content.hidden = true;
     if (success) success.hidden = false;
-    setTimeout(() => host.remove(), 2200);
+    setTimeout(() => host.remove(), 1000);
   });
   shadow.querySelector("video")?.addEventListener("error", () => {
     shadow.querySelector("[data-eyes-replay]")?.remove();
@@ -660,12 +731,70 @@ function clearCommittedTextIfChanged(
   }
 }
 
+function autoSaveRepeatedSnippet(element: HTMLElement, suggestion: Suggestion): void {
+  const snippetText = (suggestion.snippetText ?? suggestion.preview).trim();
+  if (!snippetText) return;
+
+  const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
+  const shortPreview =
+    snippetText.length > 34 ? `${snippetText.slice(0, 34).trim()}...` : snippetText;
+  const name = `Insert "${shortPreview}"`;
+  const solution = `Insert '${snippetText}' into the currently focused field.`;
+  const script: ActionScript = {
+    name,
+    steps: [{ action: "insertText", value: snippetText }],
+  };
+
+  const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
+  activeItem.title = name;
+  activeItem.description = solution;
+  activeItem.solution = solution;
+  activeItem.script = script;
+  sendLibraryMessage({
+    kind: "EYES_ACTIVATE_OPTIMIZATION",
+    id: activeItem.id,
+    item: activeItem,
+  });
+
+  const { target } = extractTarget(element);
+  const locators = (target?.locators ?? [])
+    .filter(
+      (loc): loc is { kind: "testid" | "aria" | "css" | "text"; value: string } =>
+        loc.kind === "testid" || loc.kind === "aria" || loc.kind === "css" || loc.kind === "text"
+    )
+    .sort((a, b) => {
+      const rank = (k: string): number =>
+        k === "testid" ? 0 : k === "css" ? 1 : k === "aria" ? 2 : 3;
+      return rank(a.kind) - rank(b.kind);
+    });
+  const cleanUrl =
+    typeof location !== "undefined" ? sanitizeUrl(location.href).url : undefined;
+
+  console.log("[eyes-snippet] learned", name, "on", locators[0]?.value ?? target?.tag);
+
+  sendLibraryMessage({
+    kind: "EYES_AUTO_SAVE_LIBRARY",
+    name,
+    solution,
+    script,
+    context: {
+      app: appHost,
+      ...(cleanUrl ? { url: cleanUrl } : {}),
+      ...(typeof document !== "undefined" && document.title ? { title: document.title } : {}),
+      ...(target?.label ? { targetLabel: target.label } : {}),
+      ...(target?.role ? { targetRole: target.role } : {}),
+      ...(locators.length > 0 ? { locators } : {}),
+    },
+  });
+}
+
 function recordCommittedText(
   element: HTMLElement | null,
   rawValue: string | undefined,
   privacyCheck: ReturnType<typeof inspectElementPrivacy>,
   force = false
 ): void {
+  if ((window as { __EYES_SUPPRESS_SYNTHETIC__?: boolean }).__EYES_SUPPRESS_SYNTHETIC__) return;
   if (!element || !rawValue) return;
 
   const { value, privacy } = sanitizeValue(rawValue, privacyCheck);
@@ -673,35 +802,17 @@ function recordCommittedText(
 
   if (!force && committedTextByElement.get(element) === value) return;
   committedTextByElement.set(element, value);
+  lastNonEmptyByElement.set(element, value);
 
-  showSuggestion(suggestionEngine.recordText(value));
-}
-
-function recordRepeatedClick(rawTarget: EventTarget | null, event: MouseEvent): void {
-  if (
-    event.button !== 0 ||
-    event.detail !== 1 ||
-    event.ctrlKey ||
-    event.metaKey ||
-    event.altKey ||
-    event.shiftKey ||
-    isEyesUiTarget(rawTarget)
-  ) {
-    return;
+  const { target } = extractTarget(element);
+  const scopeKey =
+    target?.locators.find((l) => l.kind === "testid" || l.kind === "css")?.value ??
+    target?.label ??
+    "";
+  const detected = suggestionEngine.recordText(value, scopeKey);
+  if (detected) {
+    autoSaveRepeatedSnippet(element, detected);
   }
-
-  const { element, target } = extractTarget(rawTarget);
-  if (!element || !target) return;
-  if (!element.matches('button, a, [role="button"], input[type="submit"]')) return;
-  if (element instanceof HTMLButtonElement && element.disabled) return;
-
-  const label =
-    target.label || target.locators.find((locator) => locator.kind === "text")?.value;
-  if (!label) return;
-
-  const primary = target.locators[0];
-  const key = `${target.tag ?? "element"}:${primary?.kind ?? "none"}:${primary?.value ?? label}`;
-  showSuggestion(suggestionEngine.recordClick(key, label, Date.now()));
 }
 
 function getElementValue(el: HTMLElement | null): string | undefined {
@@ -813,6 +924,7 @@ export function setupEventListeners(): void {
     extraMeta?: EventMeta,
     clipboard?: Event["clipboard"]
   ): void {
+    if ((window as { __EYES_SUPPRESS_SYNTHETIC__?: boolean }).__EYES_SUPPRESS_SYNTHETIC__) return;
     if (isEyesUiTarget(rawTarget)) return;
 
     const { element, target } = extractTarget(rawTarget);
@@ -915,13 +1027,13 @@ export function setupEventListeners(): void {
     "click",
     (e: MouseEvent) => {
       const dwellMs = Math.max(0, Date.now() - lastPointerDownTs);
-      emit("click", e.target, undefined, {
+      const editable = resolveEditableField(e.target);
+      emit("click", e.target, editable ? getElementValue(editable) : undefined, {
         button: e.button,
         clientX: Math.round(e.clientX),
         clientY: Math.round(e.clientY),
         dwellMs: dwellMs < 15000 ? dwellMs : undefined,
       });
-      recordRepeatedClick(e.target, e);
     },
     true
   );
@@ -1124,7 +1236,17 @@ export function setupEventListeners(): void {
 
       const privacyCheck = inspectElementPrivacy(targetEl);
       const currentVal = getElementValue(targetEl) ?? "";
-      clearCommittedTextIfChanged(targetEl, currentVal, privacyCheck);
+      if (currentVal.trim().length > 0) {
+        clearCommittedTextIfChanged(targetEl, currentVal, privacyCheck);
+        lastNonEmptyByElement.set(targetEl, currentVal);
+      } else {
+        const prevNonEmpty = lastNonEmptyByElement.get(targetEl);
+        if (prevNonEmpty && prevNonEmpty.trim().length >= 6) {
+          recordCommittedText(targetEl, prevNonEmpty, privacyCheck);
+        }
+        lastNonEmptyByElement.delete(targetEl);
+        committedTextByElement.delete(targetEl);
+      }
       if (getConfig().mode === "semantic") return;
       const durationMs = sess ? Math.max(1, Date.now() - sess.startedAt) : 1;
       const keystrokeCount = sess ? sess.keystrokeCount : 0;
@@ -1188,6 +1310,11 @@ export function setupEventListeners(): void {
       if (targetEl) {
         const currentVal = getElementValue(targetEl) ?? "";
         clearCommittedTextIfChanged(targetEl, currentVal, inspectElementPrivacy(targetEl));
+        if (currentVal.trim().length > 0) {
+          lastNonEmptyByElement.set(targetEl, currentVal);
+        } else {
+          lastNonEmptyByElement.delete(targetEl);
+        }
         typingSessions.set(targetEl, {
           el: targetEl,
           startedAt: Date.now(),
@@ -1364,12 +1491,14 @@ export function setupEventListeners(): void {
           textHash: privacy.valueHash,
         }
       );
-      recordCommittedText(
-        e.target instanceof HTMLElement ? e.target : null,
-        cleanText,
-        elCheck,
-        true
-      );
+      const pasteEl =
+        resolveEditableField(e.target) ??
+        (e.target instanceof HTMLElement
+          ? e.target
+          : e.target instanceof Node
+            ? e.target.parentElement
+            : null);
+      recordCommittedText(pasteEl, cleanText, elCheck, true);
     },
     true
   );
@@ -1380,6 +1509,10 @@ export function setupEventListeners(): void {
   document.addEventListener(
     "submit",
     (e: SubmitEvent) => {
+      const activeEl = resolveEditableField(getDeepActiveElement());
+      if (activeEl && (!(e.target instanceof Node) || e.target.contains(activeEl))) {
+        recordCommittedText(activeEl, getElementValue(activeEl), inspectElementPrivacy(activeEl));
+      }
       emit("submit", e.target);
     },
     true
@@ -1388,6 +1521,14 @@ export function setupEventListeners(): void {
   document.addEventListener(
     "reset",
     (e: globalThis.Event) => {
+      if (e.target instanceof HTMLFormElement) {
+        for (const el of Array.from(e.target.elements)) {
+          if (el instanceof HTMLElement) {
+            committedTextByElement.delete(el);
+            lastNonEmptyByElement.delete(el);
+          }
+        }
+      }
       emit("reset", e.target);
     },
     true

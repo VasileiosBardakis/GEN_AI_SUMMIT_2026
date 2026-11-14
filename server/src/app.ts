@@ -1,11 +1,13 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
+import type { Event, Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import {
   buildLibraryEntryFromScript,
   implementForLibrary,
+  implementSolution,
   type ImplementContext,
 } from "./hands/implementor.ts";
 import {
@@ -20,7 +22,10 @@ import {
   parseActionScript,
   type ActionScript,
   type LibraryEntry,
+  type Locator,
 } from "./hands/types.ts";
+import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
+import { createProposer, type HandsDecision, type HandsOutcome } from "./propose.ts";
 import { buildCombinedReport, buildReport } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
 import { appendEvents, listSessions, readEvents } from "./trace.ts";
@@ -49,25 +54,45 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+function hasAllCachedScripts(
+  report: Report,
+  scriptsByFindingId: ReadonlyMap<string, ActionScript>,
+): boolean {
+  return report.findings.every((f) => {
+    if (f.artifact?.path.startsWith("/script/")) {
+      const id = f.artifact.path.slice("/script/".length);
+      return scriptsByFindingId.has(id);
+    }
+    return true;
+  });
+}
+
 export type CreateServerOptions = {
   tracesDir: string;
   dataDir?: string;
   implement?: (solution: string, opts?: { name?: string }) => Promise<ActionScript>;
+  gemini?: GeminiClient | GeminiClientOptions;
   implementLibrary?: (
     solution: string,
     opts?: { name?: string; context?: ImplementContext },
   ) => Promise<LibraryEntry>;
+  autoPropose?: boolean;
+  proposeDebounceMs?: number;
 };
 
-type HandsDecision = "approved" | "dismissed";
 type HandsCommand =
   | { id: string; kind?: "run"; script: ActionScript }
   | { id: string; kind: "decide"; name: string; solution: string; script: ActionScript };
-type HandsOutcome = { ok: boolean; results?: unknown; decision?: HandsDecision; error?: string };
 
 export function createServer(opts: CreateServerOptions): http.Server {
   const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
   let latestScript: ActionScript | null = null;
+  const scriptsByFindingId = new Map<string, ActionScript>();
+  const reportCache = new Map<string, Report>();
+  const liveSessions = new Set<string>();
+  const implement =
+    opts.implement ??
+    ((solution: string, o?: { name?: string }) => implementSolution(solution, o));
   const compileLibraryEntry = async (
     solution: string,
     o?: { name?: string; context?: ImplementContext },
@@ -91,7 +116,73 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const waiters = new Map<string, (outcome: HandsOutcome) => void>();
   let nextPollResolver: ((cmd: HandsCommand | null) => void) | null = null;
   const recallMatcher = createLibraryRecallMatcher();
-  let activeLibraryDecideId: string | null = null;
+  let activeLibraryDecide: {
+    entryId: string;
+    commandId: string;
+    targetKey: string | null;
+  } | null = null;
+
+  function toHandsLocator(raw?: { kind: string; value: string }): Locator | undefined {
+    if (!raw || !raw.value.trim()) return undefined;
+    if (
+      raw.kind === "testid" ||
+      raw.kind === "css" ||
+      raw.kind === "xpath" ||
+      raw.kind === "aria" ||
+      raw.kind === "text"
+    ) {
+      return { kind: raw.kind, value: raw.value };
+    }
+    return undefined;
+  }
+
+  function pickPreferredLocator(
+    candidates: ReadonlyArray<{ kind: string; value: string }>,
+  ): Locator | undefined {
+    const valid = candidates.map(toHandsLocator).filter((l): l is Locator => Boolean(l));
+    return (
+      valid.find((l) => l.kind === "testid") ??
+      valid.find(
+        (l) =>
+          l.kind === "css" &&
+          !/^(html|body|main|section|header|footer|div)(\s|>|:|$)/i.test(l.value.trim()),
+      ) ??
+      valid.find((l) => l.kind === "xpath") ??
+      valid.find((l) => l.kind === "css") ??
+      valid.find((l) => l.kind === "aria") ??
+      valid[0]
+    );
+  }
+
+  function pickExecutableLocator(evt: Event | undefined, entry: LibraryEntry): Locator | undefined {
+    const fromEntry = pickPreferredLocator(entry.eyes.targetHints.locators);
+    if (fromEntry && (fromEntry.kind === "testid" || fromEntry.kind === "css" || fromEntry.kind === "xpath")) {
+      return fromEntry;
+    }
+    const fromEvent = evt?.target?.locators ? pickPreferredLocator(evt.target.locators) : undefined;
+    return fromEvent ?? fromEntry;
+  }
+
+  function extractEditableTargetKey(evt: Event): string | null {
+    const tag = evt.target?.tag?.toLowerCase();
+    const role = evt.target?.role?.toLowerCase();
+    const isEditable =
+      tag === "input" ||
+      tag === "textarea" ||
+      tag === "select" ||
+      role === "textbox" ||
+      role === "gridcell" ||
+      role === "combobox";
+    if (!isEditable || !evt.target?.locators?.length) return null;
+    const loc = pickPreferredLocator(evt.target.locators);
+    return loc ? `${loc.kind}:${loc.value}` : null;
+  }
+
+  function cancelCommand(commandId: string, error: string): void {
+    const idx = commandQueue.findIndex((c) => c.id === commandId);
+    if (idx >= 0) commandQueue.splice(idx, 1);
+    waiters.get(commandId)?.({ ok: false, error });
+  }
 
   function dispatchNext(cmd: HandsCommand): void {
     if (nextPollResolver) {
@@ -103,17 +194,24 @@ export function createServer(opts: CreateServerOptions): http.Server {
     }
   }
 
-  function enqueueAndAwait(
+  function awaitHands(
     cmd: HandsCommand,
     timeoutMs: number,
-    timeoutError: string,
+    timeoutError?: string,
   ): Promise<HandsOutcome> {
-    const outcomePromise = new Promise<HandsOutcome>((resolve) => {
+    return new Promise<HandsOutcome>((resolve) => {
       const timer = setTimeout(() => {
         waiters.delete(cmd.id);
         const idx = commandQueue.findIndex((c) => c.id === cmd.id);
         if (idx >= 0) commandQueue.splice(idx, 1);
-        resolve({ ok: false, error: timeoutError });
+        resolve({
+          ok: false,
+          error:
+            timeoutError ??
+            (cmd.kind === "decide"
+              ? "Timed out waiting for user decision"
+              : "Timed out waiting for extension to execute script"),
+        });
       }, timeoutMs);
       timer.unref?.();
       waiters.set(cmd.id, (outcome) => {
@@ -121,23 +219,23 @@ export function createServer(opts: CreateServerOptions): http.Server {
         waiters.delete(cmd.id);
         resolve(outcome);
       });
+      dispatchNext(cmd);
     });
-    dispatchNext(cmd);
-    return outcomePromise;
   }
 
   async function requestDecision(input: {
+    id?: string;
     name: string;
     solution: string;
     script: ActionScript;
     timeoutMs?: number;
   }): Promise<{ id: string; outcome: HandsOutcome }> {
-    const id = crypto.randomUUID();
+    const id = input.id ?? crypto.randomUUID();
     const timeoutMs = input.timeoutMs ?? 60000;
     console.log(
       `[server] decide id=${id} name="${input.name}" steps=${input.script.steps.length}`,
     );
-    const outcome = await enqueueAndAwait(
+    const outcome = await awaitHands(
       { id, kind: "decide", name: input.name, solution: input.solution, script: input.script },
       timeoutMs,
       "Timed out waiting for user decision",
@@ -146,37 +244,139 @@ export function createServer(opts: CreateServerOptions): http.Server {
     return { id, outcome };
   }
 
-  async function triggerLibraryRecall(entry: LibraryEntry): Promise<void> {
-    if (activeLibraryDecideId) return;
-    activeLibraryDecideId = entry.id;
-    recallMatcher.markTriggered(entry.id);
+  async function triggerLibraryRecall(entry: LibraryEntry, matchedEvent?: Event): Promise<void> {
+    if (activeLibraryDecide) return;
+    const commandId = crypto.randomUUID();
+    const targetLocator = pickExecutableLocator(matchedEvent, entry);
+    const targetKey = targetLocator ? `${targetLocator.kind}:${targetLocator.value}` : null;
+    activeLibraryDecide = { entryId: entry.id, commandId, targetKey };
     try {
       const { outcome } = await requestDecision({
+        id: commandId,
         name: entry.name,
         solution: entry.solution,
         script: entry.script,
       });
-      recallMatcher.markTriggered(entry.id);
+      if (
+        !outcome.ok &&
+        (outcome.error === "Superseded" || outcome.error === "Page navigated before decision")
+      ) {
+        return;
+      }
       if (outcome.ok && outcome.decision === "approved") {
+        recallMatcher.suppressEntry(entry.id, 1000);
+        if (activeLibraryDecide?.commandId === commandId) {
+          activeLibraryDecide = null;
+        }
         await recordLibraryRun(dataDir, entry.id).catch(() => {});
         const runId = crypto.randomUUID();
+        const firstStep = entry.script.steps[0];
+        const scriptToRun: ActionScript =
+          entry.kind === "snippet" &&
+          entry.script.steps.length === 1 &&
+          firstStep?.action === "insertText" &&
+          !firstStep.target &&
+          targetLocator
+            ? {
+                ...entry.script,
+                steps: [{ ...firstStep, target: targetLocator }],
+              }
+            : entry.script;
         console.log(
-          `[server] library recall approved id=${entry.id} -> running script runId=${runId}`,
+          `[server] library recall approved id=${entry.id} -> running script runId=${runId} target=${targetLocator?.value ?? "focused"}`,
         );
-        void enqueueAndAwait(
-          { id: runId, script: entry.script },
+        void awaitHands(
+          { id: runId, script: scriptToRun },
           30000,
           "Timed out waiting for extension to execute script",
-        );
+        ).then((runRes) => {
+          console.log(
+            `[server] library recall run id=${entry.id} ok=${runRes.ok}${runRes.error ? ` err=${runRes.error}` : ""}`,
+          );
+        });
+      } else {
+        recallMatcher.suppressOnTarget(entry.id, targetKey, 10_000);
       }
     } finally {
-      if (activeLibraryDecideId === entry.id) {
-        activeLibraryDecideId = null;
+      if (activeLibraryDecide?.commandId === commandId) {
+        activeLibraryDecide = null;
       }
     }
   }
 
-  return http.createServer(async (req, res) => {
+  async function filterAlreadySavedSnippets(
+    findings: Report["findings"],
+  ): Promise<Report["findings"]> {
+    const libraryEntries = await readLibrary(dataDir).catch(() => []);
+    if (libraryEntries.length === 0) return findings;
+    const savedNorms = new Set<string>();
+    for (const entry of libraryEntries) {
+      if (entry.status !== "active" || entry.kind !== "snippet") continue;
+      const step = entry.script.steps[0];
+      if (step?.action === "insertText" && typeof step.value === "string") {
+        savedNorms.add(step.value.trim().toLowerCase().replace(/\s+/g, " "));
+      }
+    }
+    if (savedNorms.size === 0) return findings;
+    return findings.filter((f) => {
+      if (f.verdict !== "rung1") return true;
+      const script = scriptsByFindingId.get(f.id);
+      const step = script?.steps[0];
+      if (
+        script?.steps.length === 1 &&
+        step?.action === "insertText" &&
+        typeof step.value === "string"
+      ) {
+        const norm = step.value.trim().toLowerCase().replace(/\s+/g, " ");
+        if (savedNorms.has(norm)) return false;
+      }
+      return true;
+    });
+  }
+
+  const autoPropose = opts.autoPropose ?? process.env.BRAIN_AUTO_PROPOSE !== "0";
+  const proposer = autoPropose
+    ? createProposer({
+        runReport: async (sessionId) => {
+          const reportOpts = {
+            dataDir,
+            llm: true,
+            gemini: opts.gemini,
+            implement,
+            scriptStore: scriptsByFindingId,
+          };
+          const targetSessions =
+            liveSessions.size > 0 ? [...liveSessions] : [sessionId];
+          if (targetSessions.length <= 1) {
+            const targetSession = targetSessions[0] ?? sessionId;
+            const events = await readEvents(opts.tracesDir, targetSession);
+            const report = await buildReport(targetSession, events, reportOpts);
+            return {
+              findings: await filterAlreadySavedSnippets(report.findings),
+              scripts: scriptsByFindingId,
+            };
+          }
+          const allEvents = await Promise.all(
+            targetSessions.map((s) => readEvents(opts.tracesDir, s)),
+          );
+          const report = await buildCombinedReport(allEvents, reportOpts);
+          return {
+            findings: await filterAlreadySavedSnippets(report.findings),
+            scripts: scriptsByFindingId,
+          };
+        },
+        requestDecision: (name, solution, script) =>
+          awaitHands(
+            { id: crypto.randomUUID(), kind: "decide", name, solution, script },
+            60000,
+          ),
+        runScript: (script) => awaitHands({ id: crypto.randomUUID(), script }, 30000),
+        debounceMs: opts.proposeDebounceMs,
+        log: (line) => console.log(line),
+      })
+    : null;
+
+  const server = http.createServer(async (req, res) => {
     setCorsHeaders(res);
 
     if (req.method === "OPTIONS") {
@@ -220,10 +420,26 @@ export function createServer(opts: CreateServerOptions): http.Server {
 
       if (req.method === "GET" && url.pathname === "/report") {
         const sessionParam = url.searchParams.get("session");
+        const llmParam = url.searchParams.get("llm");
+        const llm = llmParam !== "0" && llmParam !== "false";
+        const reportOpts = {
+          dataDir,
+          llm,
+          gemini: opts.gemini,
+          implement,
+          scriptStore: scriptsByFindingId,
+        };
         let report: unknown;
+        let cacheSig: string;
         if (sessionParam && sessionParam.length > 0) {
           const events = await readEvents(opts.tracesDir, sessionParam);
-          report = buildReport(sessionParam, events, { dataDir });
+          cacheSig = `${sessionParam}|${llm ? 1 : 0}|${sessionParam}:${events.length}:${events.at(-1)?.ts ?? 0}`;
+          const cached = reportCache.get(cacheSig);
+          if (cached && hasAllCachedScripts(cached, scriptsByFindingId)) {
+            sendJson(res, 200, cached);
+            return;
+          }
+          report = await buildReport(sessionParam, events, reportOpts);
         } else {
           const cutoffMs = Date.now() - RECENT_SESSION_WINDOW_MS;
           const sessions = await listSessions(opts.tracesDir);
@@ -231,13 +447,26 @@ export function createServer(opts: CreateServerOptions): http.Server {
           const sessionEvents = await Promise.all(
             recentSessions.map((s) => readEvents(opts.tracesDir, s.session)),
           );
-          report = buildCombinedReport(sessionEvents, { dataDir });
+          const perSessionSig = recentSessions
+            .map((s, idx) => {
+              const evs = sessionEvents[idx] ?? [];
+              return `${s.session}:${evs.length}:${evs.at(-1)?.ts ?? 0}`;
+            })
+            .join(",");
+          cacheSig = `all|${llm ? 1 : 0}|${perSessionSig}`;
+          const cached = reportCache.get(cacheSig);
+          if (cached && hasAllCachedScripts(cached, scriptsByFindingId)) {
+            sendJson(res, 200, cached);
+            return;
+          }
+          report = await buildCombinedReport(sessionEvents, reportOpts);
         }
         const parsed = ReportSchema.safeParse(report);
         if (!parsed.success) {
           sendJson(res, 500, { ok: false, error: parsed.error.message });
           return;
         }
+        reportCache.set(cacheSig, parsed.data);
         sendJson(res, 200, parsed.data);
         return;
       }
@@ -263,17 +492,52 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const scrubbed = validation.events.length - events.filter((e) => original.has(e)).length;
 
         await appendEvents(opts.tracesDir, events);
-        if (!activeLibraryDecideId) {
-          const entries = await readLibrary(dataDir).catch(() => []);
-          const matched = recallMatcher.matchEvents(events, entries);
+        if (events.some((e) => e.type === "nav" && e.meta?.subType === "page_load")) {
+          for (let i = commandQueue.length - 1; i >= 0; i--) {
+            if (commandQueue[i]?.kind === "decide") {
+              const stale = commandQueue.splice(i, 1)[0];
+              if (stale) {
+                waiters.get(stale.id)?.({ ok: false, error: "Page navigated before decision" });
+              }
+            }
+          }
+          if (activeLibraryDecide) {
+            cancelCommand(activeLibraryDecide.commandId, "Page navigated before decision");
+            activeLibraryDecide = null;
+          }
+        }
+        for (const evt of events) {
+          if (evt.type === "focus" || evt.type === "click") {
+            const visitedKey = extractEditableTargetKey(evt);
+            if (visitedKey) recallMatcher.notifyTargetVisited(visitedKey);
+          }
+        }
+        const entries = await readLibrary(dataDir).catch(() => []);
+        if (entries.length > 0) {
+          const matched = recallMatcher.matchEventsWithEvent(events, entries);
           if (matched) {
-            console.log(
-              `[server] half-detected library match id=${matched.id} name="${matched.name}" -> /decide`,
-            );
-            void triggerLibraryRecall(matched);
+            if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
+              cancelCommand(activeLibraryDecide.commandId, "Superseded");
+              activeLibraryDecide = null;
+            }
+            if (!activeLibraryDecide) {
+              console.log(
+                `[server] half-detected library match id=${matched.entry.id} name="${matched.entry.name}" -> /decide`,
+              );
+              void triggerLibraryRecall(matched.entry, matched.event);
+            }
           }
         }
         sendJson(res, 200, { ok: true, n: events.length, scrubbed });
+        const sessionIds = new Set(events.map((e) => e.session));
+        for (const sessionId of sessionIds) {
+          liveSessions.add(sessionId);
+        }
+        if (proposer) {
+          for (const sessionId of sessionIds) {
+            proposer.onEvents(sessionId);
+          }
+        }
         return;
       }
 
@@ -283,6 +547,100 @@ export function createServer(opts: CreateServerOptions): http.Server {
           return;
         }
         sendJson(res, 200, { ok: true, script: latestScript });
+        return;
+      }
+
+      if (req.method === "GET" && rawPath.startsWith("/script/")) {
+        let findingId: string;
+        try {
+          findingId = decodeURIComponent(rawPath.slice("/script/".length));
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid finding id" });
+          return;
+        }
+
+        if (!isValidArtifactId(findingId)) {
+          sendJson(res, 400, { ok: false, error: "Invalid finding id" });
+          return;
+        }
+
+        const script = scriptsByFindingId.get(findingId);
+        if (!script) {
+          sendJson(res, 404, { ok: false, error: "Script not found" });
+          return;
+        }
+
+        sendJson(res, 200, { ok: true, script });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/library/auto") {
+        const raw = await readBody(req);
+        let parsedJson: unknown;
+        try {
+          parsedJson = JSON.parse(raw);
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid JSON body" });
+          return;
+        }
+
+        if (
+          !parsedJson ||
+          typeof parsedJson !== "object" ||
+          Array.isArray(parsedJson) ||
+          typeof (parsedJson as { solution?: unknown }).solution !== "string" ||
+          (parsedJson as { solution: string }).solution.trim().length === 0
+        ) {
+          sendJson(res, 400, { ok: false, error: "Expected non-empty solution string" });
+          return;
+        }
+
+        const body = parsedJson as {
+          name?: unknown;
+          solution: string;
+          script?: unknown;
+          context?: unknown;
+          suppressRecallMs?: unknown;
+        };
+
+        let script: ActionScript;
+        try {
+          script = parseActionScript(body.script);
+        } catch (err) {
+          sendJson(res, 400, {
+            ok: false,
+            error: err instanceof Error ? err.message : "Invalid action script",
+          });
+          return;
+        }
+
+        const name = typeof body.name === "string" ? body.name : undefined;
+        const context =
+          body.context && typeof body.context === "object" && !Array.isArray(body.context)
+            ? (body.context as ImplementContext)
+            : undefined;
+
+        const built = buildLibraryEntryFromScript({
+          name,
+          solution: body.solution,
+          script,
+          context,
+          status: "active",
+        });
+        const { entry } = await upsertLibraryEntry(dataDir, built);
+        latestScript = entry.script;
+        reportCache.clear();
+        console.log(
+          `[server] saved snippet id=${entry.id} name="${entry.name}" locators=${entry.eyes.targetHints.locators.map((l) => `${l.kind}:${l.value}`).join(",")}`,
+        );
+        const suppressMs =
+          typeof body.suppressRecallMs === "number" && Number.isFinite(body.suppressRecallMs)
+            ? Math.max(0, body.suppressRecallMs)
+            : 0;
+        if (suppressMs > 0) {
+          recallMatcher.suppressEntry(entry.id, suppressMs);
+        }
+        sendJson(res, 200, { ok: true, entry });
         return;
       }
 
@@ -322,6 +680,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const compiled = await compileLibraryEntry(body.solution, { name, context });
         const { entry } = await upsertLibraryEntry(dataDir, compiled);
         latestScript = entry.script;
+        reportCache.clear();
 
         if (url.pathname === "/library/implement") {
           sendJson(res, 200, { ok: true, entry });
@@ -365,6 +724,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         }
 
         const saved = await upsertLibraryEntry(dataDir, parsedEntry.data);
+        reportCache.clear();
         sendJson(res, 200, { ok: true, entry: saved.entry, items: saved.items });
         return;
       }
@@ -386,6 +746,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
           sendJson(res, 404, { ok: false, error: "Library entry not found" });
           return;
         }
+        reportCache.clear();
         sendJson(res, 200, { ok: true, items: removed.items });
         return;
       }
@@ -475,7 +836,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const id = crypto.randomUUID();
         const timeoutMs = Number(url.searchParams.get("timeoutMs")) || 30000;
         console.log(`[server] POST /hands/run id=${id} steps=${script.steps.length}`);
-        const outcome = await enqueueAndAwait(
+        const outcome = await awaitHands(
           { id, script },
           timeoutMs,
           "Timed out waiting for extension to execute script",
@@ -573,4 +934,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
       sendJson(res, 500, { ok: false, error: message });
     }
   });
+
+  server.on("close", () => {
+    proposer?.close();
+    for (const resolve of [...waiters.values()]) {
+      resolve({ ok: false, error: "Server closed" });
+    }
+    waiters.clear();
+    commandQueue.length = 0;
+  });
+
+  return server;
 }

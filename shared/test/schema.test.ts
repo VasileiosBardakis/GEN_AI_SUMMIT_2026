@@ -141,6 +141,27 @@ describe("ActionScriptSchema", () => {
       ActionScriptSchema.safeParse({ steps: [{ action: "navigate", url: "/local" }] }).success,
     ).toBe(false);
   });
+
+  it("accepts readText -> switchTab -> fill and rejects switchTab without host", () => {
+    const parsed = ActionScriptSchema.safeParse({
+      steps: [
+        { action: "readText", target: { kind: "css", value: ".order-id" }, bind: "orderId" },
+        { action: "switchTab", host: "erp.local" },
+        { action: "fill", target: { kind: "css", value: 'input[name="id"]' }, value: "{{orderId}}" },
+      ],
+    });
+    expect(parsed.success).toBe(true);
+
+    const withPort = ActionScriptSchema.safeParse({
+      steps: [{ action: "switchTab", host: "127.0.0.1:5173" }],
+    });
+    expect(withPort.success).toBe(true);
+
+    expect(ActionScriptSchema.safeParse({ steps: [{ action: "switchTab" }] }).success).toBe(false);
+    expect(
+      ActionScriptSchema.safeParse({ steps: [{ action: "switchTab", host: "   " }] }).success,
+    ).toBe(false);
+  });
 });
 
 describe("LibraryEntrySchema", () => {

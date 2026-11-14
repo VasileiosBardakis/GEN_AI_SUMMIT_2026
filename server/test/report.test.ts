@@ -4,10 +4,12 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Event, Report } from "@gen/shared";
 import { EventSchema, ReportSchema } from "@gen/shared/schema.ts";
 import { createServer } from "../src/app.ts";
+import type { ActionScript } from "../src/hands/types.ts";
+import type { GeminiSdk } from "../src/llm/gemini.ts";
 import { buildCombinedReport, buildReport } from "../src/report.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -20,8 +22,8 @@ async function loadFixtureEvents(filename: string): Promise<Event[]> {
 }
 
 describe("buildReport", () => {
-  it("returns findings: [] when called with no events", () => {
-    const report = buildReport("sess_empty");
+  it("returns findings: [] when called with no events", async () => {
+    const report = await buildReport("sess_empty");
     expect(ReportSchema.parse(report)).toEqual(report);
     expect(report.session).toBe("sess_empty");
     expect(report.findings).toEqual([]);
@@ -29,7 +31,7 @@ describe("buildReport", () => {
 
   it("returns 1 rung1 finding with repetitions === 3 for reply-x3.jsonl events", async () => {
     const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
-    const report = buildReport("sess_reply_x3", replyX3Events);
+    const report = await buildReport("sess_reply_x3", replyX3Events);
 
     expect(ReportSchema.parse(report)).toEqual(report);
     expect(report.session).toBe("sess_reply_x3");
@@ -38,6 +40,19 @@ describe("buildReport", () => {
     expect(report.findings[0].stats.repetitions).toBe(3);
   });
 });
+
+function groupBySession(events: Event[]): Event[][] {
+  const bySession = new Map<string, Event[]>();
+  for (const ev of events) {
+    const list = bySession.get(ev.session);
+    if (list) {
+      list.push(ev);
+    } else {
+      bySession.set(ev.session, [ev]);
+    }
+  }
+  return Array.from(bySession.values());
+}
 
 describe("buildCombinedReport", () => {
   it("combines findings across sessions and deduplicates by finding.id", async () => {
@@ -60,7 +75,7 @@ describe("buildCombinedReport", () => {
       session: "sess_reply_x3_dup",
     }));
 
-    const report = buildCombinedReport([
+    const report = await buildCombinedReport([
       replyX3Events,
       navOnlyEvents,
       duplicateSessionEvents,
@@ -71,6 +86,103 @@ describe("buildCombinedReport", () => {
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0].verdict).toBe("rung1");
     expect(report.findings[0].stats.repetitions).toBe(3);
+  });
+
+  it("joins crosstab-x3-split (3 sessions) into one rung2 finding for portal.local -> erp.local", async () => {
+    const splitEvents = await loadFixtureEvents("crosstab-x3-split.jsonl");
+    const sessions = groupBySession(splitEvents);
+    expect(sessions).toHaveLength(3);
+
+    const report = await buildCombinedReport(sessions, { llm: false });
+
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.session).toBe("all");
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].verdict).toBe("rung2");
+    expect(report.findings[0].title).toContain(
+      "Copy 4 fields from portal.local to erp.local",
+    );
+    expect(report.findings[0].stats.repetitions).toBe(3);
+  });
+
+  it("does not join two sessions 2 hours apart each with 1 reply (no finding)", async () => {
+    const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+    const oneReply = replyX3Events.slice(0, 8);
+    const twoHoursMs = 2 * 60 * 60 * 1000;
+
+    const session1 = oneReply.map((e, i) => ({
+      ...e,
+      id: `50000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      session: "sess_reply_1",
+    }));
+    const session2 = oneReply.map((e, i) => ({
+      ...e,
+      id: `60000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      ts: e.ts + twoHoursMs,
+      session: "sess_reply_2",
+    }));
+
+    const report = await buildCombinedReport([session1, session2], { llm: false });
+
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.session).toBe("all");
+    expect(report.findings).toEqual([]);
+  });
+
+  it("deduplicates findings with the same id by keeping the one with more repetitions", async () => {
+    const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+    const twoHoursMs = 2 * 60 * 60 * 1000;
+    const oneReply = replyX3Events.slice(1, 8);
+    const replyX5Events = [
+      ...replyX3Events,
+      ...oneReply.map((e, i) => ({
+        ...e,
+        id: `71000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+        ts: e.ts + 30_000,
+      })),
+      ...oneReply.map((e, i) => ({
+        ...e,
+        id: `72000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+        ts: e.ts + 60_000,
+      })),
+    ].map((e, i) => ({
+      ...e,
+      id: `70000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      ts: e.ts + twoHoursMs,
+      session: "sess_reply_x5",
+    }));
+
+    const report = await buildCombinedReport([replyX3Events, replyX5Events], {
+      llm: false,
+    });
+
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].verdict).toBe("rung1");
+    expect(report.findings[0].stats.repetitions).toBe(5);
+  });
+
+  it("produces the same verdicts as before for reply-x3, invoice-x9, and dispute-x3", async () => {
+    const cases: Array<{ fixture: string; expectedVerdict: string }> = [
+      { fixture: "reply-x3.jsonl", expectedVerdict: "rung1" },
+      { fixture: "invoice-x9.jsonl", expectedVerdict: "rung2" },
+      { fixture: "dispute-x3.jsonl", expectedVerdict: "do_not_automate" },
+    ];
+
+    for (const { fixture, expectedVerdict } of cases) {
+      const events = await loadFixtureEvents(fixture);
+      const single = await buildReport(events[0].session, events, { llm: false });
+      const combined = await buildCombinedReport([events], { llm: false });
+
+      expect(ReportSchema.parse(combined)).toEqual(combined);
+      expect(combined.session).toBe("all");
+      expect(combined.findings.map((f) => f.verdict)).toEqual(
+        single.findings.map((f) => f.verdict),
+      );
+      expect(combined.findings.some((f) => f.verdict === expectedVerdict)).toBe(
+        true,
+      );
+    }
   });
 });
 
@@ -259,5 +371,110 @@ describe("GET /report HTTP integration", () => {
     expect(ReportSchema.parse(report)).toEqual(report);
     expect(report.session).toBe("missing_session");
     expect(report.findings).toEqual([]);
+  });
+
+  it("joins crosstab-x3-split on GET /report while keeping GET /report?session=X single-session", async () => {
+    const splitEvents = await loadFixtureEvents("crosstab-x3-split.jsonl");
+
+    const postRes = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(splitEvents),
+    });
+    expect(postRes.status).toBe(200);
+
+    const combinedRes = await fetch(`${baseUrl}/report?llm=0`);
+    expect(combinedRes.status).toBe(200);
+    const combinedReport = (await combinedRes.json()) as Report;
+    expect(ReportSchema.parse(combinedReport)).toEqual(combinedReport);
+    expect(combinedReport.session).toBe("all");
+    expect(combinedReport.findings).toHaveLength(1);
+    expect(combinedReport.findings[0].verdict).toBe("rung2");
+    expect(combinedReport.findings[0].title).toContain(
+      "Copy 4 fields from portal.local to erp.local",
+    );
+
+    const portalOnlyRes = await fetch(
+      `${baseUrl}/report?session=sess_portal_tab&llm=0`,
+    );
+    expect(portalOnlyRes.status).toBe(200);
+    const portalOnlyReport = (await portalOnlyRes.json()) as Report;
+    expect(ReportSchema.parse(portalOnlyReport)).toEqual(portalOnlyReport);
+    expect(portalOnlyReport.session).toBe("sess_portal_tab");
+    expect(
+      portalOnlyReport.findings.some((f) =>
+        f.title.includes("Copy 4 fields from portal.local to erp.local"),
+      ),
+    ).toBe(false);
+  });
+
+  it("caches GET /report when no new events arrive and calls implement/gemini only once", async () => {
+    const cacheRoot = await mkdtemp(path.join(os.tmpdir(), "gen-report-cache-"));
+    const generateContent = vi.fn<GeminiSdk["models"]["generateContent"]>(
+      async () => ({
+        text: JSON.stringify({
+          level: "rung1",
+          risky: false,
+          confidence: 0.9,
+          name: "Cached reply",
+        }),
+      }),
+    );
+    const implement = vi.fn(
+      async (_solution: string, opts?: { name?: string }): Promise<ActionScript> => ({
+        name: opts?.name ?? "Cached script",
+        steps: [{ action: "insertText", value: "cached" }],
+      }),
+    );
+    const cachedServer = createServer({
+      tracesDir: path.join(cacheRoot, "traces"),
+      dataDir: path.join(cacheRoot, "data"),
+      gemini: { sdk: { models: { generateContent } } },
+      implement,
+      autoPropose: false,
+    });
+    await new Promise<void>((resolve) => {
+      cachedServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const cachedPort = (cachedServer.address() as AddressInfo).port;
+    const cachedUrl = `http://127.0.0.1:${cachedPort}`;
+
+    try {
+      const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+      await fetch(`${cachedUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(replyX3Events),
+      });
+
+      const res1 = await fetch(`${cachedUrl}/report?session=sess_reply_x3`);
+      expect(res1.status).toBe(200);
+      const report1 = (await res1.json()) as Report;
+      expect(report1.findings).toHaveLength(1);
+      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(implement).toHaveBeenCalledTimes(1);
+
+      const res2 = await fetch(`${cachedUrl}/report?session=sess_reply_x3`);
+      expect(res2.status).toBe(200);
+      const report2 = (await res2.json()) as Report;
+      expect(report2).toEqual(report1);
+      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(implement).toHaveBeenCalledTimes(1);
+
+      const allRes1 = await fetch(`${cachedUrl}/report`);
+      expect(allRes1.status).toBe(200);
+      expect(generateContent).toHaveBeenCalledTimes(2);
+      expect(implement).toHaveBeenCalledTimes(2);
+
+      const allRes2 = await fetch(`${cachedUrl}/report`);
+      expect(allRes2.status).toBe(200);
+      expect(generateContent).toHaveBeenCalledTimes(2);
+      expect(implement).toHaveBeenCalledTimes(2);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        cachedServer.close((err) => (err ? reject(err) : resolve()));
+      });
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
   });
 });

@@ -188,4 +188,26 @@ describe("email reply JSONL fixtures", () => {
       expect(typingDurationMs).toBeGreaterThan(0);
     }
   });
+
+  it("validates crosstab-x3.jsonl and crosstab-x3-split.jsonl against EventSchema", async () => {
+    const singleEvents = await loadFixtureEvents("crosstab-x3.jsonl");
+    const splitEvents = await loadFixtureEvents("crosstab-x3-split.jsonl");
+
+    expect(singleEvents).toHaveLength(32);
+    expect(splitEvents).toHaveLength(32);
+
+    const parsedSingle = singleEvents.map((e) => EventSchema.parse(e));
+    const parsedSplit = splitEvents.map((e) => EventSchema.parse(e));
+
+    expect(new Set(parsedSingle.map((e) => e.session))).toEqual(
+      new Set(["sess_crosstab_x3"]),
+    );
+    expect(new Set(parsedSplit.map((e) => e.session))).toEqual(
+      new Set(["sess_portal_tab", "sess_erp_tab", "sess_browser"]),
+    );
+
+    for (let i = 1; i < parsedSplit.length; i++) {
+      expect(parsedSplit[i].ts).toBeGreaterThan(parsedSplit[i - 1].ts);
+    }
+  });
 });

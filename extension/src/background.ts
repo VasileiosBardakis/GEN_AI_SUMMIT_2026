@@ -39,6 +39,9 @@ interface ChromeRuntimeMessage {
   id?: string;
   item?: OptimizationItem;
   recordRun?: boolean;
+  name?: string;
+  solution?: string;
+  context?: Record<string, unknown>;
 }
 
 interface ChromeTab {
@@ -89,6 +92,7 @@ interface ChromeApi {
 
 let lastClipboard: ClipboardState | null = null;
 let lastActiveTab: { tabId: number; app: string; url?: string; title?: string } | null = null;
+let lastApprovedDecideTabId: number | undefined;
 const lastFieldFrameByTab = new Map<number, number>();
 const eventQueue: Event[] = [];
 const recentEvents: Event[] = [];
@@ -246,6 +250,14 @@ if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     void pollHandsBridge();
     if (msg?.kind === "EYES_EVENT" && msg.event) {
+      if (sender.tab?.id !== undefined) {
+        lastActiveTab = {
+          tabId: sender.tab.id,
+          app: msg.event.app,
+          url: msg.event.url,
+          title: msg.event.window,
+        };
+      }
       recordEvent(msg.event);
       sendResponse({ ok: true });
       return false;
@@ -259,6 +271,30 @@ if (chromeApi?.runtime?.onMessage) {
       void loadLibrary()
         .then((items) => saveLibrary(upsertOptimizationItem(items, incoming)))
         .then((items) => sendResponse({ ok: true, items }));
+      return true;
+    }
+    if (msg?.kind === "EYES_AUTO_SAVE_LIBRARY" && msg.script && typeof msg.solution === "string") {
+      const payload = {
+        name: msg.name,
+        solution: msg.solution,
+        script: msg.script,
+        context: msg.context,
+      };
+      void flushQueue()
+        .then(() =>
+          fetch(`${SERVER_URL}/library/auto`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          })
+        )
+        .then(async (resp) => {
+          const data = await resp.json().catch(() => ({ ok: resp.ok }));
+          sendResponse(data);
+        })
+        .catch(() => {
+          sendResponse({ ok: false });
+        });
       return true;
     }
     if (msg?.kind === "EYES_ACTIVATE_OPTIMIZATION" && (msg.id || msg.item)) {
@@ -527,68 +563,79 @@ async function pollHandsBridge(): Promise<void> {
             script?: ActionScript;
           };
           if (cmd.id && cmd.kind === "decide" && cmd.script && typeof cmd.solution === "string") {
-            console.log("[eyes-bg] received decide command", cmd.id, cmd.name);
-            let payload: {
-              id: string;
-              ok: boolean;
-              decision?: "approved" | "dismissed";
-              error?: string;
-            };
-            try {
-              const tabId = await resolveActiveTabId();
-              console.log("[eyes-bg] decide target tabId =", tabId);
-              if (tabId === undefined) throw new Error("No active web tab open");
-              if (!chromeApi?.tabs?.sendMessage) {
-                throw new Error("chrome.tabs.sendMessage unavailable");
-              }
-              const msgPayload = {
-                kind: "EYES_SHOW_DECIDER",
-                name: cmd.name ?? cmd.script.name,
-                solution: cmd.solution,
-                script: cmd.script,
+            const decideId = cmd.id;
+            const decideName = cmd.name ?? cmd.script.name;
+            const decideSolution = cmd.solution;
+            const decideScript = cmd.script;
+            console.log("[eyes-bg] received decide command", decideId, decideName);
+            void (async () => {
+              let payload: {
+                id: string;
+                ok: boolean;
+                decision?: "approved" | "dismissed";
+                error?: string;
               };
-              let res: { ok?: boolean; decision?: "approved" | "dismissed"; error?: string } | undefined;
               try {
-                res = (await chromeApi.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
-                  | { ok?: boolean; decision?: "approved" | "dismissed"; error?: string }
-                  | undefined;
-              } catch (sendErr) {
-                console.warn("[eyes-bg] sendMessage failed, injecting content.js and retrying:", sendErr);
-                if (typeof chrome !== "undefined" && chrome.scripting?.executeScript) {
-                  await chrome.scripting.executeScript({
-                    target: { tabId, allFrames: false },
-                    files: ["dist/content.js"],
-                  });
+                const tabId = await resolveActiveTabId();
+                console.log("[eyes-bg] decide target tabId =", tabId);
+                if (tabId === undefined) throw new Error("No active web tab open");
+                if (!chromeApi?.tabs?.sendMessage) {
+                  throw new Error("chrome.tabs.sendMessage unavailable");
+                }
+                const msgPayload = {
+                  kind: "EYES_SHOW_DECIDER",
+                  name: decideName,
+                  solution: decideSolution,
+                  script: decideScript,
+                };
+                let res: { ok?: boolean; decision?: "approved" | "dismissed"; error?: string } | undefined;
+                try {
                   res = (await chromeApi.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
                     | { ok?: boolean; decision?: "approved" | "dismissed"; error?: string }
                     | undefined;
-                } else {
-                  throw sendErr;
+                } catch (sendErr) {
+                  console.warn("[eyes-bg] sendMessage failed, injecting content.js and retrying:", sendErr);
+                  if (typeof chrome !== "undefined" && chrome.scripting?.executeScript) {
+                    await chrome.scripting.executeScript({
+                      target: { tabId, allFrames: false },
+                      files: ["dist/content.js"],
+                    });
+                    res = (await chromeApi.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
+                      | { ok?: boolean; decision?: "approved" | "dismissed"; error?: string }
+                      | undefined;
+                  } else {
+                    throw sendErr;
+                  }
                 }
+                console.log("[eyes-bg] decider response from tab:", res);
+                if (!res?.ok || (res.decision !== "approved" && res.decision !== "dismissed")) {
+                  throw new Error(res?.error ?? "Decider prompt failed");
+                }
+                if (res.decision === "approved") {
+                  lastApprovedDecideTabId = tabId;
+                }
+                payload = { id: decideId, ok: true, decision: res.decision };
+              } catch (err) {
+                console.error("[eyes-bg] decide error:", err);
+                payload = {
+                  id: decideId,
+                  ok: false,
+                  error: err instanceof Error ? err.message : "Decider failed",
+                };
               }
-              console.log("[eyes-bg] decider response from tab:", res);
-              if (!res?.ok || (res.decision !== "approved" && res.decision !== "dismissed")) {
-                throw new Error(res?.error ?? "Decider prompt failed");
-              }
-              payload = { id: cmd.id, ok: true, decision: res.decision };
-            } catch (err) {
-              console.error("[eyes-bg] decide error:", err);
-              payload = {
-                id: cmd.id,
-                ok: false,
-                error: err instanceof Error ? err.message : "Decider failed",
-              };
-            }
-            await fetch(`${SERVER_URL}/hands/result`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            }).catch((err) => console.error("[eyes-bg] failed to post decide result:", err));
+              await fetch(`${SERVER_URL}/hands/result`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+              }).catch((err) => console.error("[eyes-bg] failed to post decide result:", err));
+            })();
           } else if (cmd.id && cmd.script) {
             console.log("[eyes-bg] received run command", cmd.id, "steps=", cmd.script.steps.length);
             let payload: { id: string; ok: boolean; results?: StepResult[]; error?: string };
             try {
-              const tabId = await resolveActiveTabId();
+              const preferredTabId = lastApprovedDecideTabId;
+              lastApprovedDecideTabId = undefined;
+              const tabId = await resolveActiveTabId(preferredTabId);
               console.log("[eyes-bg] run target tabId =", tabId);
               if (tabId === undefined) throw new Error("No active web tab open");
               const results = await runActionScript(tabId, cmd.script);
@@ -649,9 +696,21 @@ async function fetchAndRunLatestScript(
   return { script, results };
 }
 
-async function runActionScript(tabId: number, script: ActionScript): Promise<StepResult[]> {
+export async function runActionScript(tabId: number, script: ActionScript): Promise<StepResult[]> {
   const bindings: Record<string, BindingValue> = {};
   return runSteps(tabId, script.steps, bindings, {});
+}
+
+function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const want = targetHost.trim().toLowerCase();
+    const got = want.includes(":") ? parsed.host.toLowerCase() : parsed.hostname.toLowerCase();
+    return got === want;
+  } catch {
+    return false;
+  }
 }
 
 async function runSteps(
@@ -661,6 +720,7 @@ async function runSteps(
   scope: Record<string, unknown>,
 ): Promise<StepResult[]> {
   const results: StepResult[] = [];
+  let currentTabId = tabId;
 
   for (const rawStep of steps) {
     let step: Step;
@@ -673,8 +733,8 @@ async function runSteps(
 
     try {
       if (step.action === "navigate") {
-        await chrome.tabs.update(tabId, { url: step.url });
-        await waitForTabLoad(tabId);
+        await chrome.tabs.update(currentTabId, { url: step.url });
+        await waitForTabLoad(currentTabId);
         results.push({ ok: true, url: step.url });
         continue;
       }
@@ -685,17 +745,45 @@ async function runSteps(
         continue;
       }
 
+      if (step.action === "switchTab") {
+        const allTabs = await chrome.tabs.query({});
+        const matches = allTabs.filter(
+          (t) => t.id !== undefined && tabMatchesHost(t.url, step.host),
+        );
+        matches.sort((a, b) => {
+          const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
+          if (accessDiff !== 0) return accessDiff;
+          if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;
+          return 0;
+        });
+        const match = matches[0];
+        if (match?.id === undefined) {
+          throw new Error(`No open tab for ${step.host}`);
+        }
+        await chrome.tabs.update(match.id, { active: true });
+        if (match.windowId !== undefined && chrome.windows?.update) {
+          await chrome.windows.update(match.windowId, { focused: true });
+        }
+        currentTabId = match.id;
+        results.push({ ok: true, tab: step.host });
+        continue;
+      }
+
       if (step.action === "forEach") {
         const items = Array.isArray(step.items) ? step.items : bindings[step.items];
         if (!Array.isArray(items)) throw new Error(`No array binding: ${step.items}`);
         for (const item of items) {
-          const nested = await runSteps(tabId, step.steps, bindings, { ...scope, ...item, item });
+          const nested = await runSteps(currentTabId, step.steps, bindings, {
+            ...scope,
+            ...item,
+            item,
+          });
           results.push(...nested);
         }
         continue;
       }
 
-      const result = await executeDomStep(tabId, step);
+      const result = await executeDomStep(currentTabId, step);
       results.push(result);
       if (!result.ok) {
         if (step.optional) continue;

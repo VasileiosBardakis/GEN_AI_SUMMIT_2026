@@ -231,7 +231,7 @@ describe("snippet persistence and GET /artifact/:id integration", () => {
 
   it("persists full snippet via buildReport on reply-x3.jsonl and serves it via GET /artifact/:id", async () => {
     const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
-    const report = buildReport("sess_reply_x3", replyX3Events, { dataDir });
+    const report = await buildReport("sess_reply_x3", replyX3Events, { dataDir });
 
     expect(ReportSchema.parse(report)).toEqual(report);
     expect(report.findings).toHaveLength(1);

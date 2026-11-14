@@ -290,10 +290,20 @@ export async function executeStep(
   function insertText(element: Element, value: string): void {
     if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
       element.focus();
-      const start = element.selectionStart ?? element.value.length;
-      const end = element.selectionEnd ?? element.value.length;
-      setNativeValue(element, `${element.value.slice(0, start)}${value}${element.value.slice(end)}`);
-      const caret = start + value.length;
+      const existingNorm = element.value.trim().toLowerCase();
+      const incomingNorm = value.trim().toLowerCase();
+      if (
+        existingNorm.length > 0 &&
+        incomingNorm.length > 0 &&
+        incomingNorm.startsWith(existingNorm)
+      ) {
+        setNativeValue(element, value);
+      } else {
+        const start = element.selectionStart ?? element.value.length;
+        const end = element.selectionEnd ?? element.value.length;
+        setNativeValue(element, `${element.value.slice(0, start)}${value}${element.value.slice(end)}`);
+      }
+      const caret = element.value.length;
       try {
         element.setSelectionRange(caret, caret);
       } catch {
@@ -340,6 +350,9 @@ export async function executeStep(
     return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
   }
 
+  const winFlag = window as unknown as { __EYES_SUPPRESS_SYNTHETIC__?: boolean };
+  const prevSuppress = winFlag.__EYES_SUPPRESS_SYNTHETIC__;
+  winFlag.__EYES_SUPPRESS_SYNTHETIC__ = true;
   try {
     switch (step.action) {
       case "click": {
@@ -430,5 +443,7 @@ export async function executeStep(
       url: location.href,
       error: error instanceof Error ? error.message : "Unknown error",
     };
+  } finally {
+    winFlag.__EYES_SUPPRESS_SYNTHETIC__ = prevSuppress;
   }
 }

@@ -63,7 +63,7 @@ describe("createGeminiClient", () => {
   });
 
   it("exports expected Vertex AI defaults", () => {
-    expect(DEFAULT_GEMINI_MODEL).toBe("gemini-2.5-flash");
+    expect(DEFAULT_GEMINI_MODEL).toBe("gemini-3-flash-preview");
     expect(DEFAULT_GCP_PROJECT).toBe("genaihack26ath-52");
     expect(DEFAULT_GCP_LOCATION).toBe("global");
   });
@@ -246,5 +246,64 @@ describe("createGeminiClient", () => {
     expect(caught?.message).toContain("GOOGLE_CLOUD_LOCATION");
     expect(caught?.message).not.toContain("unused-google-api-key-secret");
     expect(googleGenAiCtorSpy).not.toHaveBeenCalled();
+  });
+
+  it("logs model, kind, elapsed ms, and ok/error for generateText and generateJson", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const textFake = makeFakeSdk("hello");
+      const textClient = createGeminiClient({
+        model: "gemini-3-flash-preview",
+        sdk: textFake.sdk,
+      });
+      await textClient.generateText("say hello");
+
+      const errFake = makeFakeSdk("");
+      const errClient = createGeminiClient({
+        model: "gemini-3-flash-preview",
+        sdk: errFake.sdk,
+      });
+      await expect(errClient.generateText("empty")).rejects.toThrow(/empty/i);
+
+      const jsonFake = makeFakeSdk(JSON.stringify({ kind: "testid", value: "ok-btn" }));
+      const jsonClient = createGeminiClient({
+        model: "gemini-3-flash-preview",
+        sdk: jsonFake.sdk,
+      });
+      await jsonClient.generateJson("locator", LocatorSchema);
+
+      const badJsonFake = makeFakeSdk("{bad");
+      const badJsonClient = createGeminiClient({
+        model: "gemini-3-flash-preview",
+        sdk: badJsonFake.sdk,
+      });
+      await expect(badJsonClient.generateJson("locator", LocatorSchema)).rejects.toThrow(
+        /malformed JSON/i,
+      );
+
+      const logs = logSpy.mock.calls.map((c) => String(c[0]));
+      expect(
+        logs.some((l) =>
+          /^\[gemini\] model=gemini-3-flash-preview kind=text ms=\d+ ok$/.test(l),
+        ),
+      ).toBe(true);
+      expect(
+        logs.some((l) =>
+          /^\[gemini\] model=gemini-3-flash-preview kind=text ms=\d+ error=/.test(l),
+        ),
+      ).toBe(true);
+      expect(
+        logs.some((l) =>
+          /^\[gemini\] model=gemini-3-flash-preview kind=json ms=\d+ ok$/.test(l),
+        ),
+      ).toBe(true);
+      expect(
+        logs.some((l) =>
+          /^\[gemini\] model=gemini-3-flash-preview kind=json ms=\d+ error=/.test(l),
+        ),
+      ).toBe(true);
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

@@ -77,6 +77,7 @@ Available actions:
 - forEach: { action: "forEach", items, steps } -> Loops over an extractList binding. Set items to the plain binding key (e.g. "rows", NOT "{{rows}}") and reference row fields as "{{fieldName}}".
 - navigate: { action: "navigate", url } -> Full http:// or https:// URL only.
 - wait: { action: "wait", ms } -> Short delay in ms only when explicitly needed.
+- switchTab: { action: "switchTab", host } -> If the solution reads values on one site and fills them on another, use readText on the first site, then {action:'switchTab', host:'<dest host>'}, then fill with {{binding}}.
 
 Locator rules (plain-text grounding without DOM snapshot):
 - "aria": Prefer when a visible field <label>, aria-label, or placeholder is known (e.g. 'Address line 1', 'From these owners', or 'combobox[name="Nationality"]'). Matches <label>, aria-label, aria-labelledby, and placeholder.
@@ -213,6 +214,8 @@ function dedupeStrings(values: string[], limit = 10): string[] {
   return out;
 }
 
+const SINGLE_WORD_HINT_STOPWORDS = new Set(["name", "names", "info", "details", "form", "field"]);
+
 function cleanHintTokens(rawList: string[], limit = 8): string[] {
   const cleaned: string[] = [];
   for (const raw of rawList) {
@@ -225,10 +228,12 @@ function cleanHintTokens(rawList: string[], limit = 8): string[] {
     const words = norm.split(" ").filter((w) => w.length >= 2 && !GENERIC_HINT_STOPWORDS.has(w));
     if (words.length === 0) continue;
     const phrase = words.join(" ");
-    if (phrase.length >= 3) cleaned.push(phrase);
+    if (phrase.length >= 3 && !(words.length === 1 && SINGLE_WORD_HINT_STOPWORDS.has(phrase))) {
+      cleaned.push(phrase);
+    }
     if (words.length > 1) {
       for (const word of words) {
-        if (word.length >= 4) cleaned.push(word);
+        if (word.length >= 4 && !SINGLE_WORD_HINT_STOPWORDS.has(word)) cleaned.push(word);
       }
     }
   }
