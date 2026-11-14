@@ -3,6 +3,7 @@ import {
   type GeminiClientOptions,
   type ZodLikeSchema,
 } from "../llm/gemini.ts";
+import { sanitizeActionScript, type SafetyResult } from "./safety.ts";
 import {
   ACTION_SCRIPT_RESPONSE_SCHEMA,
   parseActionScript,
@@ -95,10 +96,10 @@ function createGeminiGenerator(geminiOpts?: GeminiClientOptions): ImplementorGen
   };
 }
 
-export async function implementSolution(
+export async function implementSolutionWithSafety(
   solutionText: string,
   opts: ImplementorOptions = {},
-): Promise<ActionScript> {
+): Promise<SafetyResult> {
   if (typeof solutionText !== "string" || solutionText.trim().length === 0) {
     throw new Error("solutionText must be a non-empty string");
   }
@@ -110,9 +111,19 @@ export async function implementSolution(
     responseSchema: ACTION_SCRIPT_RESPONSE_SCHEMA,
   });
 
-  const script = parseActionScript(unwrapJson(raw));
-  if (opts.name?.trim()) {
-    return { ...script, name: opts.name.trim() };
+  const parsed = parseActionScript(unwrapJson(raw));
+  const named = opts.name?.trim() ? { ...parsed, name: opts.name.trim() } : parsed;
+  return sanitizeActionScript(named);
+}
+
+export async function implementSolution(
+  solutionText: string,
+  opts: ImplementorOptions = {},
+): Promise<ActionScript> {
+  const { script, blockedSteps } = await implementSolutionWithSafety(solutionText, opts);
+  if (script.steps.length === 0) {
+    const reasons = blockedSteps.map((b) => b.reason).join("; ");
+    throw new Error(`All steps blocked by safety policy: ${reasons || "unsafe script"}`);
   }
   return script;
 }
