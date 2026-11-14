@@ -11,7 +11,7 @@ import { scrubEvents } from "../src/scrub.ts";
 import { readEvents } from "../src/trace.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const probeAllRawPath = path.resolve(__dirname, "../../traces/probe_all_raw.jsonl");
+const probeAllRawPath = path.resolve(__dirname, "./fixtures/probe-all-raw.jsonl");
 
 describe("scrubEvents & POST /events scrubbing", () => {
   let tracesDir: string;
@@ -190,7 +190,7 @@ describe("scrubEvents & POST /events scrubbing", () => {
     expect(stored).toEqual(ordinaryEvents);
   });
 
-  it("scrubs traces/probe_all_raw.jsonl in memory removing raw access_token and collapsing password inputs to 1", async () => {
+  it("scrubs fixtures/probe-all-raw.jsonl in memory removing raw access_token and collapsing password inputs to 1", async () => {
     const rawContent = await readFile(probeAllRawPath, "utf8");
     const rawEvents = rawContent
       .split("\n")
