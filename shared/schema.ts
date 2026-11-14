@@ -92,6 +92,143 @@ export const ReportSchema = z.object({
   findings: z.array(FindingSchema),
 });
 
+export const ScriptLocatorKindSchema = z.enum(["testid", "aria", "css", "text", "xpath"]);
+
+export const ScriptLocatorSchema = z.object({
+  kind: ScriptLocatorKindSchema,
+  value: z.string().refine((s) => s.trim().length > 0, "expected non-empty string"),
+});
+
+export type ScriptLocatorKind = z.infer<typeof ScriptLocatorKindSchema>;
+export type ScriptLocator = z.infer<typeof ScriptLocatorSchema>;
+
+const ExtractFieldsSchema = z.union([
+  z
+    .array(
+      z.object({
+        name: z.string().refine((s) => s.trim().length > 0, "expected non-empty string"),
+        locator: ScriptLocatorSchema,
+      }),
+    )
+    .transform((entries) => {
+      const out: Record<string, ScriptLocator> = {};
+      for (const entry of entries) out[entry.name] = entry.locator;
+      return out;
+    }),
+  z.record(z.string(), ScriptLocatorSchema),
+]);
+
+const ForEachItemsSchema = z.union([
+  z.string().refine((s) => s.trim().length > 0, "expected non-empty binding name"),
+  z.array(
+    z.record(z.string(), z.unknown()).transform((row) => {
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(row)) out[k] = String(v);
+      return out;
+    }),
+  ),
+]);
+
+const nonEmptyBind = z.string().refine((s) => s.trim().length > 0, "expected non-empty string");
+
+export const ScriptDomStepSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("click"),
+    target: ScriptLocatorSchema,
+    optional: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("fill"),
+    target: ScriptLocatorSchema,
+    value: z.string(),
+    optional: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("insertText"),
+    target: ScriptLocatorSchema.optional(),
+    value: z.string(),
+    optional: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("select"),
+    target: ScriptLocatorSchema,
+    value: z.string(),
+    optional: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("waitFor"),
+    target: ScriptLocatorSchema,
+    timeoutMs: z.number().positive().optional(),
+    optional: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("readText"),
+    target: ScriptLocatorSchema,
+    bind: nonEmptyBind,
+    optional: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("readValue"),
+    target: ScriptLocatorSchema,
+    bind: nonEmptyBind,
+    optional: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("extractList"),
+    target: ScriptLocatorSchema,
+    bind: nonEmptyBind,
+    fields: ExtractFieldsSchema.optional(),
+    optional: z.boolean().optional(),
+  }),
+]);
+
+export type ScriptDomStep = z.infer<typeof ScriptDomStepSchema>;
+
+export type ScriptStep =
+  | ScriptDomStep
+  | { action: "navigate"; url: string; optional?: boolean }
+  | { action: "wait"; ms: number; optional?: boolean }
+  | {
+      action: "forEach";
+      items: Record<string, string>[] | string;
+      steps: ScriptStep[];
+      optional?: boolean;
+    };
+
+export const ScriptStepSchema: z.ZodType<ScriptStep, z.ZodTypeDef, unknown> = z.lazy(() =>
+  z.discriminatedUnion("action", [
+    ...ScriptDomStepSchema.options,
+    z.object({
+      action: z.literal("navigate"),
+      url: z.string().regex(/^https?:\/\//i, "expected http(s) URL"),
+      optional: z.boolean().optional(),
+    }),
+    z.object({
+      action: z.literal("wait"),
+      ms: z.number().nonnegative(),
+      optional: z.boolean().optional(),
+    }),
+    z.object({
+      action: z.literal("forEach"),
+      items: ForEachItemsSchema,
+      steps: z.array(ScriptStepSchema).min(1),
+      optional: z.boolean().optional(),
+    }),
+  ]),
+);
+
+export const ActionScriptSchema = z
+  .object({
+    name: z.string().optional(),
+    steps: z.array(ScriptStepSchema).min(1),
+  })
+  .transform(({ name, steps }) => ({
+    ...(name ? { name } : {}),
+    steps,
+  }));
+
+export type ActionScript = z.infer<typeof ActionScriptSchema>;
+
 const _check: z.infer<typeof EventSchema> extends Event ? true : never = true;
 void _check;
 
