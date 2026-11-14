@@ -159,8 +159,34 @@ test("shows Eyes AI suggestion popup with conditional MP4 and always-shown DAG f
     if (popupBox && viewport) {
       expect(popupBox.x).toBeGreaterThanOrEqual(0);
       expect(popupBox.y).toBeGreaterThanOrEqual(0);
+      expect(popupBox.y).toBeLessThanOrEqual(24);
+      expect(popupBox.width).toBeLessThanOrEqual(336);
       expect(popupBox.x + popupBox.width).toBeLessThanOrEqual(viewport.width);
+      expect(popupBox.x + popupBox.width).toBeGreaterThanOrEqual(viewport.width - 40);
       expect(popupBox.y + popupBox.height).toBeLessThanOrEqual(viewport.height);
+    }
+
+    for (const size of [
+      { width: 320, height: 480 },
+      { width: 640, height: 320 },
+    ]) {
+      await page.setViewportSize(size);
+      const box = await popup.boundingBox();
+      expect(box).not.toBeNull();
+      if (box) {
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.y).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(size.width);
+        expect(box.y + box.height).toBeLessThanOrEqual(size.height);
+      }
+      const noHorizontalOverflow = await popup.evaluate((host) => {
+        const card = host.shadowRoot?.querySelector(".card") as HTMLElement | null;
+        return card ? card.scrollWidth <= card.clientWidth + 1 : false;
+      });
+      expect(noHorizontalOverflow).toBe(true);
+    }
+    if (viewport) {
+      await page.setViewportSize(viewport);
     }
 
     const clickPopupState = await popup.evaluate((host) => {
