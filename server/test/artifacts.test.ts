@@ -351,8 +351,9 @@ describe("snippet persistence and GET /artifact/:id integration", () => {
     });
   });
 
-  it("defaults dataDir inside tracesDir when createServer({ tracesDir }) is called without dataDir and supports combined GET /report", async () => {
-    const defaultTracesDir = path.join(rootDir, "only-traces");
+  it("defaults dataDir to path.resolve(tracesDir, '..', 'data') when createServer({ tracesDir }) is called without dataDir and supports combined GET /report", async () => {
+    const defaultWorkspaceDir = path.join(rootDir, "default-workspace");
+    const defaultTracesDir = path.join(defaultWorkspaceDir, "traces");
     const defaultServer = createServer({ tracesDir: defaultTracesDir });
     await new Promise<void>((resolve) => {
       defaultServer.listen(0, "127.0.0.1", () => resolve());
@@ -379,7 +380,7 @@ describe("snippet persistence and GET /artifact/:id integration", () => {
 
       expect(
         existsSync(
-          path.join(defaultTracesDir, "data", "snippets", `${finding.id}.txt`),
+          path.join(defaultWorkspaceDir, "data", "snippets", `${finding.id}.txt`),
         ),
       ).toBe(true);
 

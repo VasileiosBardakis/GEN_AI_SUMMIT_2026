@@ -30,7 +30,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 }
 
 export function createServer(opts: { tracesDir: string; dataDir?: string }): http.Server {
-  const dataDir = opts.dataDir ?? path.join(opts.tracesDir, "data");
+  const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
 
   return http.createServer(async (req, res) => {
     setCorsHeaders(res);
