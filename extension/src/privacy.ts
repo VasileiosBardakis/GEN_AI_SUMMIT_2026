@@ -1,4 +1,4 @@
-import type { EventMeta } from "../../shared/contract.ts";
+import type { EventMeta } from "@gen/shared";
 
 const SENSITIVE_FIELD_RE =
   /\b(pass(word|wd|code)?|pwd|secret|api[-_]?key|private[-_]?key|access[-_]?token|auth[-_]?token|bearer|cvv|cvc|csc|card[-_]?num(ber)?|cc[-_]?num|iban|bic|swift|ssn|social[-_]?security|afm|amka|tax[-_]?id|pin[-_]?code|otp|2fa)\b/i;

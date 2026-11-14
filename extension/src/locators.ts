@@ -1,4 +1,4 @@
-import type { EventMeta, Locator } from "../../shared/contract.ts";
+import type { EventMeta, Locator } from "@gen/shared";
 
 const TEST_ID_ATTRS = ["data-testid", "data-test-id", "data-test", "data-qa", "data-cy"];
 

@@ -1,4 +1,4 @@
-import type { Event, EventMeta, EventType } from "../../shared/contract.ts";
+import type { Event, EventMeta, EventType } from "@gen/shared";
 import { extractGridContext, extractMenuContext, extractTarget } from "./locators.ts";
 import { inspectElementPrivacy, sanitizeUrl, sanitizeValue } from "./privacy.ts";
 

@@ -1,4 +1,4 @@
-import type { Event, Report } from "../../shared/contract.ts";
+import type { Event, Report } from "@gen/shared";
 
 const SERVER_URL = "http://localhost:8787";
 

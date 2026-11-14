@@ -1,4 +1,4 @@
-import type { Event } from "../../shared/contract.ts";
+import type { Event } from "@gen/shared";
 import { sanitizeUrl } from "./privacy.ts";
 
 const SERVER_URL = "http://localhost:8787";

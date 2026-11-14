@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EventSchema } from "../../shared/schema.ts";
+import { EventSchema } from "@gen/shared/schema.ts";
 import { hashValue, sanitizeUrl, sanitizeValue } from "../src/privacy.ts";
 
 describe("Eyes Layer-1 privacy & schema validation", () => {
