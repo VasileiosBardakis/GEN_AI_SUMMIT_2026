@@ -18,7 +18,8 @@
     "dev:tail": "node scripts/tail-traces.mjs",
     "probe": "node --experimental-strip-types scripts/run-watcher-probe.mjs",
     "clean": "node scripts/clean.mjs",
-    "server": "pnpm --filter @gen/server start"
+    "server": "pnpm --filter @gen/server --stream start",
+    "flow:simulate": "node scripts/simulate-flow.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",

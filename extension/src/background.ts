@@ -154,9 +154,10 @@ export async function flushQueue(): Promise<void> {
   }
 }
 
-setInterval(() => {
+const flushTimer = setInterval(() => {
   void flushQueue();
 }, BATCH_INTERVAL_MS);
+(flushTimer as unknown as { unref?: () => void }).unref?.();
 
 const chromeApi = (globalThis as Record<string, unknown>).chrome as ChromeApi | undefined;
 
@@ -243,6 +244,7 @@ async function runOptimizationOnTab(
 
 if (chromeApi?.runtime?.onMessage) {
   chromeApi.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    void pollHandsBridge();
     if (msg?.kind === "EYES_EVENT" && msg.event) {
       recordEvent(msg.event);
       sendResponse({ ok: true });
@@ -335,12 +337,12 @@ if (chromeApi?.runtime?.onMessage) {
       return false;
     }
     if (msg?.kind === "HANDS_RUN_SCRIPT" && msg.script) {
-      const tabId = sender.tab?.id ?? lastActiveTab?.tabId;
-      if (tabId === undefined) {
-        sendResponse({ ok: false, error: "No active tab" });
-        return false;
-      }
-      void runActionScript(tabId, msg.script)
+      const targetScript = msg.script;
+      void resolveActiveTabId(sender.tab?.id)
+        .then((tabId) => {
+          if (tabId === undefined) throw new Error("No active tab");
+          return runActionScript(tabId, targetScript);
+        })
         .then((results) => sendResponse({ ok: true, results }))
         .catch((error: unknown) =>
           sendResponse({
@@ -350,13 +352,29 @@ if (chromeApi?.runtime?.onMessage) {
         );
       return true;
     }
+    if (msg?.kind === "HANDS_RUN_SERVER_SCRIPT") {
+      void resolveActiveTabId(sender.tab?.id)
+        .then(async (tabId) => {
+          if (tabId === undefined) throw new Error("No active tab");
+          const fetched = await fetchAndRunLatestScript(tabId);
+          if (!fetched) throw new Error("No compiled action script on server");
+          return fetched;
+        })
+        .then((data) => sendResponse({ ok: true, script: data.script, results: data.results }))
+        .catch((error: unknown) =>
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : "Hands server script failed",
+          })
+        );
+      return true;
+    }
     if (msg?.kind === "HANDS_RUN_DEMO") {
-      const tabId = sender.tab?.id ?? lastActiveTab?.tabId;
-      if (tabId === undefined) {
-        sendResponse({ ok: false, error: "No active tab" });
-        return false;
-      }
-      void runActionScript(tabId, DEMO_SCRIPT)
+      void resolveActiveTabId(sender.tab?.id)
+        .then((tabId) => {
+          if (tabId === undefined) throw new Error("No active tab");
+          return runActionScript(tabId, DEMO_SCRIPT);
+        })
         .then((results) => sendResponse({ ok: true, results }))
         .catch((error: unknown) =>
           sendResponse({ ok: false, error: error instanceof Error ? error.message : "Hands demo failed" })
@@ -470,6 +488,97 @@ if (typeof chrome !== "undefined") {
     injectHandsIntoOpenTabs();
   });
   injectHandsIntoOpenTabs();
+  void pollHandsBridge();
+}
+
+function isRunnablePageUrl(url?: string): boolean {
+  return Boolean(url && /^(https?|file):/i.test(url));
+}
+
+async function resolveActiveTabId(senderTabId?: number): Promise<number | undefined> {
+  if (senderTabId !== undefined) return senderTabId;
+  if (typeof chrome !== "undefined" && chrome.tabs?.query) {
+    const currentTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const currentMatch = currentTabs.find((t) => t.id !== undefined && isRunnablePageUrl(t.url));
+    if (currentMatch?.id !== undefined) return currentMatch.id;
+
+    const anyActive = await chrome.tabs.query({ active: true });
+    const anyMatch = anyActive.find((t) => t.id !== undefined && isRunnablePageUrl(t.url));
+    if (anyMatch?.id !== undefined) return anyMatch.id;
+  }
+  return lastActiveTab?.tabId;
+}
+
+let handsBridgeRunning = false;
+
+async function pollHandsBridge(): Promise<void> {
+  if (handsBridgeRunning) return;
+  handsBridgeRunning = true;
+  try {
+    while (true) {
+      try {
+        const resp = await fetch(`${SERVER_URL}/hands/next`);
+        if (resp.status === 200) {
+          const cmd = (await resp.json()) as { id?: string; script?: ActionScript };
+          if (cmd.id && cmd.script) {
+            let payload: { id: string; ok: boolean; results?: StepResult[]; error?: string };
+            try {
+              const tabId = await resolveActiveTabId();
+              if (tabId === undefined) throw new Error("No active web tab open");
+              const results = await runActionScript(tabId, cmd.script);
+              payload = { id: cmd.id, ok: true, results };
+            } catch (err) {
+              payload = {
+                id: cmd.id,
+                ok: false,
+                error: err instanceof Error ? err.message : "Hands execution failed",
+              };
+            }
+            await fetch(`${SERVER_URL}/hands/result`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            }).catch(() => {});
+          }
+          continue;
+        }
+      } catch {
+        // Server offline or unreachable
+      }
+      await sleep(1000);
+    }
+  } finally {
+    handsBridgeRunning = false;
+  }
+}
+
+export async function fetchLatestScript(
+  serverUrl = SERVER_URL,
+): Promise<ActionScript | null> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${serverUrl}/script/latest`);
+  } catch {
+    return null;
+  }
+  if (resp.status === 404) return null;
+  if (!resp.ok) {
+    throw new Error(`Server returned HTTP ${resp.status} for /script/latest`);
+  }
+  const data = (await resp.json()) as { ok?: boolean; script?: ActionScript; error?: string };
+  if (!data.ok || !data.script) {
+    throw new Error(data.error ?? "Invalid /script/latest payload");
+  }
+  return data.script;
+}
+
+async function fetchAndRunLatestScript(
+  tabId: number,
+): Promise<{ script: ActionScript; results: StepResult[] } | null> {
+  const script = await fetchLatestScript();
+  if (!script) return null;
+  const results = await runActionScript(tabId, script);
+  return { script, results };
 }
 
 async function runActionScript(tabId: number, script: ActionScript): Promise<StepResult[]> {
@@ -556,13 +665,15 @@ async function executeDomStep(tabId: number, step: DomStep): Promise<StepResult>
   return injection.result;
 }
 
-function substitute<T>(value: T, vars: Record<string, unknown>): T {
+export function substitute<T>(value: T, vars: Record<string, unknown>): T {
   if (typeof value === "string") return substituteString(value, vars) as T;
   if (Array.isArray(value)) return value.map((item) => substitute(item, vars)) as T;
   if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const isForEach = obj.action === "forEach";
     const result: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      result[key] = substitute(child, vars);
+    for (const [key, child] of Object.entries(obj)) {
+      result[key] = isForEach && key === "steps" ? child : substitute(child, vars);
     }
     return result as T;
   }

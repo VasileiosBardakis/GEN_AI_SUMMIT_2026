@@ -1,10 +1,10 @@
 import {
   createGeminiClient,
   type GeminiClientOptions,
-  type ZodLikeSchema,
 } from "../llm/gemini.ts";
 import {
   ACTION_SCRIPT_RESPONSE_SCHEMA,
+  ActionScriptSchema,
   parseActionScript,
   type ActionScript,
 } from "./types.ts";
@@ -40,14 +40,10 @@ Available actions:
 - wait: { action: "wait", ms } -> Short delay in ms only when explicitly needed.
 
 Locator rules (plain-text grounding without DOM snapshot):
-- "css": Prefer resilient selectors for inputs, e.g. 'input[type="email"], input[name*="email" i], input[placeholder*="email" i]' or 'textarea'.
+- "css": Prefer resilient selectors for inputs, e.g. 'input[type="search"], input[name="q"], input[placeholder*="search" i]' or 'input[type="email"], input[name*="email" i]'.
 - "xpath": Prefer for buttons, links, or labeled fields when exact text/casing on the page is uncertain, e.g. "//button[contains(normalize-space(.), 'Reply')]".
 - "text" and "aria": Only use when the exact trimmed text or exact aria-label is explicitly stated.
-- "testid": Only use when an explicit data-testid is given in the instructions.
-
-Safety rules:
-- Stop BEFORE irreversible actions (Send, Submit, Delete, Remove, Pay, Checkout, Purchase, Confirm). Fill/prepare everything, then stop so the human confirms.
-- Never read, fill, or target password or payment-card fields.`;
+- "testid": Only use when an explicit data-testid is given in the instructions.`;
 
 export function buildImplementorPrompt(solutionText: string, name?: string): string {
   const header = name?.trim() ? `Script name: ${name.trim()}\n\n` : "";
@@ -67,19 +63,6 @@ function unwrapJson(raw: unknown): unknown {
   }
 }
 
-const ActionScriptZodSchema: ZodLikeSchema<ActionScript> = {
-  safeParse(data: unknown) {
-    try {
-      return { success: true, data: parseActionScript(data) };
-    } catch (err) {
-      return {
-        success: false,
-        error: { message: err instanceof Error ? err.message : String(err) },
-      };
-    }
-  },
-};
-
 function createGeminiGenerator(geminiOpts?: GeminiClientOptions): ImplementorGenerator {
   return async ({ systemInstruction, prompt, responseSchema }) => {
     const gemini = createGeminiClient(geminiOpts);
@@ -91,7 +74,7 @@ function createGeminiGenerator(geminiOpts?: GeminiClientOptions): ImplementorGen
       "",
       prompt,
     ].join("\n");
-    return gemini.generateJson(fullPrompt, ActionScriptZodSchema);
+    return gemini.generateJson(fullPrompt, ActionScriptSchema);
   };
 }
 
