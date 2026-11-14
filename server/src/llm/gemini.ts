@@ -10,7 +10,7 @@
  *      GOOGLE_CLOUD_LOCATION=global
  *
  * Optional environment variables:
- *   GEMINI_MODEL=gemini-2.5-flash
+ *   GEMINI_MODEL=gemini-3-flash-preview
  *
  * Never log or print the API key.
  *
@@ -34,7 +34,7 @@
 
 import { GoogleGenAI } from "@google/genai";
 
-export const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+export const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
 export const DEFAULT_GCP_PROJECT = "genaihack26ath-52";
 export const DEFAULT_GCP_LOCATION = "global";
 

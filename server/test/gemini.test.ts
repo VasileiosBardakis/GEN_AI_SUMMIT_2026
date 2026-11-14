@@ -63,7 +63,7 @@ describe("createGeminiClient", () => {
   });
 
   it("exports expected Vertex AI defaults", () => {
-    expect(DEFAULT_GEMINI_MODEL).toBe("gemini-2.5-flash");
+    expect(DEFAULT_GEMINI_MODEL).toBe("gemini-3-flash-preview");
     expect(DEFAULT_GCP_PROJECT).toBe("genaihack26ath-52");
     expect(DEFAULT_GCP_LOCATION).toBe("global");
   });

@@ -20,8 +20,8 @@ async function loadFixtureEvents(filename: string): Promise<Event[]> {
 }
 
 describe("buildReport", () => {
-  it("returns findings: [] when called with no events", () => {
-    const report = buildReport("sess_empty");
+  it("returns findings: [] when called with no events", async () => {
+    const report = await buildReport("sess_empty");
     expect(ReportSchema.parse(report)).toEqual(report);
     expect(report.session).toBe("sess_empty");
     expect(report.findings).toEqual([]);
@@ -29,7 +29,7 @@ describe("buildReport", () => {
 
   it("returns 1 rung1 finding with repetitions === 3 for reply-x3.jsonl events", async () => {
     const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
-    const report = buildReport("sess_reply_x3", replyX3Events);
+    const report = await buildReport("sess_reply_x3", replyX3Events);
 
     expect(ReportSchema.parse(report)).toEqual(report);
     expect(report.session).toBe("sess_reply_x3");
@@ -60,7 +60,7 @@ describe("buildCombinedReport", () => {
       session: "sess_reply_x3_dup",
     }));
 
-    const report = buildCombinedReport([
+    const report = await buildCombinedReport([
       replyX3Events,
       navOnlyEvents,
       duplicateSessionEvents,

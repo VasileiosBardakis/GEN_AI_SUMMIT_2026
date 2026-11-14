@@ -494,7 +494,7 @@ describe("buildReport & buildCombinedReport short-values integration", () => {
         },
       ]);
 
-      const report = buildReport("sess_email_sites", events, { dataDir });
+      const report = await buildReport("sess_email_sites", events, { dataDir });
       expect(ReportSchema.parse(report)).toEqual(report);
       expect(report.findings).toHaveLength(1);
 
@@ -514,7 +514,7 @@ describe("buildReport & buildCombinedReport short-values integration", () => {
       expect(JSON.stringify(report)).not.toContain("<email>");
       expect(existsSync(path.join(dataDir, "snippets"))).toBe(false);
 
-      const combined = buildCombinedReport([events, events], { dataDir });
+      const combined = await buildCombinedReport([events, events], { dataDir });
       expect(ReportSchema.parse(combined)).toEqual(combined);
       expect(combined.findings).toHaveLength(1);
       expect(combined.findings[0]).toEqual(finding);
@@ -527,7 +527,7 @@ describe("buildReport & buildCombinedReport short-values integration", () => {
 
   it("still produces 1 finding with repetitions === 3 on existing reply-x3.jsonl fixture", async () => {
     const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
-    const report = buildReport("sess_reply_x3", replyX3Events);
+    const report = await buildReport("sess_reply_x3", replyX3Events);
 
     expect(ReportSchema.parse(report)).toEqual(report);
     expect(report.findings).toHaveLength(1);

@@ -6,6 +6,7 @@ import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import {
   buildLibraryEntryFromScript,
   implementForLibrary,
+  implementSolution,
   type ImplementContext,
 } from "./hands/implementor.ts";
 import {
@@ -19,6 +20,7 @@ import {
   type ActionScript,
   type LibraryEntry,
 } from "./hands/types.ts";
+import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
 import { buildCombinedReport, buildReport } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
 import { appendEvents, listSessions, readEvents } from "./trace.ts";
@@ -51,6 +53,7 @@ export type CreateServerOptions = {
   tracesDir: string;
   dataDir?: string;
   implement?: (solution: string, opts?: { name?: string }) => Promise<ActionScript>;
+  gemini?: GeminiClient | GeminiClientOptions;
   implementLibrary?: (
     solution: string,
     opts?: { name?: string; context?: ImplementContext },
@@ -66,6 +69,10 @@ type HandsOutcome = { ok: boolean; results?: unknown; decision?: HandsDecision; 
 export function createServer(opts: CreateServerOptions): http.Server {
   const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
   let latestScript: ActionScript | null = null;
+  const scriptsByFindingId = new Map<string, ActionScript>();
+  const implement =
+    opts.implement ??
+    ((solution: string, o?: { name?: string }) => implementSolution(solution, o));
   const compileLibraryEntry = async (
     solution: string,
     o?: { name?: string; context?: ImplementContext },
@@ -142,10 +149,19 @@ export function createServer(opts: CreateServerOptions): http.Server {
 
       if (req.method === "GET" && url.pathname === "/report") {
         const sessionParam = url.searchParams.get("session");
+        const llmParam = url.searchParams.get("llm");
+        const llm = llmParam !== "0" && llmParam !== "false";
+        const reportOpts = {
+          dataDir,
+          llm,
+          gemini: opts.gemini,
+          implement,
+          scriptStore: scriptsByFindingId,
+        };
         let report: unknown;
         if (sessionParam && sessionParam.length > 0) {
           const events = await readEvents(opts.tracesDir, sessionParam);
-          report = buildReport(sessionParam, events, { dataDir });
+          report = await buildReport(sessionParam, events, reportOpts);
         } else {
           const cutoffMs = Date.now() - RECENT_SESSION_WINDOW_MS;
           const sessions = await listSessions(opts.tracesDir);
@@ -153,7 +169,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
           const sessionEvents = await Promise.all(
             recentSessions.map((s) => readEvents(opts.tracesDir, s.session)),
           );
-          report = buildCombinedReport(sessionEvents, { dataDir });
+          report = await buildCombinedReport(sessionEvents, reportOpts);
         }
         const parsed = ReportSchema.safeParse(report);
         if (!parsed.success) {
@@ -195,6 +211,30 @@ export function createServer(opts: CreateServerOptions): http.Server {
           return;
         }
         sendJson(res, 200, { ok: true, script: latestScript });
+        return;
+      }
+
+      if (req.method === "GET" && rawPath.startsWith("/script/")) {
+        let findingId: string;
+        try {
+          findingId = decodeURIComponent(rawPath.slice("/script/".length));
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid finding id" });
+          return;
+        }
+
+        if (!isValidArtifactId(findingId)) {
+          sendJson(res, 400, { ok: false, error: "Invalid finding id" });
+          return;
+        }
+
+        const script = scriptsByFindingId.get(findingId);
+        if (!script) {
+          sendJson(res, 404, { ok: false, error: "Script not found" });
+          return;
+        }
+
+        sendJson(res, 200, { ok: true, script });
         return;
       }
 
