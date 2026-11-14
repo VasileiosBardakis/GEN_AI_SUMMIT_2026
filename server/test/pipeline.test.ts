@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -5,14 +6,15 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Event, Report, Step } from "@gen/shared";
+import type { Event, Report, Step, Workflow } from "@gen/shared";
 import { EventSchema, ReportSchema } from "@gen/shared/schema.ts";
 import { createServer } from "../src/app.ts";
 import { normalize } from "../src/detect/normalize.ts";
 import type { ActionScript } from "../src/hands/types.ts";
 import type { LibraryEntry } from "../src/library.ts";
-import type { GeminiSdk } from "../src/llm/gemini.ts";
+import type { GeminiClient, GeminiSdk } from "../src/llm/gemini.ts";
 import {
+  buildSolutionText,
   DEFAULT_PIPELINE_CONFIG,
   describeCandidate,
   filterNoisySteps,
@@ -277,8 +279,189 @@ describe("pipeline unit & config tests", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].verdict).toBe("rung2");
     expect(implement).toHaveBeenCalledTimes(1);
-    expect(capturedSolution).toContain("{erp_order_id}");
+    expect(capturedSolution).toContain('fill testid="erp-order-id" with "ORD-1"');
     expect(capturedSolution).toContain('testid="lookup-btn"');
+  });
+
+  it("buildSolutionText prefers css/testid over aria, formats cross-host switchTab and {{param}} bindings, and substitutes single-host param examples", () => {
+    const crossHostWf: Workflow = {
+      id: "wf_cross",
+      name: "portal.local -> erp.local (3 steps)",
+      sourceApp: "portal.local",
+      destApp: "erp.local",
+      steps: [
+        {
+          action: "copy",
+          target: [
+            { kind: "aria", value: 'textbox[name="Company name"]' },
+            { kind: "css", value: "#portal-company" },
+          ],
+          value: { param: "company_name" },
+        },
+        {
+          action: "paste",
+          target: [
+            { kind: "aria", value: 'textbox[name="Vendor"]' },
+            { kind: "testid", value: "erp-vendor" },
+            { kind: "css", value: 'input[name="vendor"]' },
+          ],
+          value: { param: "company_name" },
+        },
+        {
+          action: "click",
+          target: [
+            { kind: "aria", value: 'button[name="Save"]' },
+            { kind: "text", value: "Save" },
+          ],
+        },
+      ],
+      params: [{ name: "company_name", example: "Acme Corp" }],
+      instances: [],
+    };
+
+    const crossSolution = buildSolutionText("rung2", crossHostWf);
+    expect(crossSolution).toContain(
+      "Read values on portal.local, switch to erp.local, and fill on erp.local:",
+    );
+    expect(crossSolution).toContain(
+      '1. readText from css="#portal-company" into "{{company_name}}"',
+    );
+    expect(crossSolution).toContain('2. switchTab host="erp.local"');
+    expect(crossSolution).toContain(
+      '3. fill testid="erp-vendor" with "{{company_name}}"',
+    );
+    expect(crossSolution).toContain('4. click text="Save"');
+    expect(crossSolution).not.toContain("aria=");
+
+    const singleHostWf: Workflow = {
+      id: "wf_single",
+      name: "erp.local workflow (2 steps)",
+      sourceApp: "erp.local",
+      destApp: "erp.local",
+      steps: [
+        {
+          action: "fill",
+          target: [
+            { kind: "aria", value: 'textbox[name="Company"]' },
+            { kind: "css", value: "#company-input" },
+          ],
+          value: { param: "company" },
+        },
+        {
+          action: "fill",
+          target: [{ kind: "testid", value: "fallback-field" }],
+          value: { param: "no_example" },
+        },
+      ],
+      params: [{ name: "company", example: "Globex" }],
+      instances: [],
+    };
+
+    const singleSolution = buildSolutionText("rung2", singleHostWf);
+    expect(singleSolution).toContain(
+      'Execute the workflow "erp.local workflow (2 steps)" on erp.local:',
+    );
+    expect(singleSolution).toContain(
+      '1. fill css="#company-input" with "Globex"',
+    );
+    expect(singleSolution).not.toContain("{company}");
+    expect(singleSolution).toContain(
+      '2. fill testid="fallback-field" with {no_example}',
+    );
+  });
+
+  it("runPipeline times out a hanging implement mock via implementTimeoutMs without failing the report", async () => {
+    const events = await loadFixtureEvents("routine-20-noisy.jsonl");
+    const steps = normalize(events);
+    const scriptStore = new Map<string, ActionScript>();
+    const hangingImplement = vi.fn(
+      () => new Promise<ActionScript>(() => {}),
+    );
+
+    const findings = await runPipeline(steps, {
+      llm: true,
+      events,
+      implement: hangingImplement,
+      scriptStore,
+      config: { implementTimeoutMs: 25 },
+    });
+
+    expect(hangingImplement).toHaveBeenCalledTimes(1);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].verdict).toBe("rung2");
+    expect(findings[0].artifact).toBeUndefined();
+    expect(scriptStore.size).toBe(0);
+  });
+
+  it("runPipeline forwards opts.gemini (GeminiClient) to default implementSolution and writes snippets/<id>.txt alongside scriptStore when llm=true and dataDir is set", async () => {
+    const replyEvents = await loadFixtureEvents("reply-x3.jsonl");
+    const steps = normalize(replyEvents);
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "gen-pipeline-snip-llm-"));
+
+    try {
+      const generateJson = vi.fn(async (prompt: string) => {
+        if (prompt.includes("ActionScript")) {
+          return {
+            name: "Compiled Reply Script",
+            steps: [
+              {
+                action: "insertText",
+                value:
+                  "Hi, thanks for your order. It ships Friday and tracking will follow shortly.",
+              },
+            ],
+          };
+        }
+        return {
+          level: "rung1",
+          risky: false,
+          confidence: 0.95,
+          name: "Reply snippet",
+        };
+      }) as GeminiClient["generateJson"];
+
+      const geminiClient: GeminiClient = {
+        generateText: vi.fn(async () => "ok"),
+        generateJson,
+      };
+      const scriptStore = new Map<string, ActionScript>();
+
+      const findings = await runPipeline(steps, {
+        llm: true,
+        events: replyEvents,
+        gemini: geminiClient,
+        dataDir: tempDir,
+        scriptStore,
+      });
+
+      expect(findings).toHaveLength(1);
+      const [finding] = findings;
+      expect(finding.verdict).toBe("rung1");
+      expect(finding.artifact).toEqual({
+        kind: "text",
+        path: `/script/${finding.id}`,
+        verified: false,
+      });
+      expect(scriptStore.get(finding.id)).toEqual({
+        name: finding.title,
+        steps: [
+          {
+            action: "insertText",
+            value:
+              "Hi, thanks for your order. It ships Friday and tracking will follow shortly.",
+          },
+        ],
+      });
+
+      const snippetFile = path.join(tempDir, "snippets", `${finding.id}.txt`);
+      expect(existsSync(snippetFile)).toBe(true);
+      expect(await readFile(snippetFile, "utf8")).toBe(
+        "Hi, thanks for your order. It ships Friday and tracking will follow shortly.",
+      );
+      expect(generateJson).toHaveBeenCalled();
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("reply-x3 with a fake model that returns risky=true -> still a snippet (rung1)", async () => {

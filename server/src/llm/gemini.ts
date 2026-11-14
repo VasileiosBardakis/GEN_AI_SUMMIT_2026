@@ -101,47 +101,63 @@ export function createGeminiClient(options?: GeminiClientOptions): GeminiClient 
 
   return {
     async generateText(prompt: string): Promise<string> {
-      const response = await sdk.models.generateContent({
-        model,
-        contents: prompt,
-      });
-      if (!response.text || response.text.trim().length === 0) {
-        throw new Error("Gemini returned an empty text response.");
+      const startedAt = Date.now();
+      try {
+        const response = await sdk.models.generateContent({
+          model,
+          contents: prompt,
+        });
+        if (!response.text || response.text.trim().length === 0) {
+          throw new Error("Gemini returned an empty text response.");
+        }
+        console.log(`[gemini] model=${model} kind=text ms=${Date.now() - startedAt} ok`);
+        return response.text;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`[gemini] model=${model} kind=text ms=${Date.now() - startedAt} error=${msg}`);
+        throw err;
       }
-      return response.text;
     },
 
     async generateJson<T>(prompt: string, schema: ZodLikeSchema<T>): Promise<T> {
-      const response = await sdk.models.generateContent({
-        model,
-        contents: prompt,
-        config: { responseMimeType: "application/json" },
-      });
-      if (!response.text || response.text.trim().length === 0) {
-        throw new Error("Gemini returned an empty JSON response.");
-      }
-
-      const rawJson = stripJsonCodeFences(response.text);
-      let parsed: unknown;
+      const startedAt = Date.now();
       try {
-        parsed = JSON.parse(rawJson);
+        const response = await sdk.models.generateContent({
+          model,
+          contents: prompt,
+          config: { responseMimeType: "application/json" },
+        });
+        if (!response.text || response.text.trim().length === 0) {
+          throw new Error("Gemini returned an empty JSON response.");
+        }
+
+        const rawJson = stripJsonCodeFences(response.text);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(rawJson);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          throw new Error(`Gemini returned malformed JSON: ${message}`);
+        }
+
+        const result = schema.safeParse(parsed);
+        if (!result.success) {
+          const details =
+            result.error.issues && result.error.issues.length > 0
+              ? result.error.issues
+                  .map((issue) => `${issue.path.map(String).join(".") || "<root>"}: ${issue.message}`)
+                  .join("; ")
+              : (result.error.message ?? "Schema validation failed");
+          throw new Error(`Gemini JSON response failed schema validation: ${details}`);
+        }
+
+        console.log(`[gemini] model=${model} kind=json ms=${Date.now() - startedAt} ok`);
+        return result.data;
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`Gemini returned malformed JSON: ${message}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`[gemini] model=${model} kind=json ms=${Date.now() - startedAt} error=${msg}`);
+        throw err;
       }
-
-      const result = schema.safeParse(parsed);
-      if (!result.success) {
-        const details =
-          result.error.issues && result.error.issues.length > 0
-            ? result.error.issues
-                .map((issue) => `${issue.path.map(String).join(".") || "<root>"}: ${issue.message}`)
-                .join("; ")
-            : (result.error.message ?? "Schema validation failed");
-        throw new Error(`Gemini JSON response failed schema validation: ${details}`);
-      }
-
-      return result.data;
     },
   };
 }

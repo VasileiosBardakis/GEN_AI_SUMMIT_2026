@@ -24,14 +24,17 @@ async function loadFixtureEvents(filename: string): Promise<Event[]> {
 function makeFakeGemini(verdict: "rung1" | "rung2" = "rung1"): GeminiSdk {
   return {
     models: {
-      generateContent: vi.fn(async () => ({
-        text: JSON.stringify({
-          verdict,
-          confidence: 0.9,
-          name: "Reply snippet",
-          risky: false,
-        }),
-      })),
+      generateContent: vi.fn(async (params: { contents: string }) => {
+        const isCrossTab = params.contents.includes("portal.local");
+        return {
+          text: JSON.stringify({
+            verdict: isCrossTab ? "rung2" : verdict,
+            confidence: 0.9,
+            ...(isCrossTab ? {} : { name: "Reply snippet" }),
+            risky: false,
+          }),
+        };
+      }),
     },
   };
 }
@@ -221,6 +224,41 @@ describe("auto-propose HTTP integration (POST /events -> /hands/next -> /hands/r
     const nextRes = await fetch(`${baseUrl}/hands/next?waitMs=80`);
     expect(nextRes.status).toBe(204);
     expect(fakeImplement).not.toHaveBeenCalled();
+  });
+
+  it("queues a decide command when crosstab-x3-split is posted across 3 live session IDs", async () => {
+    const splitEvents = await loadFixtureEvents("crosstab-x3-split.jsonl");
+    const sessionIds = new Set(splitEvents.map((e) => e.session));
+    expect(sessionIds.size).toBe(3);
+
+    const postRes = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(splitEvents),
+    });
+    expect(postRes.status).toBe(200);
+
+    const nextDecide = await fetch(`${baseUrl}/hands/next?waitMs=2000`);
+    expect(nextDecide.status).toBe(200);
+    const decideCmd = (await nextDecide.json()) as {
+      ok: boolean;
+      id: string;
+      kind: string;
+      name: string;
+      solution: string;
+      script: ActionScript;
+    };
+    expect(decideCmd.ok).toBe(true);
+    expect(decideCmd.kind).toBe("decide");
+    expect(decideCmd.name).toContain("Copy 4 fields from portal.local to erp.local");
+    expect(fakeImplement).toHaveBeenCalled();
+
+    const dismissRes = await fetch(`${baseUrl}/hands/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: decideCmd.id, ok: true, decision: "dismissed" }),
+    });
+    expect(dismissRes.status).toBe(200);
   });
 });
 

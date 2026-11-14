@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
+import type { Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import {
@@ -52,6 +53,19 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+function hasAllCachedScripts(
+  report: Report,
+  scriptsByFindingId: ReadonlyMap<string, ActionScript>,
+): boolean {
+  return report.findings.every((f) => {
+    if (f.artifact?.path.startsWith("/script/")) {
+      const id = f.artifact.path.slice("/script/".length);
+      return scriptsByFindingId.has(id);
+    }
+    return true;
+  });
+}
+
 export type CreateServerOptions = {
   tracesDir: string;
   dataDir?: string;
@@ -73,6 +87,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
   let latestScript: ActionScript | null = null;
   const scriptsByFindingId = new Map<string, ActionScript>();
+  const reportCache = new Map<string, Report>();
+  const liveSessions = new Set<string>();
   const implement =
     opts.implement ??
     ((solution: string, o?: { name?: string }) => implementSolution(solution, o));
@@ -194,14 +210,25 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const proposer = autoPropose
     ? createProposer({
         runReport: async (sessionId) => {
-          const events = await readEvents(opts.tracesDir, sessionId);
-          const report = await buildReport(sessionId, events, {
+          const reportOpts = {
             dataDir,
             llm: true,
             gemini: opts.gemini,
             implement,
             scriptStore: scriptsByFindingId,
-          });
+          };
+          const targetSessions =
+            liveSessions.size > 0 ? [...liveSessions] : [sessionId];
+          if (targetSessions.length <= 1) {
+            const targetSession = targetSessions[0] ?? sessionId;
+            const events = await readEvents(opts.tracesDir, targetSession);
+            const report = await buildReport(targetSession, events, reportOpts);
+            return { findings: report.findings, scripts: scriptsByFindingId };
+          }
+          const allEvents = await Promise.all(
+            targetSessions.map((s) => readEvents(opts.tracesDir, s)),
+          );
+          const report = await buildCombinedReport(allEvents, reportOpts);
           return { findings: report.findings, scripts: scriptsByFindingId };
         },
         requestDecision: (name, solution, script) =>
@@ -269,8 +296,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
           scriptStore: scriptsByFindingId,
         };
         let report: unknown;
+        let cacheSig: string;
         if (sessionParam && sessionParam.length > 0) {
           const events = await readEvents(opts.tracesDir, sessionParam);
+          cacheSig = `${sessionParam}|${llm ? 1 : 0}|${sessionParam}:${events.length}:${events.at(-1)?.ts ?? 0}`;
+          const cached = reportCache.get(cacheSig);
+          if (cached && hasAllCachedScripts(cached, scriptsByFindingId)) {
+            sendJson(res, 200, cached);
+            return;
+          }
           report = await buildReport(sessionParam, events, reportOpts);
         } else {
           const cutoffMs = Date.now() - RECENT_SESSION_WINDOW_MS;
@@ -279,6 +313,18 @@ export function createServer(opts: CreateServerOptions): http.Server {
           const sessionEvents = await Promise.all(
             recentSessions.map((s) => readEvents(opts.tracesDir, s.session)),
           );
+          const perSessionSig = recentSessions
+            .map((s, idx) => {
+              const evs = sessionEvents[idx] ?? [];
+              return `${s.session}:${evs.length}:${evs.at(-1)?.ts ?? 0}`;
+            })
+            .join(",");
+          cacheSig = `all|${llm ? 1 : 0}|${perSessionSig}`;
+          const cached = reportCache.get(cacheSig);
+          if (cached && hasAllCachedScripts(cached, scriptsByFindingId)) {
+            sendJson(res, 200, cached);
+            return;
+          }
           report = await buildCombinedReport(sessionEvents, reportOpts);
         }
         const parsed = ReportSchema.safeParse(report);
@@ -286,6 +332,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
           sendJson(res, 500, { ok: false, error: parsed.error.message });
           return;
         }
+        reportCache.set(cacheSig, parsed.data);
         sendJson(res, 200, parsed.data);
         return;
       }
@@ -335,8 +382,11 @@ export function createServer(opts: CreateServerOptions): http.Server {
           }
         }
         sendJson(res, 200, { ok: true, n: events.length, scrubbed });
+        const sessionIds = new Set(events.map((e) => e.session));
+        for (const sessionId of sessionIds) {
+          liveSessions.add(sessionId);
+        }
         if (proposer) {
-          const sessionIds = new Set(events.map((e) => e.session));
           for (const sessionId of sessionIds) {
             proposer.onEvents(sessionId);
           }
@@ -432,6 +482,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         });
         const { entry } = await upsertLibraryEntry(dataDir, built);
         latestScript = entry.script;
+        reportCache.clear();
         const suppressMs =
           typeof body.suppressRecallMs === "number" && Number.isFinite(body.suppressRecallMs)
             ? Math.max(0, body.suppressRecallMs)
@@ -479,6 +530,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const compiled = await compileLibraryEntry(body.solution, { name, context });
         const { entry } = await upsertLibraryEntry(dataDir, compiled);
         latestScript = entry.script;
+        reportCache.clear();
 
         if (url.pathname === "/library/implement") {
           sendJson(res, 200, { ok: true, entry });
@@ -522,6 +574,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         }
 
         const saved = await upsertLibraryEntry(dataDir, parsedEntry.data);
+        reportCache.clear();
         sendJson(res, 200, { ok: true, entry: saved.entry, items: saved.items });
         return;
       }
@@ -543,6 +596,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
           sendJson(res, 404, { ok: false, error: "Library entry not found" });
           return;
         }
+        reportCache.clear();
         sendJson(res, 200, { ok: true, items: removed.items });
         return;
       }

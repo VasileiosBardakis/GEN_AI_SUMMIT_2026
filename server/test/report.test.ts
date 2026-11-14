@@ -4,10 +4,12 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Event, Report } from "@gen/shared";
 import { EventSchema, ReportSchema } from "@gen/shared/schema.ts";
 import { createServer } from "../src/app.ts";
+import type { ActionScript } from "../src/hands/types.ts";
+import type { GeminiSdk } from "../src/llm/gemini.ts";
 import { buildCombinedReport, buildReport } from "../src/report.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -97,7 +99,9 @@ describe("buildCombinedReport", () => {
     expect(report.session).toBe("all");
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0].verdict).toBe("rung2");
-    expect(report.findings[0].title).toContain("portal.local -> erp.local");
+    expect(report.findings[0].title).toContain(
+      "Copy 4 fields from portal.local to erp.local",
+    );
     expect(report.findings[0].stats.repetitions).toBe(3);
   });
 
@@ -387,7 +391,7 @@ describe("GET /report HTTP integration", () => {
     expect(combinedReport.findings).toHaveLength(1);
     expect(combinedReport.findings[0].verdict).toBe("rung2");
     expect(combinedReport.findings[0].title).toContain(
-      "portal.local -> erp.local",
+      "Copy 4 fields from portal.local to erp.local",
     );
 
     const portalOnlyRes = await fetch(
@@ -399,8 +403,78 @@ describe("GET /report HTTP integration", () => {
     expect(portalOnlyReport.session).toBe("sess_portal_tab");
     expect(
       portalOnlyReport.findings.some((f) =>
-        f.title.includes("portal.local -> erp.local"),
+        f.title.includes("Copy 4 fields from portal.local to erp.local"),
       ),
     ).toBe(false);
+  });
+
+  it("caches GET /report when no new events arrive and calls implement/gemini only once", async () => {
+    const cacheRoot = await mkdtemp(path.join(os.tmpdir(), "gen-report-cache-"));
+    const generateContent = vi.fn<GeminiSdk["models"]["generateContent"]>(
+      async () => ({
+        text: JSON.stringify({
+          level: "rung1",
+          risky: false,
+          confidence: 0.9,
+          name: "Cached reply",
+        }),
+      }),
+    );
+    const implement = vi.fn(
+      async (_solution: string, opts?: { name?: string }): Promise<ActionScript> => ({
+        name: opts?.name ?? "Cached script",
+        steps: [{ action: "insertText", value: "cached" }],
+      }),
+    );
+    const cachedServer = createServer({
+      tracesDir: path.join(cacheRoot, "traces"),
+      dataDir: path.join(cacheRoot, "data"),
+      gemini: { sdk: { models: { generateContent } } },
+      implement,
+      autoPropose: false,
+    });
+    await new Promise<void>((resolve) => {
+      cachedServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const cachedPort = (cachedServer.address() as AddressInfo).port;
+    const cachedUrl = `http://127.0.0.1:${cachedPort}`;
+
+    try {
+      const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+      await fetch(`${cachedUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(replyX3Events),
+      });
+
+      const res1 = await fetch(`${cachedUrl}/report?session=sess_reply_x3`);
+      expect(res1.status).toBe(200);
+      const report1 = (await res1.json()) as Report;
+      expect(report1.findings).toHaveLength(1);
+      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(implement).toHaveBeenCalledTimes(1);
+
+      const res2 = await fetch(`${cachedUrl}/report?session=sess_reply_x3`);
+      expect(res2.status).toBe(200);
+      const report2 = (await res2.json()) as Report;
+      expect(report2).toEqual(report1);
+      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(implement).toHaveBeenCalledTimes(1);
+
+      const allRes1 = await fetch(`${cachedUrl}/report`);
+      expect(allRes1.status).toBe(200);
+      expect(generateContent).toHaveBeenCalledTimes(2);
+      expect(implement).toHaveBeenCalledTimes(2);
+
+      const allRes2 = await fetch(`${cachedUrl}/report`);
+      expect(allRes2.status).toBe(200);
+      expect(generateContent).toHaveBeenCalledTimes(2);
+      expect(implement).toHaveBeenCalledTimes(2);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        cachedServer.close((err) => (err ? reject(err) : resolve()));
+      });
+      await rm(cacheRoot, { recursive: true, force: true });
+    }
   });
 });
