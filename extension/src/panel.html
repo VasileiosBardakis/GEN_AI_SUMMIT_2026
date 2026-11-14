@@ -2,44 +2,139 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Automation Ladder — Eyes</title>
+  <title>Eyes</title>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 12px; background: #0f172a; color: #f8fafc; font-size: 13px; }
-    h1 { font-size: 15px; margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; }
-    .badge { background: #0ea5e9; color: #082f49; font-weight: 700; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
-    .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
-    .stat-box { background: #1e293b; padding: 8px; border-radius: 6px; border: 1px solid #334155; }
-    .stat-val { font-size: 16px; font-weight: 700; color: #38bdf8; }
-    .stat-lbl { font-size: 11px; color: #94a3b8; }
-    .section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin: 12px 0 6px; }
+    :root {
+      --shell: #f1ede4;
+      --canvas: #faf8f4;
+      --surface-node: #fcfbf8;
+      --surface-graph: #f3efe7;
+      --ink: #1a1917;
+      --ink-2: #57524b;
+      --ink-muted: #7b756d;
+      --brown: #8a5a2b;
+      --line: #e2dcd0;
+      --line-strong: #d0c8b9;
+      --danger: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      margin: 0;
+      background: var(--canvas);
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.42;
+      -webkit-font-smoothing: antialiased;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 11px 14px;
+      background: var(--shell);
+      border-bottom: 1px solid var(--line);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+    }
+    .badge {
+      padding: 2px 7px;
+      border: 1px solid var(--line-strong);
+      border-radius: 5px;
+      background: var(--surface-node);
+      color: var(--ink-2);
+      font-weight: 500;
+      font-size: 10.5px;
+    }
+    main { padding: 14px; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .stat-box {
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface-node);
+    }
+    .stat-val {
+      font-size: 15px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: var(--ink);
+    }
+    .stat-lbl { font-size: 11px; color: var(--ink-muted); }
+    .section-title {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--ink-muted);
+      margin: 14px 0 7px;
+    }
     .event-list, .finding-list { display: flex; flex-direction: column; gap: 6px; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 6px; padding: 8px; }
-    .evt-row { font-family: ui-monospace, monospace; font-size: 11px; background: #1e293b; padding: 6px; border-radius: 4px; border-left: 3px solid #38bdf8; word-break: break-all; }
-    .evt-row.redacted { border-left-color: #f43f5e; }
-    .evt-row.auth { border-left-color: #f59e0b; }
+    .card {
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--surface-node);
+      color: var(--ink-2);
+      font-size: 12.5px;
+    }
+    .card strong { color: var(--ink); font-weight: 600; display: block; margin-bottom: 2px; }
+    .evt-row {
+      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+      font-size: 11px;
+      background: var(--surface-graph);
+      border: 1px solid var(--line);
+      color: var(--ink-2);
+      padding: 6px 8px;
+      border-radius: 6px;
+      border-left: 3px solid var(--line-strong);
+      word-break: break-all;
+    }
+    .evt-row strong { color: var(--ink); font-weight: 500; }
+    .evt-row.redacted { border-left-color: var(--danger); }
+    .evt-row.auth { border-left-color: var(--brown); }
   </style>
 </head>
 <body>
-  <h1>
-    <span>Automation Ladder · Eyes</span>
-    <span class="badge">LOCAL ONLY</span>
-  </h1>
-  <div class="stats">
-    <div class="stat-box">
-      <div class="stat-val" id="stat-events">0</div>
-      <div class="stat-lbl">Captured Events</div>
+  <header>
+    <div class="brand">
+      <svg viewBox="0 0 20 20" width="16" height="16" fill="none" aria-hidden="true">
+        <path d="M2 10c2.2-3.6 5-5.4 8-5.4s5.8 1.8 8 5.4c-2.2 3.6-5 5.4-8 5.4S4.2 13.6 2 10Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        <circle cx="10" cy="10" r="2.3" fill="currentColor"/>
+      </svg>
+      <span>Eyes</span>
     </div>
-    <div class="stat-box">
-      <div class="stat-val" id="stat-bytes">0 KB</div>
-      <div class="stat-lbl">Trace Volume</div>
+    <span class="badge">Local only</span>
+  </header>
+  <main>
+    <div class="stats">
+      <div class="stat-box">
+        <div class="stat-val" id="stat-events">0</div>
+        <div class="stat-lbl">Captured Events</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" id="stat-bytes">0 KB</div>
+        <div class="stat-lbl">Trace Volume</div>
+      </div>
     </div>
-  </div>
-  <div class="section-title">Findings (from /report)</div>
-  <div class="finding-list" id="findings">
-    <div class="card">Watching workflow...</div>
-  </div>
-  <div class="section-title">Live Event Stream</div>
-  <div class="event-list" id="events"></div>
+    <div class="section-title">Findings</div>
+    <div class="finding-list" id="findings">
+      <div class="card">Watching workflow...</div>
+    </div>
+    <div class="section-title">Live Event Stream</div>
+    <div class="event-list" id="events"></div>
+  </main>
   <script src="panel.js"></script>
 </body>
 </html>
