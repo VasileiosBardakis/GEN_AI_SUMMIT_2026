@@ -3,9 +3,11 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { config as loadEnv } from "dotenv";
 import { startDemoServer } from "./lib/static-server.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+loadEnv({ path: path.join(rootDir, ".env"), quiet: true });
 const extensionDir = path.join(rootDir, "extension");
 const demoDir = path.join(rootDir, "apps", "demo");
 

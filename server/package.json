@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@gen/shared": "workspace:*",
-    "@google/genai": "^3.3.0"
+    "@google/genai": "^3.3.0",
+    "dotenv": "^18.0.10"
   }
 }
