@@ -29,7 +29,6 @@ export async function buildReport(
     dataDir: options.dataDir,
     scriptStore: options.scriptStore,
   });
-
   return ReportSchema.parse({
     generatedAt: Date.now(),
     session,

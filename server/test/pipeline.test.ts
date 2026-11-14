@@ -275,7 +275,7 @@ describe("pipeline unit & config tests", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].verdict).toBe("rung2");
     expect(implement).toHaveBeenCalledTimes(1);
-    expect(capturedSolution).toContain("{order_id}");
+    expect(capturedSolution).toContain("{erp_order_id}");
     expect(capturedSolution).toContain('testid="lookup-btn"');
   });
 });

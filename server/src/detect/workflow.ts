@@ -399,8 +399,7 @@ function alignMemberToTemplate(
 
 function deriveCleanParamName(step: Step, fallbackIdx: number): string {
   const raw = step.target?.[0]?.value ?? "";
-  const stripped = raw.replace(/^(?:portal|erp)[-_]+/i, "");
-  const snake = stripped
+  const snake = raw
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
@@ -420,27 +419,10 @@ function computeStability(members: EnrichedStep[][]): number {
 
   let identicalCount = 0;
   for (const key of allKeys) {
-    let appearsInAll = true;
-    const literalValues = new Set<string>();
-
-    for (const member of members) {
-      const matching = member.filter(({ step }) => exactStepKey(step) === key);
-      if (matching.length === 0) {
-        appearsInAll = false;
-        break;
-      }
-      for (const { step } of matching) {
-        const valRepr =
-          step.value === undefined
-            ? "__UNDEFINED__"
-            : typeof step.value === "string"
-              ? `str:${step.value}`
-              : `param:${step.value.param}`;
-        literalValues.add(valRepr);
-      }
-    }
-
-    if (appearsInAll && literalValues.size === 1) {
+    const appearsInAll = members.every((member) =>
+      member.some(({ step }) => exactStepKey(step) === key),
+    );
+    if (appearsInAll) {
       identicalCount += 1;
     }
   }
