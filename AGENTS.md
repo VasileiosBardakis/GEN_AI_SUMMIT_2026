@@ -9,7 +9,7 @@
 - `traces/` — Captured workflow event trace fixtures.
 
 ## Gates
-- Run `npm run check` (lint + typecheck + vitest + playwright smoke) before finishing; it must pass.
+- Package manager: pnpm. Run `pnpm install` once, then `pnpm run check` (lint + typecheck + vitest + playwright smoke) before finishing; it must pass.
 
 ## Rules
 - Work on branch `agent/GEN-NN-short-name` (or your assigned branch); never push to `main`.

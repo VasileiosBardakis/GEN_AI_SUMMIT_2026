@@ -9,6 +9,7 @@ dist/
 build/
 *.tsbuildinfo
 coverage/
+package-lock.json
 
 # Playwright
 test-results/
@@ -18,4 +19,3 @@ blob-report/
 # Editors and OS
 .DS_Store
 *.swp
-pnpm-lock.yaml

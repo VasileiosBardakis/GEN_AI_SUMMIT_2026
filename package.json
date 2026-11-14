@@ -2,18 +2,13 @@
   "name": "gen-ai-summit-2026",
   "private": true,
   "type": "module",
-  "workspaces": [
-    "shared",
-    "server",
-    "extension",
-    "apps"
-  ],
+  "packageManager": "pnpm@10.12.1",
   "scripts": {
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "smoke": "playwright test --pass-with-no-tests",
-    "check": "npm run lint && npm run typecheck && npm run test && npm run smoke"
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run smoke"
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",
