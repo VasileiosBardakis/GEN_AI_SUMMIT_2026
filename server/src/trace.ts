@@ -1,6 +1,8 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Event } from "@gen/shared";
+
+export type SessionFileInfo = { session: string; mtimeMs: number };
 
 function sanitizeSession(session: string): string {
   const sanitized = session.replace(/[^A-Za-z0-9_-]/g, "");
@@ -44,4 +46,30 @@ export async function readEvents(dir: string, session: string): Promise<Event[]>
     }
     throw err;
   }
+}
+
+export async function listSessions(dir: string): Promise<SessionFileInfo[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw err;
+  }
+
+  const sessions: SessionFileInfo[] = [];
+  for (const filename of entries) {
+    if (!filename.endsWith(".jsonl") || filename.length <= 6) {
+      continue;
+    }
+    const st = await stat(path.join(dir, filename));
+    sessions.push({
+      session: filename.slice(0, -6),
+      mtimeMs: st.mtimeMs,
+    });
+  }
+
+  return sessions.sort((a, b) => a.session.localeCompare(b.session));
 }
