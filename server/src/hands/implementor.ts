@@ -1,10 +1,10 @@
 import {
   createGeminiClient,
   type GeminiClientOptions,
-  type ZodLikeSchema,
 } from "../llm/gemini.ts";
 import {
   ACTION_SCRIPT_RESPONSE_SCHEMA,
+  ActionScriptSchema,
   parseActionScript,
   type ActionScript,
 } from "./types.ts";
@@ -63,19 +63,6 @@ function unwrapJson(raw: unknown): unknown {
   }
 }
 
-const ActionScriptZodSchema: ZodLikeSchema<ActionScript> = {
-  safeParse(data: unknown) {
-    try {
-      return { success: true, data: parseActionScript(data) };
-    } catch (err) {
-      return {
-        success: false,
-        error: { message: err instanceof Error ? err.message : String(err) },
-      };
-    }
-  },
-};
-
 function createGeminiGenerator(geminiOpts?: GeminiClientOptions): ImplementorGenerator {
   return async ({ systemInstruction, prompt, responseSchema }) => {
     const gemini = createGeminiClient(geminiOpts);
@@ -87,7 +74,7 @@ function createGeminiGenerator(geminiOpts?: GeminiClientOptions): ImplementorGen
       "",
       prompt,
     ].join("\n");
-    return gemini.generateJson(fullPrompt, ActionScriptZodSchema);
+    return gemini.generateJson(fullPrompt, ActionScriptSchema);
   };
 }
 

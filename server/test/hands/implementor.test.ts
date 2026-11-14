@@ -64,16 +64,16 @@ describe("Stage 1: parseActionScript & ACTION_SCRIPT_RESPONSE_SCHEMA", () => {
     });
   });
 
-  it("rejects malformed LLM outputs", () => {
-    expect(() => parseActionScript({ steps: [] })).toThrow(/non-empty/);
+  it("rejects malformed LLM outputs via Zod", () => {
+    expect(() => parseActionScript({ steps: [] })).toThrow(/steps/i);
     expect(() => parseActionScript({ steps: [{ action: "type", value: "hi" }] })).toThrow(
-      /unsupported/,
+      /action/i,
     );
     expect(() =>
       parseActionScript({ steps: [{ action: "fill", value: "missing target" }] }),
-    ).toThrow(/target/);
+    ).toThrow(/target/i);
     expect(() => parseActionScript({ steps: [{ action: "navigate", url: "/relative" }] })).toThrow(
-      /http\(s\)/,
+      /http\(s\)/i,
     );
     expect(ACTION_SCRIPT_RESPONSE_SCHEMA.required).toContain("steps");
   });
