@@ -1,4 +1,5 @@
 import type { Finding } from "@gen/shared";
+import type { EyesDetectionSpec } from "@gen/shared/schema.ts";
 import type { ActionScript } from "./types.ts";
 import type { FlowNode, Suggestion } from "./suggestion.ts";
 
@@ -21,7 +22,9 @@ export interface OptimizationItem {
   createdAt: number;
   lastRunAt?: number;
   snippetText?: string;
+  solution?: string;
   script?: ActionScript;
+  eyes?: EyesDetectionSpec;
   flows?: {
     user: FlowNode[];
     proposed: FlowNode[];
@@ -295,7 +298,9 @@ export function upsertOptimizationItem(
     createdAt: existing.createdAt,
     detectedCount: Math.max(existing.detectedCount ?? 0, incoming.detectedCount ?? 0) || undefined,
     snippetText: incoming.snippetText ?? existing.snippetText,
+    solution: incoming.solution ?? existing.solution,
     script: incoming.script ?? existing.script,
+    eyes: incoming.eyes ?? existing.eyes,
     flows: incoming.flows ?? existing.flows,
   };
 
