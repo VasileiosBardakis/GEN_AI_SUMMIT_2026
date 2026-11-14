@@ -1,5 +1,7 @@
 import http from "node:http";
+import path from "node:path";
 import { ReportSchema } from "@gen/shared/schema.ts";
+import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import { buildCombinedReport, buildReport } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
 import { appendEvents, listSessions, readEvents } from "./trace.ts";
@@ -28,7 +30,9 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
-export function createServer(opts: { tracesDir: string }): http.Server {
+export function createServer(opts: { tracesDir: string; dataDir?: string }): http.Server {
+  const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
+
   return http.createServer(async (req, res) => {
     setCorsHeaders(res);
 
@@ -38,9 +42,34 @@ export function createServer(opts: { tracesDir: string }): http.Server {
       return;
     }
 
+    const rawPath = (req.url ?? "/").split("?")[0];
     const url = new URL(req.url ?? "/", "http://localhost");
 
     try {
+      if (req.method === "GET" && rawPath.startsWith("/artifact/")) {
+        let id: string;
+        try {
+          id = decodeURIComponent(rawPath.slice("/artifact/".length));
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid artifact id" });
+          return;
+        }
+
+        if (!isValidArtifactId(id)) {
+          sendJson(res, 400, { ok: false, error: "Invalid artifact id" });
+          return;
+        }
+
+        const artifact = await readSnippetArtifact(dataDir, id);
+        if (!artifact) {
+          sendJson(res, 404, { ok: false, error: "Artifact not found" });
+          return;
+        }
+
+        sendJson(res, 200, artifact);
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/health") {
         sendJson(res, 200, { ok: true });
         return;
@@ -51,7 +80,7 @@ export function createServer(opts: { tracesDir: string }): http.Server {
         let report: unknown;
         if (sessionParam && sessionParam.length > 0) {
           const events = await readEvents(opts.tracesDir, sessionParam);
-          report = buildReport(sessionParam, events);
+          report = buildReport(sessionParam, events, { dataDir });
         } else {
           const cutoffMs = Date.now() - RECENT_SESSION_WINDOW_MS;
           const sessions = await listSessions(opts.tracesDir);
@@ -59,7 +88,7 @@ export function createServer(opts: { tracesDir: string }): http.Server {
           const sessionEvents = await Promise.all(
             recentSessions.map((s) => readEvents(opts.tracesDir, s.session)),
           );
-          report = buildCombinedReport(sessionEvents);
+          report = buildCombinedReport(sessionEvents, { dataDir });
         }
         const parsed = ReportSchema.safeParse(report);
         if (!parsed.success) {
