@@ -1,9 +1,12 @@
 import crypto from "node:crypto";
 import http from "node:http";
+import path from "node:path";
 import { ReportSchema } from "@gen/shared/schema.ts";
+import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import { implementSolution } from "./hands/implementor.ts";
 import { parseActionScript, type ActionScript } from "./hands/types.ts";
 import { buildCombinedReport, buildReport } from "./report.ts";
+import { scrubEvents } from "./scrub.ts";
 import { appendEvents, listSessions, readEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
 
@@ -32,6 +35,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 
 export type CreateServerOptions = {
   tracesDir: string;
+  dataDir?: string;
   implement?: (solution: string, opts?: { name?: string }) => Promise<ActionScript>;
 };
 
@@ -39,6 +43,7 @@ type HandsCommand = { id: string; script: ActionScript };
 type HandsOutcome = { ok: boolean; results?: unknown; error?: string };
 
 export function createServer(opts: CreateServerOptions): http.Server {
+  const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
   let latestScript: ActionScript | null = null;
   const implement =
     opts.implement ??
@@ -66,9 +71,34 @@ export function createServer(opts: CreateServerOptions): http.Server {
       return;
     }
 
+    const rawPath = (req.url ?? "/").split("?")[0];
     const url = new URL(req.url ?? "/", "http://localhost");
 
     try {
+      if (req.method === "GET" && rawPath.startsWith("/artifact/")) {
+        let id: string;
+        try {
+          id = decodeURIComponent(rawPath.slice("/artifact/".length));
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid artifact id" });
+          return;
+        }
+
+        if (!isValidArtifactId(id)) {
+          sendJson(res, 400, { ok: false, error: "Invalid artifact id" });
+          return;
+        }
+
+        const artifact = await readSnippetArtifact(dataDir, id);
+        if (!artifact) {
+          sendJson(res, 404, { ok: false, error: "Artifact not found" });
+          return;
+        }
+
+        sendJson(res, 200, artifact);
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/health") {
         sendJson(res, 200, { ok: true });
         return;
@@ -79,7 +109,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         let report: unknown;
         if (sessionParam && sessionParam.length > 0) {
           const events = await readEvents(opts.tracesDir, sessionParam);
-          report = buildReport(sessionParam, events);
+          report = buildReport(sessionParam, events, { dataDir });
         } else {
           const cutoffMs = Date.now() - RECENT_SESSION_WINDOW_MS;
           const sessions = await listSessions(opts.tracesDir);
@@ -87,7 +117,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
           const sessionEvents = await Promise.all(
             recentSessions.map((s) => readEvents(opts.tracesDir, s.session)),
           );
-          report = buildCombinedReport(sessionEvents);
+          report = buildCombinedReport(sessionEvents, { dataDir });
         }
         const parsed = ReportSchema.safeParse(report);
         if (!parsed.success) {
@@ -114,8 +144,12 @@ export function createServer(opts: CreateServerOptions): http.Server {
           return;
         }
 
-        await appendEvents(opts.tracesDir, validation.events);
-        sendJson(res, 200, { ok: true, n: validation.events.length });
+        const events = scrubEvents(validation.events);
+        const original = new Set(validation.events);
+        const scrubbed = validation.events.length - events.filter((e) => original.has(e)).length;
+
+        await appendEvents(opts.tracesDir, events);
+        sendJson(res, 200, { ok: true, n: events.length, scrubbed });
         return;
       }
 
