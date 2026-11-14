@@ -11,8 +11,10 @@ import {
 import {
   deleteLibraryEntry,
   readLibrary,
+  recordLibraryRun,
   upsertLibraryEntry,
 } from "./hands/library.ts";
+import { createLibraryRecallMatcher } from "./hands/recall.ts";
 import {
   LibraryEntrySchema,
   parseActionScript,
@@ -88,6 +90,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const commandQueue: HandsCommand[] = [];
   const waiters = new Map<string, (outcome: HandsOutcome) => void>();
   let nextPollResolver: ((cmd: HandsCommand | null) => void) | null = null;
+  const recallMatcher = createLibraryRecallMatcher();
+  let activeLibraryDecideId: string | null = null;
 
   function dispatchNext(cmd: HandsCommand): void {
     if (nextPollResolver) {
@@ -98,6 +102,80 @@ export function createServer(opts: CreateServerOptions): http.Server {
       commandQueue.push(cmd);
     }
   }
+
+  function enqueueAndAwait(
+    cmd: HandsCommand,
+    timeoutMs: number,
+    timeoutError: string,
+  ): Promise<HandsOutcome> {
+    const outcomePromise = new Promise<HandsOutcome>((resolve) => {
+      const timer = setTimeout(() => {
+        waiters.delete(cmd.id);
+        const idx = commandQueue.findIndex((c) => c.id === cmd.id);
+        if (idx >= 0) commandQueue.splice(idx, 1);
+        resolve({ ok: false, error: timeoutError });
+      }, timeoutMs);
+      timer.unref?.();
+      waiters.set(cmd.id, (outcome) => {
+        clearTimeout(timer);
+        waiters.delete(cmd.id);
+        resolve(outcome);
+      });
+    });
+    dispatchNext(cmd);
+    return outcomePromise;
+  }
+
+  async function requestDecision(input: {
+    name: string;
+    solution: string;
+    script: ActionScript;
+    timeoutMs?: number;
+  }): Promise<{ id: string; outcome: HandsOutcome }> {
+    const id = crypto.randomUUID();
+    const timeoutMs = input.timeoutMs ?? 60000;
+    console.log(
+      `[server] decide id=${id} name="${input.name}" steps=${input.script.steps.length}`,
+    );
+    const outcome = await enqueueAndAwait(
+      { id, kind: "decide", name: input.name, solution: input.solution, script: input.script },
+      timeoutMs,
+      "Timed out waiting for user decision",
+    );
+    console.log(`[server] decide id=${id} resolved:`, outcome.decision ?? outcome.error);
+    return { id, outcome };
+  }
+
+  async function triggerLibraryRecall(entry: LibraryEntry): Promise<void> {
+    if (activeLibraryDecideId) return;
+    activeLibraryDecideId = entry.id;
+    recallMatcher.markTriggered(entry.id);
+    try {
+      const { outcome } = await requestDecision({
+        name: entry.name,
+        solution: entry.solution,
+        script: entry.script,
+      });
+      recallMatcher.markTriggered(entry.id);
+      if (outcome.ok && outcome.decision === "approved") {
+        await recordLibraryRun(dataDir, entry.id).catch(() => {});
+        const runId = crypto.randomUUID();
+        console.log(
+          `[server] library recall approved id=${entry.id} -> running script runId=${runId}`,
+        );
+        void enqueueAndAwait(
+          { id: runId, script: entry.script },
+          30000,
+          "Timed out waiting for extension to execute script",
+        );
+      }
+    } finally {
+      if (activeLibraryDecideId === entry.id) {
+        activeLibraryDecideId = null;
+      }
+    }
+  }
+
   return http.createServer(async (req, res) => {
     setCorsHeaders(res);
 
@@ -185,6 +263,16 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const scrubbed = validation.events.length - events.filter((e) => original.has(e)).length;
 
         await appendEvents(opts.tracesDir, events);
+        if (!activeLibraryDecideId) {
+          const entries = await readLibrary(dataDir).catch(() => []);
+          const matched = recallMatcher.matchEvents(events, entries);
+          if (matched) {
+            console.log(
+              `[server] half-detected library match id=${matched.id} name="${matched.name}" -> /decide`,
+            );
+            void triggerLibraryRecall(matched);
+          }
+        }
         sendJson(res, 200, { ok: true, n: events.length, scrubbed });
         return;
       }
@@ -338,25 +426,13 @@ export function createServer(opts: CreateServerOptions): http.Server {
           typeof body.name === "string" && body.name.trim().length > 0
             ? body.name.trim()
             : (script.name ?? "Proposed automation");
-        const id = crypto.randomUUID();
         const timeoutMs = Number(url.searchParams.get("timeoutMs")) || 60000;
-        const outcomePromise = new Promise<HandsOutcome>((resolve) => {
-          const timer = setTimeout(() => {
-            waiters.delete(id);
-            const idx = commandQueue.findIndex((c) => c.id === id);
-            if (idx >= 0) commandQueue.splice(idx, 1);
-            resolve({ ok: false, error: "Timed out waiting for user decision" });
-          }, timeoutMs);
-          waiters.set(id, (outcome) => {
-            clearTimeout(timer);
-            waiters.delete(id);
-            resolve(outcome);
-          });
+        const { id, outcome } = await requestDecision({
+          name,
+          solution: body.solution.trim(),
+          script,
+          timeoutMs,
         });
-
-        console.log(`[server] POST /decide id=${id} name="${name}" steps=${script.steps.length}`);
-        dispatchNext({ id, kind: "decide", name, solution: body.solution.trim(), script });
-        const outcome = await outcomePromise;
         if (outcome.ok && outcome.decision !== "approved" && outcome.decision !== "dismissed") {
           console.error(`[server] POST /decide id=${id} missing decision in outcome:`, outcome);
           sendJson(res, 502, {
@@ -367,7 +443,6 @@ export function createServer(opts: CreateServerOptions): http.Server {
           });
           return;
         }
-        console.log(`[server] POST /decide id=${id} resolved:`, outcome.decision ?? outcome.error);
         sendJson(res, outcome.ok ? 200 : 504, { id, ...outcome });
         return;
       }
@@ -399,23 +474,12 @@ export function createServer(opts: CreateServerOptions): http.Server {
 
         const id = crypto.randomUUID();
         const timeoutMs = Number(url.searchParams.get("timeoutMs")) || 30000;
-        const outcomePromise = new Promise<HandsOutcome>((resolve) => {
-          const timer = setTimeout(() => {
-            waiters.delete(id);
-            const idx = commandQueue.findIndex((c) => c.id === id);
-            if (idx >= 0) commandQueue.splice(idx, 1);
-            resolve({ ok: false, error: "Timed out waiting for extension to execute script" });
-          }, timeoutMs);
-          waiters.set(id, (outcome) => {
-            clearTimeout(timer);
-            waiters.delete(id);
-            resolve(outcome);
-          });
-        });
-
         console.log(`[server] POST /hands/run id=${id} steps=${script.steps.length}`);
-        dispatchNext({ id, script });
-        const outcome = await outcomePromise;
+        const outcome = await enqueueAndAwait(
+          { id, script },
+          timeoutMs,
+          "Timed out waiting for extension to execute script",
+        );
         console.log(`[server] POST /hands/run id=${id} ok=${outcome.ok}`);
         sendJson(res, outcome.ok ? 200 : 504, { id, ...outcome });
         return;
