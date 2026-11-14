@@ -224,13 +224,13 @@ function sendLibraryMessage(message: unknown): void {
   }
 }
 
-interface ShowSuggestionOptions {
+export interface ShowSuggestionOptions {
   onDecision?: (decision: "approved" | "dismissed") => void;
   script?: ActionScript;
   force?: boolean;
 }
 
-function showSuggestion(
+export function showSuggestion(
   suggestion: Suggestion | null,
   options: ShowSuggestionOptions = {}
 ): void {
