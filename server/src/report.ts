@@ -3,6 +3,7 @@ import { ReportSchema } from "@gen/shared/schema.ts";
 import { normalize } from "./detect/normalize.ts";
 import type { ActionScript } from "./hands/types.ts";
 import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
+import { mergeSessions } from "./merge-sessions.ts";
 import { runPipeline } from "./pipeline.ts";
 
 export interface BuildReportOptions {
@@ -11,6 +12,7 @@ export interface BuildReportOptions {
   gemini?: GeminiClient | GeminiClientOptions;
   implement?: (solution: string, opts?: { name?: string }) => Promise<ActionScript>;
   scriptStore?: Map<string, ActionScript>;
+  gapMs?: number;
 }
 
 export async function buildReport(
@@ -42,23 +44,32 @@ export async function buildCombinedReport(
 ): Promise<Report> {
   const options: BuildReportOptions =
     typeof opts === "string" ? { dataDir: opts } : (opts ?? {});
-  const seenIds = new Set<string>();
+  const mergedStreams = mergeSessions(
+    sessionEvents,
+    options.gapMs !== undefined ? { gapMs: options.gapMs } : undefined,
+  );
+  const findingIndexById = new Map<string, number>();
   const findings: Finding[] = [];
 
-  for (const events of sessionEvents) {
-    const steps = normalize(events);
-    const sessionFindings = await runPipeline(steps, {
+  for (const stream of mergedStreams) {
+    const steps = normalize(stream.events);
+    const streamFindings = await runPipeline(steps, {
       llm: options.llm ?? true,
-      events,
+      events: stream.events,
       gemini: options.gemini,
       implement: options.implement,
       dataDir: options.dataDir,
       scriptStore: options.scriptStore,
     });
-    for (const finding of sessionFindings) {
-      if (!seenIds.has(finding.id)) {
-        seenIds.add(finding.id);
+    for (const finding of streamFindings) {
+      const existingIndex = findingIndexById.get(finding.id);
+      if (existingIndex === undefined) {
+        findingIndexById.set(finding.id, findings.length);
         findings.push(finding);
+      } else if (
+        finding.stats.repetitions > findings[existingIndex].stats.repetitions
+      ) {
+        findings[existingIndex] = finding;
       }
     }
   }

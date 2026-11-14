@@ -39,6 +39,19 @@ describe("buildReport", () => {
   });
 });
 
+function groupBySession(events: Event[]): Event[][] {
+  const bySession = new Map<string, Event[]>();
+  for (const ev of events) {
+    const list = bySession.get(ev.session);
+    if (list) {
+      list.push(ev);
+    } else {
+      bySession.set(ev.session, [ev]);
+    }
+  }
+  return Array.from(bySession.values());
+}
+
 describe("buildCombinedReport", () => {
   it("combines findings across sessions and deduplicates by finding.id", async () => {
     const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
@@ -71,6 +84,101 @@ describe("buildCombinedReport", () => {
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0].verdict).toBe("rung1");
     expect(report.findings[0].stats.repetitions).toBe(3);
+  });
+
+  it("joins crosstab-x3-split (3 sessions) into one rung2 finding for portal.local -> erp.local", async () => {
+    const splitEvents = await loadFixtureEvents("crosstab-x3-split.jsonl");
+    const sessions = groupBySession(splitEvents);
+    expect(sessions).toHaveLength(3);
+
+    const report = await buildCombinedReport(sessions, { llm: false });
+
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.session).toBe("all");
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].verdict).toBe("rung2");
+    expect(report.findings[0].title).toContain("portal.local -> erp.local");
+    expect(report.findings[0].stats.repetitions).toBe(3);
+  });
+
+  it("does not join two sessions 2 hours apart each with 1 reply (no finding)", async () => {
+    const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+    const oneReply = replyX3Events.slice(0, 8);
+    const twoHoursMs = 2 * 60 * 60 * 1000;
+
+    const session1 = oneReply.map((e, i) => ({
+      ...e,
+      id: `50000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      session: "sess_reply_1",
+    }));
+    const session2 = oneReply.map((e, i) => ({
+      ...e,
+      id: `60000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      ts: e.ts + twoHoursMs,
+      session: "sess_reply_2",
+    }));
+
+    const report = await buildCombinedReport([session1, session2], { llm: false });
+
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.session).toBe("all");
+    expect(report.findings).toEqual([]);
+  });
+
+  it("deduplicates findings with the same id by keeping the one with more repetitions", async () => {
+    const replyX3Events = await loadFixtureEvents("reply-x3.jsonl");
+    const twoHoursMs = 2 * 60 * 60 * 1000;
+    const oneReply = replyX3Events.slice(1, 8);
+    const replyX5Events = [
+      ...replyX3Events,
+      ...oneReply.map((e, i) => ({
+        ...e,
+        id: `71000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+        ts: e.ts + 30_000,
+      })),
+      ...oneReply.map((e, i) => ({
+        ...e,
+        id: `72000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+        ts: e.ts + 60_000,
+      })),
+    ].map((e, i) => ({
+      ...e,
+      id: `70000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      ts: e.ts + twoHoursMs,
+      session: "sess_reply_x5",
+    }));
+
+    const report = await buildCombinedReport([replyX3Events, replyX5Events], {
+      llm: false,
+    });
+
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].verdict).toBe("rung1");
+    expect(report.findings[0].stats.repetitions).toBe(5);
+  });
+
+  it("produces the same verdicts as before for reply-x3, invoice-x9, and dispute-x3", async () => {
+    const cases: Array<{ fixture: string; expectedVerdict: string }> = [
+      { fixture: "reply-x3.jsonl", expectedVerdict: "rung1" },
+      { fixture: "invoice-x9.jsonl", expectedVerdict: "rung2" },
+      { fixture: "dispute-x3.jsonl", expectedVerdict: "do_not_automate" },
+    ];
+
+    for (const { fixture, expectedVerdict } of cases) {
+      const events = await loadFixtureEvents(fixture);
+      const single = await buildReport(events[0].session, events, { llm: false });
+      const combined = await buildCombinedReport([events], { llm: false });
+
+      expect(ReportSchema.parse(combined)).toEqual(combined);
+      expect(combined.session).toBe("all");
+      expect(combined.findings.map((f) => f.verdict)).toEqual(
+        single.findings.map((f) => f.verdict),
+      );
+      expect(combined.findings.some((f) => f.verdict === expectedVerdict)).toBe(
+        true,
+      );
+    }
   });
 });
 
@@ -259,5 +367,40 @@ describe("GET /report HTTP integration", () => {
     expect(ReportSchema.parse(report)).toEqual(report);
     expect(report.session).toBe("missing_session");
     expect(report.findings).toEqual([]);
+  });
+
+  it("joins crosstab-x3-split on GET /report while keeping GET /report?session=X single-session", async () => {
+    const splitEvents = await loadFixtureEvents("crosstab-x3-split.jsonl");
+
+    const postRes = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(splitEvents),
+    });
+    expect(postRes.status).toBe(200);
+
+    const combinedRes = await fetch(`${baseUrl}/report?llm=0`);
+    expect(combinedRes.status).toBe(200);
+    const combinedReport = (await combinedRes.json()) as Report;
+    expect(ReportSchema.parse(combinedReport)).toEqual(combinedReport);
+    expect(combinedReport.session).toBe("all");
+    expect(combinedReport.findings).toHaveLength(1);
+    expect(combinedReport.findings[0].verdict).toBe("rung2");
+    expect(combinedReport.findings[0].title).toContain(
+      "portal.local -> erp.local",
+    );
+
+    const portalOnlyRes = await fetch(
+      `${baseUrl}/report?session=sess_portal_tab&llm=0`,
+    );
+    expect(portalOnlyRes.status).toBe(200);
+    const portalOnlyReport = (await portalOnlyRes.json()) as Report;
+    expect(ReportSchema.parse(portalOnlyReport)).toEqual(portalOnlyReport);
+    expect(portalOnlyReport.session).toBe("sess_portal_tab");
+    expect(
+      portalOnlyReport.findings.some((f) =>
+        f.title.includes("portal.local -> erp.local"),
+      ),
+    ).toBe(false);
   });
 });
