@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ERP — new invoice</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #0f172a; color: #e2e8f0; }
+    header { padding: 20px 28px; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+    h1 { font-size: 20px; margin: 0; }
+    .badge { background: #0ea5e9; color: #082f49; font-weight: 700; font-size: 12px; padding: 3px 8px; border-radius: 999px; }
+    main { max-width: 1100px; margin: 0 auto; padding: 24px 28px 60px; display: grid; gap: 24px; }
+    section { background: #111c33; border: 1px solid #1e293b; border-radius: 10px; padding: 20px; }
+    section h2 { margin: 0 0 4px; font-size: 15px; }
+    section p { margin: 0 0 16px; color: #94a3b8; font-size: 13px; }
+    label { display: grid; gap: 6px; font-size: 12px; color: #94a3b8; margin-bottom: 12px; }
+    input, button { font: inherit; }
+    input { background: #0b1325; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px; padding: 9px 10px; }
+    input:focus { outline: 2px solid #38bdf8; outline-offset: 1px; }
+    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    button { background: #1d4ed8; border: 0; color: white; border-radius: 6px; padding: 9px 14px; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    button.ghost { background: #1e293b; border: 1px solid #334155; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid #1e293b; padding: 8px 10px; text-align: left; }
+    th { background: #0b1325; color: #94a3b8; font-weight: 600; }
+    .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    .hint { color: #64748b; font-size: 12px; }
+    .status { font-size: 12px; color: #38bdf8; min-height: 18px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>ERP — new invoice</h1>
+      <div class="hint">Paste invoice fields from the Supplier portal and press Save.</div>
+    </div>
+    <span class="badge">ERP LOCAL</span>
+  </header>
+
+  <main>
+    <section aria-labelledby="entry-heading">
+      <h2 id="entry-heading">New invoice entry</h2>
+      <p>All entries are saved locally in the list below with no network requests.</p>
+      <form id="erp-form">
+        <div class="row">
+          <label for="erp-invoice-id">Invoice ID
+            <input id="erp-invoice-id" data-testid="erp-invoice-id" name="invoice_id" type="text" placeholder="INV-2026-001" />
+          </label>
+          <label for="erp-vendor">Vendor
+            <input id="erp-vendor" data-testid="erp-vendor" name="vendor" type="text" placeholder="Acme Industrial" />
+          </label>
+          <label for="erp-amount">Amount
+            <input id="erp-amount" data-testid="erp-amount" name="amount" type="text" placeholder="1250.00 EUR" />
+          </label>
+          <label for="erp-date">Date
+            <input id="erp-date" data-testid="erp-date" name="date" type="text" placeholder="2026-03-01" />
+          </label>
+        </div>
+        <div class="toolbar" style="margin-bottom: 0;">
+          <button type="submit" id="save-btn" data-testid="save-btn">Save</button>
+          <button type="reset" class="ghost">Reset</button>
+          <span class="status" id="erp-status" aria-live="polite"></span>
+        </div>
+      </form>
+    </section>
+
+    <section aria-labelledby="saved-heading">
+      <h2 id="saved-heading">Saved invoices</h2>
+      <p id="saved-empty">No invoices saved yet.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Invoice ID</th>
+            <th>Vendor</th>
+            <th>Amount</th>
+            <th>Date</th>
+          </tr>
+        </thead>
+        <tbody id="saved-invoices" data-testid="saved-invoices"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById("erp-form");
+    const invoiceIdInput = document.getElementById("erp-invoice-id");
+    const vendorInput = document.getElementById("erp-vendor");
+    const amountInput = document.getElementById("erp-amount");
+    const dateInput = document.getElementById("erp-date");
+    const savedBody = document.getElementById("saved-invoices");
+    const savedEmpty = document.getElementById("saved-empty");
+    const erpStatus = document.getElementById("erp-status");
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+
+      const values = [
+        invoiceIdInput.value.trim(),
+        vendorInput.value.trim(),
+        amountInput.value.trim(),
+        dateInput.value.trim(),
+      ];
+
+      if (values.every((value) => value === "")) {
+        erpStatus.textContent = "Enter at least one invoice field before saving.";
+        return;
+      }
+
+      const row = document.createElement("tr");
+      values.forEach((value) => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.appendChild(cell);
+      });
+      savedBody.appendChild(row);
+
+      if (savedEmpty) {
+        savedEmpty.hidden = true;
+      }
+
+      form.reset();
+      invoiceIdInput.value = "";
+      vendorInput.value = "";
+      amountInput.value = "";
+      dateInput.value = "";
+      erpStatus.textContent = `Saved invoice ${values[0] || "(entry)"}.`;
+      invoiceIdInput.focus();
+    });
+
+    form.addEventListener("reset", () => {
+      erpStatus.textContent = "";
+    });
+  </script>
+</body>
+</html>
