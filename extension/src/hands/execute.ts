@@ -196,7 +196,8 @@ export async function executeStep(
         const remembered = (window as unknown as { __HANDS_LAST_EDITABLE__?: Element | null })
           .__HANDS_LAST_EDITABLE__;
         const lastEditable = remembered && remembered.isConnected ? remembered : null;
-        const element = targetOverride ?? (step.target ? resolve(step.target) : (lastEditable ?? active));
+        const element =
+          targetOverride ?? ((step.target ? resolve(step.target) : null) ?? lastEditable ?? active);
         if (!element) throw new Error("No target and nothing focused");
         insertText(element, step.value);
         return { ok: true, url: location.href, value: readValue(element) };

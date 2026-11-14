@@ -64,13 +64,21 @@ function urlMatchesPattern(eventUrl: string | undefined, pattern: string): boole
 
 function extractImplicitRoles(evt: Event): Set<string> {
   const roles = new Set<string>();
-  if (evt.target?.role) {
-    roles.add(evt.target.role.trim().toLowerCase());
+  const explicitRole = evt.target?.role?.trim().toLowerCase();
+  if (explicitRole) {
+    roles.add(explicitRole);
   }
   const tag = evt.target?.tag?.trim().toLowerCase();
   if (tag === "button") roles.add("button");
   if (tag === "a") roles.add("link");
-  if (tag === "input" || tag === "textarea") roles.add("textbox");
+  if (
+    tag === "input" ||
+    tag === "textarea" ||
+    explicitRole === "searchbox" ||
+    (explicitRole === "combobox" && tag !== "select")
+  ) {
+    roles.add("textbox");
+  }
   if (tag === "select") roles.add("combobox");
   if (tag === "td" || tag === "th") roles.add("gridcell");
   const nonGridTags = new Set(["input", "textarea", "select", "button", "a", "body", "html", "main", "section", "header", "p", "label"]);
@@ -229,9 +237,14 @@ function matchEntryToEvent(
     eyes.targetHints.roles.length > 0 &&
     eyes.targetHints.roles.some((role) => eventRoles.has(role.trim().toLowerCase()));
 
+  const isNonTextControl =
+    eventRoles.has("button") ||
+    eventRoles.has("link") ||
+    evt.target?.tag?.trim().toLowerCase() === "select" ||
+    (eventRoles.has("combobox") && !eventRoles.has("textbox"));
+
   if (
-    (entry.kind === "snippet" &&
-      (eventRoles.has("button") || eventRoles.has("link") || eventRoles.has("combobox"))) ||
+    (entry.kind === "snippet" && isNonTextControl) ||
     (eyes.targetHints.roles.length > 0 && eventRoles.size > 0 && !roleMatched)
   ) {
     return 0;

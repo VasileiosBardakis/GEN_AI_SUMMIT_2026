@@ -171,6 +171,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
       tag === "textarea" ||
       tag === "select" ||
       role === "textbox" ||
+      role === "searchbox" ||
       role === "gridcell" ||
       role === "combobox";
     if (!isEditable || !evt.target?.locators?.length) return null;

@@ -114,7 +114,7 @@ export function extractTarget(rawEl: EventTarget | null): {
 
   const interactive =
     rawEl.closest<HTMLElement>(
-      'button, a, input, select, textarea, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [role="gridcell"], [data-testid], [data-cell], td, th, [contenteditable="true"]'
+      'button, a, input, select, textarea, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [role="gridcell"], [role="textbox"], [role="searchbox"], [role="combobox"], [data-testid], [data-cell], td, th, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
     ) || rawEl;
 
   const locators: Locator[] = [];
@@ -125,7 +125,7 @@ export function extractTarget(rawEl: EventTarget | null): {
       ? "button"
       : tag === "a"
         ? "link"
-        : tag === "input"
+        : tag === "input" || tag === "textarea" || interactive.isContentEditable
           ? "textbox"
           : tag === "td"
             ? "gridcell"
