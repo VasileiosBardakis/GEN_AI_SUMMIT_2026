@@ -7,6 +7,11 @@ export interface SnippetOptions {
   minRepetitions?: number;
 }
 
+export interface SnippetFinding {
+  finding: Finding;
+  text: string;
+}
+
 interface Candidate {
   raw: string;
   norm: string;
@@ -65,10 +70,28 @@ function computeStability(members: Candidate[]): number {
   return Number((total / pairs).toFixed(4));
 }
 
-export function detectSnippets(
+function pickClusterText(members: Candidate[]): string {
+  const counts = new Map<string, number>();
+  for (const member of members) {
+    counts.set(member.raw, (counts.get(member.raw) ?? 0) + 1);
+  }
+
+  let bestText = members[0]?.raw ?? "";
+  let bestCount = 0;
+  for (const [raw, count] of counts) {
+    if (count > bestCount) {
+      bestCount = count;
+      bestText = raw;
+    }
+  }
+
+  return bestText;
+}
+
+export function detectSnippetsWithText(
   steps: Step[],
   opts?: SnippetOptions,
-): Finding[] {
+): SnippetFinding[] {
   const minLength = opts?.minLength ?? 20;
   const similarityThreshold = opts?.similarityThreshold ?? 0.8;
   const minRepetitions = opts?.minRepetitions ?? 3;
@@ -111,7 +134,7 @@ export function detectSnippets(
     }
   }
 
-  const findings: Finding[] = [];
+  const results: SnippetFinding[] = [];
   for (const cluster of clusters) {
     if (cluster.members.length < minRepetitions) {
       continue;
@@ -129,7 +152,7 @@ export function detectSnippets(
     const minutesPerWeek = Number((repetitions * (avgChars / 200)).toFixed(2));
     const stability = computeStability(cluster.members);
 
-    findings.push({
+    const finding: Finding = {
       id,
       verdict: "rung1",
       title: `Save a snippet for: "${preview}"`,
@@ -146,8 +169,20 @@ export function detectSnippets(
         path: `snippets/${id}.txt`,
         verified: false,
       },
+    };
+
+    results.push({
+      finding,
+      text: pickClusterText(cluster.members),
     });
   }
 
-  return findings;
+  return results;
+}
+
+export function detectSnippets(
+  steps: Step[],
+  opts?: SnippetOptions,
+): Finding[] {
+  return detectSnippetsWithText(steps, opts).map((item) => item.finding);
 }

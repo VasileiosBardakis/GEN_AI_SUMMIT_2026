@@ -1,5 +1,7 @@
 import http from "node:http";
+import path from "node:path";
 import { ReportSchema } from "@gen/shared/schema.ts";
+import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import { buildReport } from "./report.ts";
 import { appendEvents, readEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
@@ -25,7 +27,8 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
-export function createServer(opts: { tracesDir: string }): http.Server {
+export function createServer(opts: { tracesDir: string; dataDir?: string }): http.Server {
+  const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
   let latestSession = "none";
 
   return http.createServer(async (req, res) => {
@@ -37,9 +40,34 @@ export function createServer(opts: { tracesDir: string }): http.Server {
       return;
     }
 
+    const rawPath = (req.url ?? "/").split("?")[0];
     const url = new URL(req.url ?? "/", "http://localhost");
 
     try {
+      if (req.method === "GET" && rawPath.startsWith("/artifact/")) {
+        let id: string;
+        try {
+          id = decodeURIComponent(rawPath.slice("/artifact/".length));
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid artifact id" });
+          return;
+        }
+
+        if (!isValidArtifactId(id)) {
+          sendJson(res, 400, { ok: false, error: "Invalid artifact id" });
+          return;
+        }
+
+        const artifact = await readSnippetArtifact(dataDir, id);
+        if (!artifact) {
+          sendJson(res, 404, { ok: false, error: "Artifact not found" });
+          return;
+        }
+
+        sendJson(res, 200, artifact);
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/health") {
         sendJson(res, 200, { ok: true });
         return;
@@ -49,7 +77,7 @@ export function createServer(opts: { tracesDir: string }): http.Server {
         const sessionParam = url.searchParams.get("session");
         const session = sessionParam && sessionParam.length > 0 ? sessionParam : latestSession;
         const events = await readEvents(opts.tracesDir, session);
-        const parsed = ReportSchema.safeParse(buildReport(session, events));
+        const parsed = ReportSchema.safeParse(buildReport(session, events, { dataDir }));
         if (!parsed.success) {
           sendJson(res, 500, { ok: false, error: parsed.error.message });
           return;
