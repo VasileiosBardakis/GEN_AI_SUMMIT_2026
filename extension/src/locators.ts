@@ -2,11 +2,40 @@ import type { EventMeta, Locator } from "@gen/shared";
 
 const TEST_ID_ATTRS = ["data-testid", "data-test-id", "data-test", "data-qa", "data-cy"];
 
+const TAG_ROLES: Record<string, string> = {
+  button: "button",
+  a: "link",
+  select: "combobox",
+  textarea: "textbox",
+  td: "gridcell",
+};
+
+const INPUT_TYPE_ROLES: Record<string, string> = {
+  checkbox: "checkbox",
+  radio: "radio",
+  search: "searchbox",
+  button: "button",
+  submit: "button",
+  reset: "button",
+};
+
+const TEXT_LOCATOR_ROLES = new Set(["button", "link", "menuitem", "tab"]);
+
 function cssEscapeIdent(val: string): string {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
     return CSS.escape(val);
   }
   return val.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~ ])/g, "\\$1");
+}
+
+function cleanLabelText(labelEl: HTMLElement): string {
+  const clone = labelEl.cloneNode(true) as HTMLElement;
+  for (const nested of Array.from(
+    clone.querySelectorAll("input, select, textarea, button, datalist, script, style")
+  )) {
+    nested.remove();
+  }
+  return (clone.textContent || "").replace(/\s+/g, " ").trim();
 }
 
 function getReadableLabel(el: HTMLElement): string | undefined {
@@ -30,10 +59,17 @@ function getReadableLabel(el: HTMLElement): string | undefined {
   ) {
     if (el.labels && el.labels.length > 0) {
       const text = Array.from(el.labels)
-        .map((l) => l.textContent?.trim() || "")
+        .map((l) => cleanLabelText(l))
         .filter(Boolean)
         .join(" ");
       if (text) return text;
+    }
+    if (
+      el instanceof HTMLInputElement &&
+      /^(submit|button|reset)$/i.test(el.getAttribute("type") || "") &&
+      el.value.trim()
+    ) {
+      return el.value.trim();
     }
     const placeholder = el.getAttribute("placeholder")?.trim();
     if (placeholder) return placeholder;
@@ -42,8 +78,10 @@ function getReadableLabel(el: HTMLElement): string | undefined {
   const title = el.getAttribute("title")?.trim();
   if (title) return title;
 
-  const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
-  if (text && text.length <= 80) return text;
+  if (!(el instanceof HTMLSelectElement)) {
+    const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+    if (text && text.length <= 80) return text;
+  }
 
   return undefined;
 }
@@ -119,17 +157,12 @@ export function extractTarget(rawEl: EventTarget | null): {
 
   const locators: Locator[] = [];
   const tag = interactive.tagName.toLowerCase();
+  const inputType = (interactive.getAttribute("type") || "text").toLowerCase();
   const role =
     interactive.getAttribute("role") ||
-    (tag === "button"
-      ? "button"
-      : tag === "a"
-        ? "link"
-        : tag === "input" || tag === "textarea" || interactive.isContentEditable
-          ? "textbox"
-          : tag === "td"
-            ? "gridcell"
-            : undefined);
+    (tag === "input"
+      ? (INPUT_TYPE_ROLES[inputType] ?? "textbox")
+      : (TAG_ROLES[tag] ?? (interactive.isContentEditable ? "textbox" : undefined)));
 
   for (const attr of TEST_ID_ATTRS) {
     const val = interactive.getAttribute(attr);
@@ -154,11 +187,7 @@ export function extractTarget(rawEl: EventTarget | null): {
   const innerText = (interactive.innerText || interactive.textContent || "")
     .replace(/\s+/g, " ")
     .trim();
-  if (
-    innerText &&
-    innerText.length <= 50 &&
-    (tag === "button" || tag === "a" || role === "menuitem" || role === "tab")
-  ) {
+  if (innerText && innerText.length <= 50 && role && TEXT_LOCATOR_ROLES.has(role)) {
     locators.push({ kind: "text", value: innerText });
   }
 

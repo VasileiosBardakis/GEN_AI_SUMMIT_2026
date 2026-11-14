@@ -10,6 +10,16 @@ const INTERACTIVE_EVENT_TYPES = new Set<Event["type"]>([
 ]);
 
 const CLIPBOARD_WINDOW_MS = 120_000;
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]"]);
+const IMPLICIT_TAG_ROLES: Record<string, string> = {
+  button: "button",
+  a: "link",
+  input: "textbox",
+  textarea: "textbox",
+  select: "combobox",
+  td: "gridcell",
+  th: "gridcell",
+};
 
 function normalizeHost(raw: string): string {
   const trimmed = raw.trim().toLowerCase();
@@ -21,7 +31,7 @@ function normalizeHost(raw: string): string {
   } catch {
     host = trimmed.replace(/^https?:\/\//, "").split(/[/?#]/)[0] ?? "";
   }
-  return host === "127.0.0.1" || host === "::1" || host === "[::1]" ? "localhost" : host;
+  return LOOPBACK_HOSTS.has(host) ? "localhost" : host;
 }
 
 function extractEventHost(evt: Event): string {
@@ -69,18 +79,11 @@ function extractImplicitRoles(evt: Event): Set<string> {
     roles.add(explicitRole);
   }
   const tag = evt.target?.tag?.trim().toLowerCase();
-  if (tag === "button") roles.add("button");
-  if (tag === "a") roles.add("link");
-  if (
-    tag === "input" ||
-    tag === "textarea" ||
-    explicitRole === "searchbox" ||
-    (explicitRole === "combobox" && tag !== "select")
-  ) {
+  const implicitRole = tag ? IMPLICIT_TAG_ROLES[tag] : undefined;
+  if (implicitRole) roles.add(implicitRole);
+  if (explicitRole === "searchbox" || (explicitRole === "combobox" && tag !== "select")) {
     roles.add("textbox");
   }
-  if (tag === "select") roles.add("combobox");
-  if (tag === "td" || tag === "th") roles.add("gridcell");
   const nonGridTags = new Set(["input", "textarea", "select", "button", "a", "body", "html", "main", "section", "header", "p", "label"]);
   const hasGridLocator = Boolean(
     evt.target?.locators?.some((l) => /grid|cell|waffle|sheet|canvas/i.test(l.value)),
