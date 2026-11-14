@@ -140,4 +140,25 @@ describe("createSuggestionEngine", () => {
     expect(suggestion.flows.user.map((n) => n.kind)).toEqual(["input", "loop"]);
     expect(suggestion.flows.proposed.map((n) => n.kind)).toEqual(["ai", "done"]);
   });
+
+  it("persists and restores text clusters across engine instances (page reloads)", () => {
+    let savedClusters: import("../src/suggestion.ts").TextCluster[] = [];
+    const engine1 = createSuggestionEngine({
+      minTextLength: 6,
+      onTextClustersChange: (clusters) => {
+        savedClusters = clusters;
+      },
+    });
+    expect(engine1.recordText("Acme Logistics", "127.0.0.1::company_name")).toBeNull();
+    expect(engine1.recordText("Acme Logistics", "127.0.0.1::company_name")).toBeNull();
+    expect(savedClusters).toHaveLength(1);
+
+    const engine2 = createSuggestionEngine({
+      minTextLength: 6,
+      initialTextClusters: savedClusters,
+    });
+    const detected = engine2.recordText("Acme Logistics", "127.0.0.1::company_name");
+    expect(detected).not.toBeNull();
+    expect(detected?.count).toBe(3);
+  });
 });

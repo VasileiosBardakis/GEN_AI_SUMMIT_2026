@@ -256,6 +256,24 @@ test("silently saves repeated snippets and only prompts to actually insert when 
         popup.evaluate((host) => host.shadowRoot?.querySelector("h2")?.textContent?.trim() ?? "")
       )
       .toContain("Hi, thanks for your order");
+
+    // 8. Snippet repetition persists across full page reloads (not reset per page load)
+    const RELOAD_SNIPPET = "Reload persistence test snippet 99";
+    await dispatchPaste(page, 'input[name="city"]', RELOAD_SNIPPET);
+    await page.waitForTimeout(250);
+    await page.reload({ waitUntil: "load" });
+    await dispatchPaste(page, 'input[name="city"]', RELOAD_SNIPPET);
+    await page.waitForTimeout(250);
+    await page.reload({ waitUntil: "load" });
+    await dispatchPaste(page, 'input[name="city"]', RELOAD_SNIPPET);
+
+    await expect
+      .poll(async () => {
+        const res = await fetch(`${apiBaseUrl}/library`);
+        const json = (await res.json()) as { items?: Array<{ name: string }> };
+        return Boolean(json.items?.some((item) => item.name.includes("Reload persistence test")));
+      })
+      .toBe(true);
   } finally {
     await context.close().catch(() => {});
     apiServer.closeAllConnections?.();

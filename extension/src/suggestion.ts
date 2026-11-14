@@ -8,6 +8,8 @@ export interface SuggestionOptions {
   minRepetitions?: number;
   clickWindowMs?: number;
   clickReplayUrl?: string;
+  initialTextClusters?: TextCluster[];
+  onTextClustersChange?: (clusters: TextCluster[]) => void;
 }
 
 export type FlowNodeKind =
@@ -45,7 +47,7 @@ export interface SuggestionEngine {
   recordClick(key: string, label: string | undefined, ts?: number): Suggestion | null;
 }
 
-interface TextCluster {
+export interface TextCluster {
   scopeKey: string;
   repRaw: string;
   repNorm: string;
@@ -110,8 +112,26 @@ export function createSuggestionEngine(options: SuggestionOptions = {}): Suggest
   const clickWindowMs = options.clickWindowMs ?? 60_000;
   const clickReplayUrl = options.clickReplayUrl;
 
-  const textClusters: TextCluster[] = [];
+  const textClusters: TextCluster[] = (options.initialTextClusters ?? []).map((c) => ({
+    scopeKey: c.scopeKey,
+    repRaw: c.repRaw,
+    repNorm: c.repNorm,
+    members: [...c.members],
+    notified: Boolean(c.notified),
+  }));
   const clickClusters: ClickCluster[] = [];
+
+  function notifyTextClusters(): void {
+    if (!options.onTextClustersChange) return;
+    const recent = textClusters.slice(-200).map((c) => ({
+      scopeKey: c.scopeKey,
+      repRaw: c.repRaw,
+      repNorm: c.repNorm,
+      members: [...c.members],
+      notified: c.notified,
+    }));
+    options.onTextClustersChange(recent);
+  }
 
   function recordText(value: string, scopeKey = ""): Suggestion | null {
     const raw = value.trim();
@@ -129,9 +149,13 @@ export function createSuggestionEngine(options: SuggestionOptions = {}): Suggest
     }
 
     cluster.members.push(raw);
-    if (cluster.members.length < minRepetitions || cluster.notified) return null;
+    if (cluster.members.length < minRepetitions || cluster.notified) {
+      notifyTextClusters();
+      return null;
+    }
 
     cluster.notified = true;
+    notifyTextClusters();
     const count = cluster.members.length;
     const avgChars =
       cluster.members.reduce((sum, member) => sum + member.length, 0) / count;

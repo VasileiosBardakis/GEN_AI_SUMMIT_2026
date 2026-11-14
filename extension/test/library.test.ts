@@ -5,6 +5,8 @@ import {
   findingToOptimization,
   formatDuration,
   formatRelativeTime,
+  libraryEntryToOptimization,
+  mergeServerAndLocalOptimizations,
   recordOptimizationRun,
   suggestionToOptimization,
   upsertOptimizationItem,
@@ -80,5 +82,42 @@ describe("optimization library helpers", () => {
         stats: { repetitions: 1, minutesPerWeek: 0.1, stability: 0.2 },
       })
     ).toBeNull();
+  });
+
+  it("merges server LibraryEntry items over mock defaults while preserving local run stats", () => {
+    const defaults = createDefaultOptimizations(1_000_000);
+    const serverEntry = {
+      id: "lib_abc123",
+      name: 'Insert "Acme Logistics"',
+      kind: "snippet" as const,
+      status: "active" as const,
+      description: "Inserts Acme Logistics into company field.",
+      solution: "Insert 'Acme Logistics' into the focused field.",
+      script: {
+        name: 'Insert "Acme Logistics"',
+        steps: [{ action: "insertText" as const, value: "Acme Logistics" }],
+      },
+      eyes: {
+        intent: "Fill company name",
+        scope: { apps: ["127.0.0.1"], urlPatterns: [], pageHints: [] },
+        targetHints: { roles: ["textbox"], labelContains: ["company"], locators: [] },
+        textHints: { prefixHints: ["acme"], minCharsBeforeMatch: 2 },
+        guards: { requireClipboard: false, fieldEmptyOnly: true, minSignals: 2, cooldownMs: 5000 },
+      },
+      runCount: 2,
+      createdAt: 1_000,
+      updatedAt: 2_000,
+    };
+
+    const opt = libraryEntryToOptimization(serverEntry);
+    expect(opt.id).toBe("lib_abc123");
+    expect(opt.snippetText).toBe("Acme Logistics");
+    expect(opt.app).toBe("127.0.0.1");
+
+    const localWithRun = recordOptimizationRun([opt, ...defaults], "lib_abc123", 5_000);
+    const merged = mergeServerAndLocalOptimizations([serverEntry], localWithRun);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe("lib_abc123");
+    expect(merged[0].runCount).toBe(3);
   });
 });
