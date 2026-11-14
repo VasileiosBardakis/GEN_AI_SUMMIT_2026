@@ -27,6 +27,7 @@ export interface Suggestion {
   kind: SuggestionKind;
   count: number;
   preview: string;
+  snippetText?: string;
   headline: string;
   detail: string;
   meta: string;
@@ -136,6 +137,7 @@ export function createSuggestionEngine(options: SuggestionOptions = {}): Suggest
       kind: "text",
       count,
       preview: collapsePreview(cluster.repRaw),
+      snippetText: cluster.repRaw,
       headline: "Save this text as a snippet",
       detail: `Repeated ${count} similar times. Save once to insert with a shortcut.`,
       meta: `${count} repeats · ~${minutesPerWeek} min/week saved`,
