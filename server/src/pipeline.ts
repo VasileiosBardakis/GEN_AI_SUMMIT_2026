@@ -17,7 +17,7 @@ import { detectShortValues } from "./detect/short-values.ts";
 import { detectSnippetsWithText, type SnippetFinding } from "./detect/snippet.ts";
 import { detectWorkflows, exactStepKey } from "./detect/workflow.ts";
 import { implementSolution } from "./hands/implementor.ts";
-import type { ActionScript } from "./hands/types.ts";
+import { ActionScriptSchema, type ActionScript } from "./hands/types.ts";
 import { matchLibrary } from "./library.ts";
 import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
 
@@ -25,6 +25,7 @@ export type PipelineConfig = {
   minBigramShare: number;
   confidenceThreshold: number;
   llmTimeoutMs: number;
+  implementTimeoutMs: number;
   safetyWords: readonly string[];
 };
 
@@ -32,6 +33,7 @@ export const DEFAULT_PIPELINE_CONFIG: PipelineConfig = {
   minBigramShare: 0.5,
   confidenceThreshold: 0.6,
   llmTimeoutMs: 8_000,
+  implementTimeoutMs: 15_000,
   safetyWords: [
     "send",
     "pay",
@@ -519,6 +521,35 @@ export function describeCandidate(candidate: Candidate): string {
   return workflow.name;
 }
 
+const SOLUTION_LOCATOR_PRIORITY: Record<string, number> = {
+  testid: 0,
+  css: 1,
+  xpath: 2,
+  text: 3,
+  aria: 4,
+  uia: 5,
+};
+
+function pickBestLocator(
+  target?: Step["target"],
+): NonNullable<Step["target"]>[number] | undefined {
+  if (!target || target.length === 0) return undefined;
+  if (target[0].kind === "testid" || target[0].kind === "css") {
+    return target[0];
+  }
+  let best = target[0];
+  let bestRank = SOLUTION_LOCATOR_PRIORITY[best.kind] ?? 99;
+  for (let i = 1; i < target.length; i++) {
+    const loc = target[i];
+    const rank = SOLUTION_LOCATOR_PRIORITY[loc.kind] ?? 99;
+    if (rank < bestRank) {
+      best = loc;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
 export function buildSolutionText(
   verdict: Verdict,
   workflow: Workflow,
@@ -532,18 +563,88 @@ export function buildSolutionText(
   }
 
   if (verdict === "rung2") {
-    const lines = workflow.steps.map((step, idx) => {
-      const loc = step.target?.[0];
+    const paramExampleByName = new Map<string, string>();
+    for (const p of workflow.params ?? []) {
+      if (typeof p.example === "string" && p.example.trim().length > 0) {
+        paramExampleByName.set(p.name, p.example);
+      }
+    }
+
+    const copiedParams = new Set<string>();
+    const isCrossHost = Boolean(
+      workflow.sourceApp &&
+        workflow.destApp &&
+        workflow.sourceApp !== workflow.destApp,
+    );
+    const hasCopySteps = workflow.steps.some((s) => s.action === "copy");
+    let sawCopy = false;
+    let insertedSwitchTab = false;
+    const rawLines: string[] = [];
+
+    for (const step of workflow.steps) {
+      if (
+        isCrossHost &&
+        !insertedSwitchTab &&
+        sawCopy &&
+        (copiedParams.size > 0 || hasCopySteps) &&
+        (step.action === "fill" ||
+          step.action === "paste" ||
+          step.action === "click")
+      ) {
+        rawLines.push(`switchTab host="${workflow.destApp}"`);
+        insertedSwitchTab = true;
+      }
+
+      const loc = pickBestLocator(step.target);
       const targetDesc = loc ? `${loc.kind}="${loc.value}"` : "focused element";
+
+      if (step.action === "copy") {
+        sawCopy = true;
+        if (step.value !== undefined && typeof step.value === "object") {
+          const { param } = step.value;
+          copiedParams.add(param);
+          rawLines.push(`readText from ${targetDesc} into "{{${param}}}"`);
+          continue;
+        }
+      }
+
+      if (
+        (step.action === "fill" || step.action === "paste") &&
+        step.value !== undefined &&
+        typeof step.value === "object"
+      ) {
+        const { param } = step.value;
+        if (copiedParams.has(param)) {
+          rawLines.push(`fill ${targetDesc} with "{{${param}}}"`);
+        } else {
+          const example = paramExampleByName.get(param);
+          if (example) {
+            rawLines.push(`${step.action} ${targetDesc} with "${example}"`);
+          } else {
+            rawLines.push(`${step.action} ${targetDesc} with {${param}}`);
+          }
+        }
+        continue;
+      }
+
       const valDesc =
         step.value === undefined
           ? ""
           : typeof step.value === "string"
             ? ` with "${step.value}"`
-            : ` with {${step.value.param}}`;
-      return `${idx + 1}. ${step.action} ${targetDesc}${valDesc}`;
-    });
-    return `Execute the workflow "${workflow.name}" on ${workflow.destApp}:\n${lines.join("\n")}`;
+            : copiedParams.has(step.value.param)
+              ? ` with "{{${step.value.param}}}"`
+              : paramExampleByName.has(step.value.param)
+                ? ` with "${paramExampleByName.get(step.value.param)}"`
+                : ` with {${step.value.param}}`;
+      rawLines.push(`${step.action} ${targetDesc}${valDesc}`);
+    }
+
+    const lines = rawLines.map((line, idx) => `${idx + 1}. ${line}`);
+    const header = isCrossHost
+      ? `Read values on ${workflow.sourceApp}, switch to ${workflow.destApp}, and fill on ${workflow.destApp}:`
+      : `Execute the workflow "${workflow.name}" on ${workflow.destApp}:`;
+    return `${header}\n${lines.join("\n")}`;
   }
 
   return null;
@@ -662,7 +763,29 @@ export async function runPipeline(
   const decideSecondFn = opts.decideSecond ?? decideSecond;
   const implementFn =
     opts.implement ??
-    ((solution: string, o?: { name?: string }) => implementSolution(solution, o));
+    ((solution: string, o?: { name?: string }) => {
+      if (opts.gemini && "generateJson" in opts.gemini) {
+        const geminiClient = opts.gemini;
+        return implementSolution(solution, {
+          ...o,
+          generate: ({ systemInstruction, prompt, responseSchema }) => {
+            const fullPrompt = [
+              systemInstruction,
+              "",
+              "Output JSON strictly matching this JSON Schema:",
+              JSON.stringify(responseSchema),
+              "",
+              prompt,
+            ].join("\n");
+            return geminiClient.generateJson(fullPrompt, ActionScriptSchema);
+          },
+        });
+      }
+      return implementSolution(solution, {
+        ...o,
+        ...(opts.gemini ? { gemini: opts.gemini } : {}),
+      });
+    });
 
   const mapping = mapEventsToSteps(steps, opts.events);
   const primaryApp = resolvePrimaryApp(opts.events);
@@ -741,6 +864,7 @@ export async function runPipeline(
       let effectiveRisky = false;
 
       if (statsDecision.confidence < config.confidenceThreshold && opts.llm) {
+        const decideStartedAt = Date.now();
         try {
           secondDecision = await decideSecondFn(
             buildDigest(candidate, statsDecision.features),
@@ -752,6 +876,9 @@ export async function runPipeline(
         } catch {
           secondDecision = null;
         }
+        console.log(
+          `[pipeline] decideSecond id=${candidate.workflow.id} ms=${Date.now() - decideStartedAt} verdict=${secondDecision?.level ?? "null"}`,
+        );
 
         if (secondDecision) {
           const isSnippetOnly =
@@ -832,8 +959,26 @@ export async function runPipeline(
           item.snippetText,
         );
         if (solution && opts.llm) {
+          const implementStartedAt = Date.now();
+          let timer: ReturnType<typeof setTimeout> | undefined;
           try {
-            const script = await implementFn(solution, { name: finding.title });
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              timer = setTimeout(() => {
+                reject(
+                  new Error(
+                    `implement timed out after ${config.implementTimeoutMs}ms`,
+                  ),
+                );
+              }, config.implementTimeoutMs);
+            });
+            const script = await Promise.race([
+              implementFn(solution, { name: finding.title }),
+              timeoutPromise,
+            ]).finally(() => {
+              if (timer !== undefined) {
+                clearTimeout(timer);
+              }
+            });
             scriptStore.set(finding.id, script);
             finding = {
               ...finding,
@@ -843,7 +988,14 @@ export async function runPipeline(
                 verified: false,
               },
             };
-          } catch {
+            console.log(
+              `[pipeline] implement id=${finding.id} ms=${Date.now() - implementStartedAt} ok steps=${script.steps.length}`,
+            );
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.log(
+              `[pipeline] implement id=${finding.id} ms=${Date.now() - implementStartedAt} error=${msg}`,
+            );
             // Keep non-script artifact / no script if implementor fails
           }
         }
@@ -854,10 +1006,14 @@ export async function runPipeline(
       opts.dataDir !== undefined &&
       item.kind === "snippet" &&
       item.snippetText !== undefined &&
-      verdict === "rung1" &&
-      finding.artifact?.kind !== "text"
+      verdict === "rung1"
     ) {
+      const existingTextArtifact =
+        finding.artifact?.kind === "text" ? finding.artifact : undefined;
       finding = writeSnippetArtifact(opts.dataDir, finding, item.snippetText);
+      if (existingTextArtifact) {
+        finding = { ...finding, artifact: existingTextArtifact };
+      }
     }
 
     results.push(finding);
