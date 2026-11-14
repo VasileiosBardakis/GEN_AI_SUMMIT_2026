@@ -219,7 +219,14 @@ export function extractGridContext(
     }
   }
 
-  if (!cellRef) {
+  const isGridSurface = Boolean(
+    cellEl ||
+      el.closest(
+        '[role="grid"], table, canvas, #waffle-grid-container, .grid-scrollable-wrapper, .grid-container, [class*="cell-input"]'
+      )
+  );
+
+  if (!cellRef && isGridSurface) {
     const nameBox = document.querySelector<HTMLInputElement>(
       '#t-name-box, input.waffle-name-box, input[aria-label*="Name box" i], input[data-testid="name-box"]'
     );
