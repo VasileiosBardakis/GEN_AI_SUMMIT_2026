@@ -371,7 +371,7 @@ function collectWorkflowHosts(
   return hosts;
 }
 
-function collectLibraryEntryHosts(entry: LibraryEntry): Set<string> {
+export function collectLibraryEntryHosts(entry: LibraryEntry): Set<string> {
   const hosts = new Set<string>();
   for (const app of entry.eyes.scope.apps) {
     addNormalizedHost(hosts, app);
@@ -402,7 +402,7 @@ function stripWww(host: string): string {
   return host.startsWith("www.") && host.length > 4 ? host.slice(4) : host;
 }
 
-function hasHostOverlap(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+export function hasHostOverlap(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size === 0 || b.size === 0) return false;
   const bNorm = new Set<string>();
   for (const h of b) {
