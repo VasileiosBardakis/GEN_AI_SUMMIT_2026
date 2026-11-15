@@ -1614,36 +1614,87 @@ function resolveLeafStep(
       };
     }
     case "navigate": {
-      let targetHost: string | undefined;
-      if (raw.url) {
+      const seenHostnames = new Set<string>();
+      for (const s of ctx.indexedSteps) {
+        if (s.app) {
+          seenHostnames.add(normalizeHost(s.app));
+        }
+        if (s.url) {
+          try {
+            seenHostnames.add(
+              normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname),
+            );
+          } catch {
+            // ignore invalid captured URL
+          }
+        }
+      }
+
+      const rawUrl = raw.url?.trim() ? raw.url.trim() : undefined;
+      let rawUrlHost: string | undefined;
+      if (rawUrl) {
         try {
-          targetHost = normalizeHost(new URL(raw.url).hostname);
+          rawUrlHost = normalizeHost(
+            new URL(restoreText(rawUrl, restoreMap)).hostname,
+          );
         } catch {
           // ignore invalid URL when inferring host
         }
       }
-      if (!targetHost && raw.host?.trim()) {
-        targetHost = normalizeHost(raw.host);
+      const rawUrlSeen =
+        rawUrlHost !== undefined && seenHostnames.has(rawUrlHost);
+
+      if (captured?.url) {
+        const mergedUrl =
+          rawUrl && rawUrlSeen
+            ? mergeCapturedNavigateUrl(rawUrl, captured.url)
+            : captured.url;
+        const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
+        let navHost = stepHost;
+        try {
+          navHost = normalizeHost(new URL(normalized).hostname);
+        } catch {
+          // Keep stepHost if URL parsing fails; validator will catch invalid URL
+        }
+        return {
+          step: { action: "navigate", url: normalized, ...optionalPart },
+          host: navHost,
+          url: normalized,
+        };
       }
-      if (!targetHost && captured?.app) {
-        targetHost = normalizeHost(captured.app);
+
+      if (rawUrl && !rawUrlSeen) {
+        return null;
       }
+
+      const targetHost =
+        rawUrlHost ??
+        (raw.host?.trim()
+          ? normalizeHost(raw.host)
+          : captured?.app
+            ? normalizeHost(captured.app)
+            : undefined);
       const matchingHostUrl = targetHost
         ? ctx.indexedSteps.find((s) => {
             if (!s.url) return false;
             if (normalizeHost(s.app) === targetHost) return true;
             try {
-              return normalizeHost(new URL(s.url).hostname) === targetHost;
+              return (
+                normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname) ===
+                targetHost
+              );
             } catch {
               return false;
             }
           })?.url
         : undefined;
-      const fallbackUrl = captured?.url ?? matchingHostUrl;
-      const candidateUrl = raw.url ?? fallbackUrl;
+      const candidateUrl = rawUrl
+        ? mergeCapturedNavigateUrl(rawUrl, matchingHostUrl)
+        : matchingHostUrl;
       if (!candidateUrl) {
         if (raw.host?.trim()) {
           const host = normalizeHost(raw.host);
+          if (!seenHostnames.has(host)) return null;
           return {
             step: { action: "switchTab", host, ...optionalPart },
             host,
@@ -1652,10 +1703,7 @@ function resolveLeafStep(
         }
         return null;
       }
-      const mergedUrl = raw.url
-        ? mergeCapturedNavigateUrl(raw.url, fallbackUrl)
-        : candidateUrl;
-      const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
+      const normalized = normalizeUrlHost(restoreText(candidateUrl, restoreMap));
       let navHost = stepHost;
       try {
         navHost = normalizeHost(new URL(normalized).hostname);
@@ -2196,8 +2244,28 @@ export async function compileWorkflow(
     stats,
   };
 
+  const seenHosts = new Set<string>();
+  const sourceEntries: ReadonlyArray<{ app?: string; url?: string }> =
+    input.events && input.events.length > 0 ? input.events : rawSteps;
+  for (const e of sourceEntries) {
+    if (e.url) {
+      try {
+        seenHosts.add(
+          normalizeHost(new URL(restoreText(e.url, restoreMap)).host),
+        );
+        continue;
+      } catch {
+        // fall back to app if URL is invalid
+      }
+    }
+    if (e.app) {
+      seenHosts.add(normalizeHost(e.app));
+    }
+  }
+
   const validated = validateCompiledWorkflow(candidate, {
     maxSteps: opts?.maxSteps,
+    seenHosts,
   });
   if (!validated.ok) {
     console.log(`[v2/compiler] validation failed: ${validated.error}`);

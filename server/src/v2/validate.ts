@@ -380,7 +380,15 @@ function checkLocatorsTemplates(
   return null;
 }
 
-function checkUrlHost(rawUrl: string, pathLabel: string): string | null {
+function stripPort(host: string): string {
+  return host.replace(/:\d+$/, "");
+}
+
+function checkUrlHost(
+  rawUrl: string,
+  pathLabel: string,
+  seenUrlHosts?: ReadonlySet<string>,
+): string | null {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -393,6 +401,12 @@ function checkUrlHost(rawUrl: string, pathLabel: string): string | null {
   if (parsed.hostname !== normalizeHost(parsed.hostname)) {
     return `Unnormalized host "${parsed.hostname}" at ${pathLabel}`;
   }
+  if (
+    seenUrlHosts !== undefined &&
+    !seenUrlHosts.has(normalizeHost(parsed.host))
+  ) {
+    return `Unseen URL host "${normalizeHost(parsed.host)}" at ${pathLabel}`;
+  }
   return null;
 }
 
@@ -401,6 +415,8 @@ function checkSteps(
   bindings: Set<string>,
   extractFieldsByBind: Map<string, string[]>,
   pathPrefix: string,
+  seenUrlHosts?: ReadonlySet<string>,
+  seenHostnames?: ReadonlySet<string>,
 ): string | null {
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
@@ -437,6 +453,8 @@ function checkSteps(
         loopBindings,
         extractFieldsByBind,
         `${stepPath}.steps`,
+        seenUrlHosts,
+        seenHostnames,
       );
       if (nestedErr) return nestedErr;
       continue;
@@ -449,10 +467,16 @@ function checkSteps(
       if (step.host !== normalizeHost(step.host)) {
         return `Unnormalized switchTab host "${step.host}" at ${stepPath}`;
       }
+      if (
+        seenHostnames !== undefined &&
+        !seenHostnames.has(normalizeHost(step.host))
+      ) {
+        return `Unseen switchTab host "${step.host}" at ${stepPath}`;
+      }
     }
 
     if (step.action === "navigate") {
-      const urlErr = checkUrlHost(step.url, `${stepPath}.url`);
+      const urlErr = checkUrlHost(step.url, `${stepPath}.url`, seenUrlHosts);
       if (urlErr) return urlErr;
       const tmplErr = checkTemplateStrings(step.url, bindings, `${stepPath}.url`);
       if (tmplErr) return tmplErr;
@@ -493,7 +517,10 @@ function checkSteps(
 
 export function validateCompiledWorkflow(
   workflow: CompiledWorkflow,
-  opts?: { maxSteps?: number },
+  opts?: {
+    maxSteps?: number;
+    seenHosts?: ReadonlySet<string> | readonly string[];
+  },
 ): { ok: true; value: CompiledWorkflow } | { ok: false; error: string } {
   const parsed = CompiledWorkflowSchema.safeParse(workflow);
   if (!parsed.success) {
@@ -518,6 +545,19 @@ export function validateCompiledWorkflow(
     return { ok: false, error: leakErr };
   }
 
+  let seenUrlHosts: Set<string> | undefined;
+  let seenHostnames: Set<string> | undefined;
+  if (opts?.seenHosts !== undefined) {
+    seenUrlHosts = new Set<string>();
+    seenHostnames = new Set<string>();
+    for (const rawEntry of opts.seenHosts) {
+      const normalized = normalizeHost(rawEntry);
+      if (!normalized) continue;
+      seenUrlHosts.add(normalized);
+      seenHostnames.add(stripPort(normalized));
+    }
+  }
+
   for (let i = 0; i < data.apps.length; i++) {
     const app = data.apps[i];
     if (app.includes("://") || app.includes("/")) {
@@ -526,10 +566,16 @@ export function validateCompiledWorkflow(
     if (app !== normalizeHost(app)) {
       return { ok: false, error: `Unnormalized host "${app}" at apps[${i}]` };
     }
+    if (
+      seenHostnames !== undefined &&
+      !seenHostnames.has(normalizeHost(app))
+    ) {
+      return { ok: false, error: `Unseen app host "${app}" at apps[${i}]` };
+    }
   }
 
   if (data.startUrl !== undefined) {
-    const urlErr = checkUrlHost(data.startUrl, "startUrl");
+    const urlErr = checkUrlHost(data.startUrl, "startUrl", seenUrlHosts);
     if (urlErr) {
       return { ok: false, error: urlErr };
     }
@@ -547,7 +593,14 @@ export function validateCompiledWorkflow(
     paramNames.add(name);
   }
 
-  const stepErr = checkSteps(data.steps, new Set(paramNames), new Map(), "steps");
+  const stepErr = checkSteps(
+    data.steps,
+    new Set(paramNames),
+    new Map(),
+    "steps",
+    seenUrlHosts,
+    seenHostnames,
+  );
   if (stepErr) {
     return { ok: false, error: stepErr };
   }
