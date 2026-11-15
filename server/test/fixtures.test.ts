@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { EventSchema } from "@gen/shared/schema.ts";
+import { EventSchema, EventsSchema } from "@gen/shared/schema.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -208,6 +208,103 @@ describe("email reply JSONL fixtures", () => {
 
     for (let i = 1; i < parsedSplit.length; i++) {
       expect(parsedSplit[i].ts).toBeGreaterThan(parsedSplit[i - 1].ts);
+    }
+  });
+});
+
+describe("unseen-sheet-loop fixture and sheet.html demo", () => {
+  it("validates unseen-sheet-loop.jsonl against EventsSchema with >= 3 cycles and compact pageSummary", async () => {
+    const rawEvents = await loadFixtureEvents("unseen-sheet-loop.jsonl");
+    const parsedEvents = EventsSchema.parse(rawEvents);
+
+    expect(parsedEvents.length).toBeGreaterThan(0);
+
+    const sessions = new Set(parsedEvents.map((e) => e.session));
+    expect(sessions.size).toBe(1);
+
+    for (const ev of parsedEvents) {
+      expect(ev.v).toBe(1);
+      expect(ev.source).toBe("browser");
+      if (ev.meta && "pageSummary" in ev.meta && ev.meta.pageSummary !== undefined) {
+        const bytes = Buffer.byteLength(JSON.stringify(ev.meta.pageSummary), "utf8");
+        expect(bytes).toBeLessThanOrEqual(4096);
+      }
+    }
+
+    for (let i = 1; i < parsedEvents.length; i++) {
+      expect(parsedEvents[i].ts).toBeGreaterThan(parsedEvents[i - 1].ts);
+    }
+
+    const withPageSummary = parsedEvents.filter(
+      (e) => e.meta && "pageSummary" in e.meta && e.meta.pageSummary !== undefined,
+    );
+    expect(withPageSummary.length).toBeGreaterThan(0);
+
+    const copyEvents = parsedEvents.filter((e) => e.type === "copy");
+    const pasteEvents = parsedEvents.filter(
+      (e) =>
+        e.type === "paste" &&
+        e.target?.locators.some(
+          (l) => l.kind === "testid" && l.value === "client-value-input",
+        ),
+    );
+    const saveClicks = parsedEvents.filter(
+      (e) =>
+        e.type === "click" &&
+        e.target?.locators.some(
+          (l) => l.kind === "testid" && l.value === "save-client-btn",
+        ),
+    );
+    const backClicks = parsedEvents.filter(
+      (e) =>
+        e.type === "click" &&
+        e.target?.locators.some(
+          (l) => l.kind === "testid" && l.value === "back-to-list-btn",
+        ),
+    );
+
+    expect(copyEvents.length).toBeGreaterThanOrEqual(3);
+    expect(pasteEvents.length).toBeGreaterThanOrEqual(3);
+    expect(saveClicks.length).toBeGreaterThanOrEqual(3);
+    expect(backClicks.length).toBeGreaterThanOrEqual(3);
+
+    const copiedValues = copyEvents.map((e) => e.value ?? e.clipboard?.text);
+    const pastedValues = pasteEvents.map((e) => e.value ?? e.clipboard?.text);
+    expect(new Set(copiedValues).size).toBeGreaterThanOrEqual(3);
+    expect(pastedValues).toEqual(copiedValues);
+  });
+
+  it("serves GET /sheet.html from apps/demo with client list, detail view, and sheet table testids", async () => {
+    const staticServerUrl = new URL("../../scripts/lib/static-server.mjs", import.meta.url).href;
+    const { startDemoServer } = (await import(staticServerUrl)) as {
+      startDemoServer: (opts: { dir: string; port: number }) => Promise<{
+        port: number;
+        url: string;
+        close: () => Promise<void>;
+      }>;
+    };
+
+    const demoServer = await startDemoServer({ dir: "apps/demo", port: 0 });
+    try {
+      const response = await fetch(`${demoServer.url}sheet.html`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/html");
+
+      const html = await response.text();
+      for (const testid of [
+        "tab-clients",
+        "tab-sheet",
+        "client-list",
+        "client-detail",
+        "client-value-input",
+        "save-client-btn",
+        "back-to-list-btn",
+        "sheet-table",
+      ]) {
+        expect(html).toContain(`data-testid="${testid}"`);
+      }
+    } finally {
+      await demoServer.close();
     }
   });
 });
