@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  IMPLEMENTOR_SYSTEM_INSTRUCTION,
   buildGroundedEyesSpec,
   buildStartSignature,
   implementForLibrary,
@@ -451,5 +452,56 @@ describe("Stage 4: buildStartSignature", () => {
     expect(eyes.guards.fieldEmptyOnly).toBe(false);
     expect(eyes.targetHints.roles).toEqual([]);
     expect(eyes.targetHints.locators).toEqual([{ kind: "css", value: ".order-id" }]);
+  });
+
+  it("forbids 'browser' in IMPLEMENTOR_SYSTEM_INSTRUCTION and replaces or drops placeholder switchTab.host", async () => {
+    expect(IMPLEMENTOR_SYSTEM_INSTRUCTION).toMatch(/NEVER use "browser"/i);
+
+    // 1. Replaces placeholder host ("browser", "unknown", "local-page") from context.url / context.app
+    for (const placeholder of ["browser", "unknown", "local-page"]) {
+      const replacedFromUrl = await implementSolution("Fill order id on erp", {
+        context: { url: "http://127.0.0.1:4173/erp.html" },
+        generate: async () => ({
+          steps: [
+            { action: "switchTab", host: placeholder },
+            { action: "fill", target: { kind: "testid", value: "erp-id" }, value: "ORD-4" },
+          ],
+        }),
+      });
+      expect(replacedFromUrl.steps[0]).toEqual({ action: "switchTab", host: "127.0.0.1" });
+
+      const replacedFromApp = await implementSolution("Fill order id on erp", {
+        context: { app: "erp.local" },
+        generate: async () => ({
+          steps: [
+            { action: "switchTab", host: placeholder },
+            { action: "fill", target: { kind: "testid", value: "erp-id" }, value: "ORD-4" },
+          ],
+        }),
+      });
+      expect(replacedFromApp.steps[0]).toEqual({ action: "switchTab", host: "erp.local" });
+    }
+
+    // 2. Drops placeholder switchTab when no real host is available in context or step.url
+    const dropped = await implementSolution("Fill order id", {
+      generate: async () => ({
+        steps: [
+          { action: "switchTab", host: "browser" },
+          { action: "fill", target: { kind: "testid", value: "erp-id" }, value: "ORD-4" },
+        ],
+      }),
+    });
+    expect(dropped.steps).toEqual([
+      { action: "fill", target: { kind: "testid", value: "erp-id" }, value: "ORD-4" },
+    ]);
+
+    // 3. Rejects if only placeholder switchTab steps exist and none remain
+    await expect(
+      implementSolution("Switch tab", {
+        generate: async () => ({
+          steps: [{ action: "switchTab", host: "browser" }],
+        }),
+      }),
+    ).rejects.toThrow(/placeholder/i);
   });
 });

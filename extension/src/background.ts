@@ -835,7 +835,12 @@ function urlsMatchForPrecheck(stepUrl: string, openTabUrl: string): boolean {
       return normalizeUrlPath(stepUrl) === normalizeUrlPath(openParsed.pathname);
     }
     const stepParsed = new URL(stepUrl);
-    if (stepParsed.origin !== openParsed.origin) return false;
+    if (
+      stepParsed.protocol !== openParsed.protocol ||
+      normalizeLoopbackHost(stepParsed.host) !== normalizeLoopbackHost(openParsed.host)
+    ) {
+      return false;
+    }
     if (normalizeUrlPath(stepParsed.pathname) !== normalizeUrlPath(openParsed.pathname)) {
       return false;
     }
@@ -1230,7 +1235,16 @@ export async function runActionScript(
   }
 }
 
-function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
+export function normalizeLoopbackHost(host: string): string {
+  const trimmed = host.trim().toLowerCase();
+  if (trimmed === "127.0.0.1") return "localhost";
+  if (trimmed.startsWith("127.0.0.1:")) {
+    return `localhost${trimmed.slice("127.0.0.1".length)}`;
+  }
+  return trimmed;
+}
+
+function isExactHostMatch(url: string | undefined, targetHost: string): boolean {
   if (!url) return false;
   try {
     const parsed = new URL(url);
@@ -1242,7 +1256,20 @@ function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
   }
 }
 
-function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string): number {
+export function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const want = normalizeLoopbackHost(targetHost);
+    if (!want) return false;
+    const got = normalizeLoopbackHost(want.includes(":") ? parsed.host : parsed.hostname);
+    return got === want;
+  } catch {
+    return false;
+  }
+}
+
+export function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string): number {
   if (!tabUrl) return 0;
   if (tabUrl === targetUrl) return 4;
   try {
@@ -1255,7 +1282,7 @@ function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string): number
     }
     const targetParsed = new URL(targetUrl);
     if (tabParsed.href.replace(/#.*$/, "") === targetParsed.href.replace(/#.*$/, "")) return 4;
-    if (tabParsed.host.toLowerCase() !== targetParsed.host.toLowerCase()) return 0;
+    if (normalizeLoopbackHost(tabParsed.host) !== normalizeLoopbackHost(targetParsed.host)) return 0;
     if (
       normalizeUrlPath(tabParsed.pathname) === normalizeUrlPath(targetParsed.pathname) &&
       tabParsed.search === targetParsed.search
@@ -1494,6 +1521,10 @@ async function runStepsInternal(
           (t) => t.id !== undefined && tabMatchesHost(t.url, targetHost),
         );
         matches.sort((a, b) => {
+          const exactDiff =
+            Number(isExactHostMatch(b.url, targetHost)) -
+            Number(isExactHostMatch(a.url, targetHost));
+          if (exactDiff !== 0) return exactDiff;
           const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
           if (accessDiff !== 0) return accessDiff;
           if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;

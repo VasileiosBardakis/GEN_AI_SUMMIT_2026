@@ -94,6 +94,7 @@ export type CompiledLeafStep =
   | {
       action: "switchTab";
       host: string;
+      url?: string;
       optional?: boolean;
     }
   | {
@@ -215,6 +216,7 @@ const CompiledLeafStepSchema: z.ZodType<CompiledLeafStep> = z.discriminatedUnion
     z.object({
       action: z.literal("switchTab"),
       host: nonEmptyString,
+      url: z.string().regex(/^https?:\/\//i, "expected http(s) URL").optional(),
       optional: z.boolean().optional(),
     }),
     z.object({
@@ -274,6 +276,14 @@ export const CompiledWorkflowSchema: z.ZodType<CompiledWorkflow> = z.object({
   steps: z.array(CompiledStepSchema).min(1),
   stats: CompiledWorkflowStatsSchema,
 });
+
+const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
+
+export function isPlaceholderHost(host: string): boolean {
+  const trimmed = host.trim().toLowerCase();
+  const hostname = trimmed.split(":")[0] ?? "";
+  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
+}
 
 export function normalizeHost(host: string): string {
   const trimmed = host.trim().toLowerCase();
@@ -444,8 +454,17 @@ function checkSteps(
       if (step.host.includes("://") || step.host.includes("/")) {
         return `switchTab.host must be a hostname without scheme/path at ${stepPath}`;
       }
+      if (isPlaceholderHost(step.host)) {
+        return `Invalid placeholder switchTab host "${step.host}" at ${stepPath}`;
+      }
       if (step.host !== normalizeHost(step.host)) {
         return `Unnormalized switchTab host "${step.host}" at ${stepPath}`;
+      }
+      if (step.url !== undefined) {
+        const urlErr = checkUrlHost(step.url, `${stepPath}.url`);
+        if (urlErr) return urlErr;
+        const tmplErr = checkTemplateStrings(step.url, bindings, `${stepPath}.url`);
+        if (tmplErr) return tmplErr;
       }
     }
 

@@ -32,6 +32,7 @@ export type ImplementorGenerator = (input: ImplementorGeneratorInput) => Promise
 
 export type ImplementorOptions = {
   name?: string;
+  context?: ImplementContext;
   generate?: ImplementorGenerator;
   gemini?: GeminiClientOptions;
 };
@@ -78,7 +79,7 @@ Available actions:
 - forEach: { action: "forEach", items, steps } -> Loops over an extractList binding. Set items to the plain binding key (e.g. "rows", NOT "{{rows}}") and reference row fields as "{{fieldName}}".
 - navigate: { action: "navigate", url } -> Full http:// or https:// URL only.
 - wait: { action: "wait", ms } -> Short delay in ms only when explicitly needed.
-- switchTab: { action: "switchTab", host } -> If the solution reads values on one site and fills them on another, use readText on the first site, then {action:'switchTab', host:'<dest host>'}, then fill with {{binding}}.
+- switchTab: { action: "switchTab", host } -> If the solution reads values on one site and fills them on another, use readText on the first site, then {action:'switchTab', host:'<dest host>'}, then fill with {{binding}}. NEVER use "browser", "unknown", or "local-page" as switchTab.host; only emit switchTab with a real hostname, and omit switchTab if no real hostname is known.
 
 Locator rules (plain-text grounding without DOM snapshot):
 - "aria": Prefer when a visible field <label>, aria-label, or placeholder is known (e.g. 'Address line 1', 'From these owners', or 'combobox[name="Nationality"]'). Matches <label>, aria-label, aria-labelledby, and placeholder.
@@ -120,6 +121,81 @@ function createGeminiGenerator(geminiOpts?: GeminiClientOptions): ImplementorGen
   };
 }
 
+const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
+
+function isPlaceholderHost(host?: string): boolean {
+  if (!host) return true;
+  const trimmed = host.trim().toLowerCase();
+  const hostname = trimmed.split(":")[0] ?? "";
+  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
+}
+
+function extractHostFromUrl(rawUrl?: string): string | null {
+  if (!rawUrl) return null;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    const host = parsed.hostname.toLowerCase();
+    return isPlaceholderHost(host) ? null : host;
+  } catch {
+    return null;
+  }
+}
+
+function resolveContextHost(context?: ImplementContext): string | null {
+  const fromUrl = extractHostFromUrl(context?.url);
+  if (fromUrl) return fromUrl;
+  if (context?.app) {
+    const fromApp = normalizeAppHost(context.app);
+    if (fromApp && !isPlaceholderHost(fromApp)) return fromApp;
+  }
+  return null;
+}
+
+function normalizeScriptSteps(steps: Step[], context?: ImplementContext): Step[] {
+  const fallbackHost = resolveContextHost(context);
+  const out: Step[] = [];
+
+  for (const step of steps) {
+    if (step.action === "switchTab") {
+      if (!isPlaceholderHost(step.host)) {
+        out.push(step);
+        continue;
+      }
+      const replacementHost = extractHostFromUrl(step.url) ?? fallbackHost;
+      if (replacementHost) {
+        out.push({ ...step, host: replacementHost });
+      }
+      continue;
+    }
+
+    if (step.action === "forEach") {
+      const nested = normalizeScriptSteps(step.steps, context);
+      if (nested.length > 0) {
+        out.push({ ...step, steps: nested });
+      }
+      continue;
+    }
+
+    out.push(step);
+  }
+
+  return out;
+}
+
+export function normalizeActionScript(
+  script: ActionScript,
+  context?: ImplementContext,
+): ActionScript {
+  const normalizedSteps = normalizeScriptSteps(script.steps, context);
+  if (normalizedSteps.length === 0) {
+    throw new Error(
+      'ActionScript validation failed: switchTab.host cannot be a placeholder ("browser", "unknown", "local-page")',
+    );
+  }
+  return { ...script, steps: normalizedSteps };
+}
+
 export async function implementSolution(
   solutionText: string,
   opts: ImplementorOptions = {},
@@ -135,7 +211,7 @@ export async function implementSolution(
     responseSchema: ACTION_SCRIPT_RESPONSE_SCHEMA,
   });
 
-  const script = parseActionScript(unwrapJson(raw));
+  const script = normalizeActionScript(parseActionScript(unwrapJson(raw)), opts.context);
   if (opts.name?.trim()) {
     return { ...script, name: opts.name.trim() };
   }
@@ -215,15 +291,17 @@ function cleanHintTokens(rawList: string[], limit = 8): string[] {
 function normalizeAppHost(raw: string): string | null {
   const trimmed = raw.trim().toLowerCase();
   if (!trimmed || trimmed === "*" || trimmed === "any" || trimmed === "all") return null;
+  if (isPlaceholderHost(trimmed)) return null;
   if (/^https?:\/\//i.test(trimmed)) {
     try {
-      return new URL(trimmed).hostname.toLowerCase() || null;
+      const hostname = new URL(trimmed).hostname.toLowerCase();
+      return !hostname || isPlaceholderHost(hostname) ? null : hostname;
     } catch {
       return null;
     }
   }
   const host = trimmed.split("/")[0]?.split(":")[0] ?? "";
-  if (!host || host === "*") return null;
+  if (!host || host === "*" || isPlaceholderHost(host)) return null;
   return host;
 }
 
@@ -697,7 +775,10 @@ export function buildLibraryEntryFromScript(input: {
   const cleanSolution = input.solution.trim();
   const name =
     input.name?.trim() || input.script.name?.trim() || cleanSolution.slice(0, 48) || "Automation";
-  const script: ActionScript = input.script.name ? input.script : { ...input.script, name };
+  const normalizedScript = normalizeActionScript(input.script, input.context);
+  const script: ActionScript = normalizedScript.name
+    ? normalizedScript
+    : { ...normalizedScript, name };
   const kind = inferKind(script, input.kind);
   const eyes = buildGroundedEyesSpec({
     rawEyes: input.eyes,
