@@ -121,7 +121,8 @@ function buildCssSelector(el: HTMLElement): string {
       .slice(0, 2);
     if (classes.length > 0) {
       part += "." + classes.map(cssEscapeIdent).join(".");
-    } else if (curr.parentElement) {
+    }
+    if (curr.parentElement) {
       const siblings = Array.from(curr.parentElement.children).filter(
         (s) => s.tagName === curr!.tagName
       );

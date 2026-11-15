@@ -57,7 +57,10 @@ export type GeminiSdk = {
     generateContent(params: {
       model: string;
       contents: string;
-      config?: { responseMimeType?: string };
+      config?: {
+        responseMimeType?: string;
+        thinkingConfig?: { thinkingBudget?: number };
+      };
     }): Promise<{ text?: string }>;
   };
 };
@@ -68,6 +71,7 @@ export type GeminiClientOptions = {
   location?: string;
   sdk?: GeminiSdk;
   apiKey?: string;
+  thinkingBudget?: number;
 };
 
 export type GeminiClient = {
@@ -122,10 +126,17 @@ export function createGeminiClient(options?: GeminiClientOptions): GeminiClient 
     async generateJson<T>(prompt: string, schema: ZodLikeSchema<T>): Promise<T> {
       const startedAt = Date.now();
       try {
+        const config: {
+          responseMimeType?: string;
+          thinkingConfig?: { thinkingBudget?: number };
+        } = { responseMimeType: "application/json" };
+        if (options?.thinkingBudget !== undefined) {
+          config.thinkingConfig = { thinkingBudget: options.thinkingBudget };
+        }
         const response = await sdk.models.generateContent({
           model,
           contents: prompt,
-          config: { responseMimeType: "application/json" },
+          config,
         });
         if (!response.text || response.text.trim().length === 0) {
           throw new Error("Gemini returned an empty JSON response.");

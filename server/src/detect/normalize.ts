@@ -9,9 +9,9 @@ const SHORTCUT_RE =
 
 const DEFAULT_RANKS: Record<Locator["kind"], number> = {
   testid: 0,
-  aria: 1,
-  text: 2,
-  css: 3,
+  css: 1,
+  aria: 2,
+  text: 3,
   uia: 4,
 };
 
@@ -96,6 +96,7 @@ function targetKey(target?: Event["target"]): string {
 export function normalize(events: Event[]): Step[] {
   const steps: Step[] = [];
   let lastTargetKey = "";
+  const lastFillByTarget = new Map<string, string>();
 
   for (const ev of events) {
     if (!INCLUDED_TYPES.has(ev.type)) continue;
@@ -107,7 +108,12 @@ export function normalize(events: Event[]): Step[] {
         const key = targetKey(ev.target);
         const prev = steps[steps.length - 1];
 
-        if (prev && prev.action === "fill" && lastTargetKey === key) {
+        if (
+          prev &&
+          prev.action === "fill" &&
+          lastTargetKey !== "" &&
+          lastTargetKey === key
+        ) {
           prev.value = masked;
         } else {
           steps.push({
@@ -115,6 +121,9 @@ export function normalize(events: Event[]): Step[] {
             ...(target ? { target } : {}),
             value: masked,
           });
+        }
+        if (key !== "") {
+          lastFillByTarget.set(key, masked);
         }
         lastTargetKey = key;
         break;
@@ -129,9 +138,14 @@ export function normalize(events: Event[]): Step[] {
         if (
           prev &&
           prev.action === "fill" &&
+          lastTargetKey !== "" &&
           lastTargetKey === key &&
           prev.value === masked
         ) {
+          break;
+        }
+
+        if (key !== "" && lastFillByTarget.get(key) === masked) {
           break;
         }
 
@@ -140,6 +154,9 @@ export function normalize(events: Event[]): Step[] {
           ...(target ? { target } : {}),
           value: masked,
         });
+        if (key !== "") {
+          lastFillByTarget.set(key, masked);
+        }
         lastTargetKey = key;
         break;
       }
@@ -152,6 +169,9 @@ export function normalize(events: Event[]): Step[] {
           ...(target ? { target } : {}),
         });
         lastTargetKey = targetKey(ev.target);
+        if (ev.type === "submit") {
+          lastFillByTarget.clear();
+        }
         break;
       }
 
@@ -174,6 +194,7 @@ export function normalize(events: Event[]): Step[] {
           ...(ev.url ? { value: maskPii(ev.url) } : {}),
         });
         lastTargetKey = "";
+        lastFillByTarget.clear();
         break;
       }
 
