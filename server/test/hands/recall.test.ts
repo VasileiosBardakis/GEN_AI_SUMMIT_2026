@@ -506,6 +506,78 @@ describe("createLibraryRecallMatcher", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("recalls a copy -> switchTab -> paste Portal->ERP skill on move 1 even when requireClipboard is true", () => {
+    const matcher = createLibraryRecallMatcher();
+    const baseEntry = buildLibraryEntryFromScript({
+      name: "Portal invoice to ERP",
+      solution: "Copy Invoice ID from portal, switch tab to ERP, and paste into Invoice ID.",
+      script: {
+        name: "Portal invoice to ERP",
+        steps: [
+          {
+            action: "readText",
+            target: { kind: "testid", value: "portal-invoice-id" },
+            bind: "invoiceId",
+          },
+          { action: "switchTab", host: "erp.local" },
+          {
+            action: "fill",
+            target: { kind: "testid", value: "erp-invoice-id" },
+            value: "{{invoiceId}}",
+          },
+        ],
+      },
+      context: {
+        app: "portal.local",
+        url: "http://portal.local:5173/portal",
+        title: "Supplier Portal",
+        targetLabel: "Invoice ID",
+      },
+      status: "active",
+      now: 1_000,
+    });
+
+    const portalToErpWithClipboardGuard: LibraryEntry = {
+      ...baseEntry,
+      eyes: {
+        ...baseEntry.eyes,
+        guards: {
+          ...baseEntry.eyes.guards,
+          requireClipboard: true,
+        },
+      },
+    };
+
+    const copyEvt = makeEvent({
+      id: "evt_portal_copy_clip_guard",
+      ts: 5_000,
+      app: "portal.local",
+      url: "http://portal.local:5173/portal",
+      window: "Supplier Portal",
+      type: "copy",
+      value: "INV-2026-001",
+      target: {
+        locators: [
+          { kind: "testid", value: "portal-invoice-id" },
+          { kind: "css", value: 'span[data-testid="portal-invoice-id"]' },
+        ],
+        tag: "span",
+        label: "Invoice ID",
+      },
+    });
+
+    // Even with requireClipboard: true and a timestamp older than CLIPBOARD_WINDOW_MS,
+    // a move-1 copy event must still recall the copy -> switchTab -> paste workflow.
+    const match = matcher.matchEventsWithEvent(
+      [copyEvt],
+      [portalToErpWithClipboardGuard],
+      200_000,
+    );
+    expect(match?.entry.id).toBe(portalToErpWithClipboardGuard.id);
+    expect(match?.event.id).toBe("evt_portal_copy_clip_guard");
+    expect(match?.borderline).toBe(false);
+  });
+
   it("falls back to semantic role/label/text matching when primary Locator[] drift and ranks Locator[] matches first", () => {
     const matcher = createLibraryRecallMatcher();
     const driftedEntry = buildLibraryEntryFromScript({

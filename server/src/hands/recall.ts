@@ -229,7 +229,7 @@ function matchEntryToEvent(
   const startAction = buildStartSignature(entry.script).action;
   if (
     evt.type === "copy" &&
-    (eyes.guards.fieldEmptyOnly || eyes.guards.requireClipboard || startAction !== "copy")
+    (eyes.guards.fieldEmptyOnly || startAction !== "copy")
   ) {
     return NO_MATCH;
   }
@@ -248,7 +248,7 @@ function matchEntryToEvent(
     }
   }
 
-  if (eyes.guards.requireClipboard) {
+  if (eyes.guards.requireClipboard && evt.type !== "copy") {
     const hasEventClipboard = Boolean(
       evt.clipboard?.text || evt.clipboard?.textHash || evt.clipboard?.fromApp,
     );
