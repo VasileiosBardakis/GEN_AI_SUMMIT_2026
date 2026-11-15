@@ -1569,4 +1569,79 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       decision: "dismissed",
     });
   });
+
+  it("attaches flow start url and last workflow tabId to decide, and start url to run (ignoring trailing unrelated clicks)", async () => {
+    const { client: unseenGemini } = await getUnseenGeminiClient();
+    const { baseUrl } = await startV2Server({
+      gemini: unseenGemini,
+      subDir: "decide-tab-and-starturl",
+    });
+
+    const events = await loadFixtureEvents("unseen-two-repeats.jsonl");
+    const lastFlowIdx = events.length - 1;
+    const eventsWithTabs: Event[] = [
+      ...events.map((ev, idx) => ({
+        ...ev,
+        meta: {
+          ...(ev.meta ?? {}),
+          tabId: idx === lastFlowIdx || ev.app === "erp-stock.local" ? 502 : 501,
+        },
+      })),
+      {
+        v: 1,
+        id: "f9000000-0000-4000-8000-000000000099",
+        ts: events[events.length - 1]!.ts + 500,
+        session: events[0]!.session,
+        source: "browser",
+        app: "mail.google.com",
+        url: "https://mail.google.com/mail/u/0/#inbox",
+        type: "click",
+        target: {
+          tag: "div",
+          locators: [{ kind: "css", value: "div.email-row" }],
+        },
+        meta: { tabId: 999 },
+      },
+    ];
+
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(eventsWithTabs),
+    });
+
+    const pre = await pollHandsNext(baseUrl);
+    expect(pre.cmd?.kind).toBe("precheck");
+    await postHandsResult(baseUrl, {
+      id: pre.cmd!.id,
+      ok: true,
+      results: [{ index: 0, action: "readText", ok: true, matchCount: 1, unique: true }],
+    });
+
+    const dec = await pollHandsNext(baseUrl);
+    expect(dec.status).toBe(200);
+    expect(dec.cmd?.kind).toBe("decide");
+    const decExtra = dec.cmd as unknown as { url?: string; tabId?: number };
+    expect(decExtra.tabId).toBe(502);
+    expect(decExtra.url).toContain("warehouse.local");
+
+    await postHandsResult(baseUrl, {
+      id: dec.cmd!.id,
+      ok: true,
+      decision: "approved",
+    });
+
+    const run = await pollHandsNext(baseUrl);
+    expect(run.status).toBe(200);
+    const runExtra = run.cmd as unknown as { url?: string; script?: { steps: Array<{ action: string; url?: string }> } };
+    expect(runExtra.url).toContain("warehouse.local");
+    expect(runExtra.script?.steps[0]?.action).toBe("switchTab");
+    expect(runExtra.script?.steps[0]?.url).toContain("warehouse.local");
+
+    await postHandsResult(baseUrl, {
+      id: run.cmd!.id,
+      ok: true,
+      results: [{ ok: true }],
+    });
+  }, TEST_TIMEOUT_MS);
 });

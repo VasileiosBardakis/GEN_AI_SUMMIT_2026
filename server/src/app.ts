@@ -102,7 +102,14 @@ export type CreateServerOptions = {
 };
 
 type HandsCommand =
-  | { id: string; kind?: "run"; script: ActionScript; paramValues?: Record<string, string> }
+  | {
+      id: string;
+      kind?: "run";
+      script: ActionScript;
+      paramValues?: Record<string, string>;
+      url?: string;
+      tabId?: number;
+    }
   | {
       id: string;
       kind: "decide";
@@ -112,6 +119,8 @@ type HandsCommand =
       primaryLabel?: string;
       isRecall?: boolean;
       entryId?: string;
+      url?: string;
+      tabId?: number;
     }
   | {
       id: string;
@@ -293,6 +302,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
     primaryLabel?: string;
     isRecall?: boolean;
     entryId?: string;
+    url?: string;
+    tabId?: number;
     timeoutMs?: number;
   }): Promise<{ id: string; outcome: HandsOutcome }> {
     const id = input.id ?? crypto.randomUUID();
@@ -310,6 +321,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
         ...(input.primaryLabel ? { primaryLabel: input.primaryLabel } : {}),
         ...(input.isRecall ? { isRecall: true } : {}),
         ...(input.entryId ? { entryId: input.entryId } : {}),
+        ...(input.url ? { url: input.url } : {}),
+        ...(input.tabId !== undefined ? { tabId: input.tabId } : {}),
       },
       timeoutMs,
       "Timed out waiting for user decision",
@@ -329,6 +342,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
         entry.script.runMode === "save_only"
           ? { ...entry.script, runMode: "run_remaining" }
           : entry.script;
+      const matchedTabId =
+        typeof matchedEvent?.meta?.tabId === "number" ? matchedEvent.meta.tabId : undefined;
+      const matchedUrl = typeof matchedEvent?.url === "string" ? matchedEvent.url : undefined;
       const { outcome } = await requestDecision({
         id: commandId,
         name: entry.name,
@@ -336,6 +352,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
         script: recallDecideScript,
         isRecall: true,
         entryId: entry.id,
+        ...(matchedUrl ? { url: matchedUrl } : {}),
+        ...(matchedTabId !== undefined ? { tabId: matchedTabId } : {}),
       });
       if (
         !outcome.ok &&
@@ -370,6 +388,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
             id: runId,
             script: scriptToRun,
             ...(outcome.params ? { paramValues: outcome.params } : {}),
+            ...(entry.kind === "workflow" && matchedUrl ? { url: matchedUrl } : {}),
+            ...(matchedTabId !== undefined ? { tabId: matchedTabId } : {}),
           },
           30000,
           "Timed out waiting for extension to execute script",
@@ -469,7 +489,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
               script.runMode === "run_remaining" || entry.kind === "snippet",
           };
         },
-        requestDecision: (name, solution, script, primaryLabel) =>
+        requestDecision: (name, solution, script, primaryLabel, meta) =>
           awaitHands(
             {
               id: crypto.randomUUID(),
@@ -478,6 +498,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
               solution,
               script,
               ...(primaryLabel ? { primaryLabel } : {}),
+              ...(meta?.startUrl ? { url: meta.startUrl } : {}),
+              ...(meta?.tabId !== undefined ? { tabId: meta.tabId } : {}),
             },
             60000,
           ),
@@ -490,12 +512,14 @@ export function createServer(opts: CreateServerOptions): http.Server {
                   : { gemini: opts.tipGemini, exclude },
               )
           : undefined,
-        runScript: (script, paramValues) =>
+        runScript: (script, paramValues, meta) =>
           awaitHands(
             {
               id: crypto.randomUUID(),
               script,
               ...(paramValues ? { paramValues } : {}),
+              ...(meta?.startUrl ? { url: meta.startUrl } : {}),
+              ...(meta?.tabId !== undefined ? { tabId: meta.tabId } : {}),
             },
             30000,
           ),

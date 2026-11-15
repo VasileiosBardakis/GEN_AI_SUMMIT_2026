@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { Event, Finding, Verdict } from "@gen/shared";
+import { hostnameFromUrl, resolveEventHost } from "./common/host.ts";
 import { normalizeText, primaryTargetKey } from "./common/target.ts";
 import {
   buildLibraryEntryFromScript,
@@ -77,16 +78,23 @@ export type ProposerReportResult = {
   scripts: ScriptMap;
 };
 
+export type ProposerDecisionMeta = {
+  startUrl?: string;
+  tabId?: number;
+};
+
 export type ProposerDeps = {
   requestDecision: (
     name: string,
     solution: string,
     script: ActionScript,
     primaryLabel?: string,
+    meta?: ProposerDecisionMeta,
   ) => Promise<HandsOutcome>;
   runScript: (
     script: ActionScript,
     params?: Record<string, string>,
+    meta?: ProposerDecisionMeta,
   ) => Promise<HandsOutcome>;
   debounceMs?: number;
   log?: (line: string) => void;
@@ -253,6 +261,62 @@ function isPrecheckPassed(outcome: PrecheckOutcome | HandsOutcome): boolean {
   return false;
 }
 
+const MEANINGFUL_EVENT_TYPES = new Set<Event["type"]>([
+  "click",
+  "dblclick",
+  "input",
+  "change",
+  "paste",
+  "copy",
+  "cut",
+  "submit",
+  "select",
+  "key",
+  "keydown",
+  "drop",
+  "contextmenu",
+]);
+
+function findLastMeaningfulEventMeta(
+  events: readonly Event[],
+  compiled?: Pick<CompiledWorkflow, "apps" | "startUrl">,
+): { tabId?: number; url?: string } {
+  const flowHosts = new Set<string>();
+  if (compiled) {
+    for (const app of compiled.apps) {
+      const normalized = normalizeHost(app);
+      if (normalized) flowHosts.add(normalized);
+    }
+    const startHost = hostnameFromUrl(compiled.startUrl);
+    if (startHost) flowHosts.add(startHost);
+  }
+
+  let fallback: { tabId?: number; url?: string } | undefined;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i];
+    if (!ev) continue;
+    const isMeaningful =
+      ev.type === "focus" ? Boolean(ev.target) : MEANINGFUL_EVENT_TYPES.has(ev.type);
+    if (!isMeaningful) continue;
+    const tabId = typeof ev.meta?.tabId === "number" ? ev.meta.tabId : undefined;
+    const url = typeof ev.url === "string" ? ev.url : undefined;
+    if (tabId === undefined && !url) continue;
+
+    if (flowHosts.size > 0) {
+      const evHost = resolveEventHost(ev, { preferUrl: true });
+      if (evHost && flowHosts.has(normalizeHost(evHost))) {
+        if (tabId !== undefined) return { tabId, ...(url ? { url } : {}) };
+        if (!fallback) fallback = { ...(url ? { url } : {}) };
+      }
+      continue;
+    }
+
+    if (tabId !== undefined) return { tabId, ...(url ? { url } : {}) };
+    if (!fallback) fallback = { ...(url ? { url } : {}) };
+  }
+  return fallback ?? {};
+}
+
 function extractSiteHost(
   compiled: CompiledWorkflow,
   script: ActionScript,
@@ -339,6 +403,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
     finding: Finding,
     script: ActionScript,
     workflow: CompiledWorkflow,
+    decisionMeta?: ProposerDecisionMeta,
   ): Promise<void> {
     const name = finding.title.trim() || script.name?.trim() || "Proposed automation";
     const solution = finding.why.trim() || name;
@@ -353,7 +418,13 @@ export function createProposer(deps: ProposerDeps): Proposer {
           : script;
       let outcome: HandsOutcome;
       try {
-        outcome = await deps.requestDecision(name, solution, decideScript);
+        outcome = await deps.requestDecision(
+          name,
+          solution,
+          decideScript,
+          undefined,
+          decisionMeta,
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         safeLog(`[propose:v2] ${name} -> error: ${message}`);
@@ -408,7 +479,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
     }
 
     try {
-      const runOutcome = await deps.runScript(script, runParams);
+      const runOutcome = await deps.runScript(script, runParams, decisionMeta);
       safeLog(`[propose:v2] ${name} -> ${runOutcome.ok ? "run ok" : "run failed"}`);
       emitStageLog({ stage: "run", session: sessionId, ok: runOutcome.ok, name });
     } catch {
@@ -452,11 +523,18 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
     flowTipPending = true;
     try {
+      const tipEventMeta = findLastMeaningfulEventMeta(events);
       await deps.requestDecision(
         name,
         suggestion.tip.trim(),
         { name, steps: [{ action: "wait", ms: 0 }] },
         "Got it",
+        tipEventMeta.tabId !== undefined || tipEventMeta.url
+          ? {
+              ...(tipEventMeta.url ? { startUrl: tipEventMeta.url } : {}),
+              ...(tipEventMeta.tabId !== undefined ? { tabId: tipEventMeta.tabId } : {}),
+            }
+          : undefined,
       );
     } catch {
       // Never let tip delivery affect workflow proposals
@@ -757,7 +835,17 @@ export function createProposer(deps: ProposerDeps): Proposer {
       lastSitePopupAt.set(site, decidedAt);
     }
 
-    await proposeV2Finding(sessionId, site, finding, script, compiled);
+    const eventMeta = findLastMeaningfulEventMeta(events, compiled);
+    const startUrl = compiled.startUrl ?? eventMeta.url;
+    const decisionMeta: ProposerDecisionMeta | undefined =
+      startUrl || eventMeta.tabId !== undefined
+        ? {
+            ...(startUrl ? { startUrl } : {}),
+            ...(eventMeta.tabId !== undefined ? { tabId: eventMeta.tabId } : {}),
+          }
+        : undefined;
+
+    await proposeV2Finding(sessionId, site, finding, script, compiled, decisionMeta);
   }
 
   async function processSession(sessionId: string): Promise<void> {

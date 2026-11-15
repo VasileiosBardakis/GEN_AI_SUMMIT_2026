@@ -160,6 +160,7 @@ interface ChromeApi {
 
 let lastClipboard: ClipboardState | null = null;
 let lastActiveTab: { tabId: number; app: string; url?: string; title?: string } | null = null;
+let lastMeaningfulTab: { tabId: number; app: string; url?: string; ts: number } | null = null;
 let lastApprovedDecideTabId: number | undefined;
 const lastFieldFrameByTab = new Map<number, number>();
 const eventQueue: Event[] = [];
@@ -177,6 +178,27 @@ const COMMIT_EVENT_TYPES = new Set<Event["type"]>([
   "submit",
   "tab_switch",
 ]);
+
+const MEANINGFUL_EVENT_TYPES = new Set<Event["type"]>([
+  "click",
+  "dblclick",
+  "input",
+  "change",
+  "paste",
+  "copy",
+  "cut",
+  "submit",
+  "select",
+  "key",
+  "keydown",
+  "drop",
+  "contextmenu",
+]);
+
+function isMeaningfulEvent(evt: Event): boolean {
+  if (evt.type === "focus") return Boolean(evt.target);
+  return MEANINGFUL_EVENT_TYPES.has(evt.type);
+}
 
 function uuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -211,6 +233,20 @@ export function recordEvent(evt: Event): void {
   totalEvents++;
   totalBytes += serialized.length + 1;
   countsByType[evt.type] = (countsByType[evt.type] || 0) + 1;
+
+  const evtTabId = typeof evt.meta?.tabId === "number" ? evt.meta.tabId : undefined;
+  if (
+    evtTabId !== undefined &&
+    isMeaningfulEvent(evt) &&
+    (!evt.url || isRunnablePageUrl(evt.url))
+  ) {
+    lastMeaningfulTab = {
+      tabId: evtTabId,
+      app: evt.app,
+      url: evt.url,
+      ts: evt.ts,
+    };
+  }
 
   recentEvents.push(evt);
   if (recentEvents.length > 100) recentEvents.shift();
@@ -426,11 +462,12 @@ async function runOptimizationOnTab(
   }
 
   if (item.script) {
-    if (tabId === undefined) {
+    const scriptToRun = withFlowStartSwitch(item.script);
+    if (tabId === undefined && !scriptStartsWithTabOrNav(scriptToRun.steps)) {
       return { ok: false, appliedToPage: false, note: "Open a matching page to run this flow" };
     }
     try {
-      await runActionScript(tabId, item.script);
+      await runActionScript(tabId ?? -1, scriptToRun);
       return { ok: true, appliedToPage: true, note: "Completed on current page" };
     } catch {
       return { ok: false, appliedToPage: false, note: "Open a matching page to run this flow" };
@@ -453,11 +490,12 @@ export function handleRuntimeMessage(
       recordLocalPiiEntries(msg.localPii);
     }
     const tabId = sender.tab?.id;
+    const eventUrl = msg.event.url ?? sender.tab?.url;
     if (tabId !== undefined) {
       lastActiveTab = {
         tabId,
         app: msg.event.app,
-        url: msg.event.url,
+        url: eventUrl,
         title: msg.event.window,
       };
     }
@@ -470,6 +508,7 @@ export function handleRuntimeMessage(
         : undefined;
     const stampedEvent: Event = {
       ...msg.event,
+      ...(eventUrl && !msg.event.url ? { url: eventUrl } : {}),
       session: BROWSER_SESSION_ID,
       ...(stampedMeta ? { meta: stampedMeta } : {}),
     };
@@ -633,11 +672,13 @@ export function handleRuntimeMessage(
     return false;
   }
   if (msg?.kind === "HANDS_RUN_SCRIPT" && msg.script) {
-    const targetScript = msg.script;
+    const targetScript = withFlowStartSwitch(msg.script);
     void resolveActiveTabId(sender.tab)
       .then((tabId) => {
-        if (tabId === undefined) throw new Error("No active tab");
-        return runActionScript(tabId, targetScript);
+        if (tabId === undefined && !scriptStartsWithTabOrNav(targetScript.steps)) {
+          throw new Error("No active tab");
+        }
+        return runActionScript(tabId ?? -1, targetScript);
       })
       .then((results) => sendResponse({ ok: true, results }))
       .catch((error: unknown) =>
@@ -994,12 +1035,285 @@ export interface HandsCommand {
   script?: V2ActionScript;
   steps?: PrecheckStepInput[];
   url?: string;
+  tabId?: number;
   pauseBeforeSubmit?: boolean;
   runMode?: "run" | "run_remaining" | "save_only";
   params?: ScriptParam[] | Record<string, string>;
   paramValues?: Record<string, string>;
   primaryLabel?: string;
   pauseNotice?: string;
+}
+
+type FlowTabTarget = { url?: string; host?: string };
+
+function unwrapLeadingTabOrNav(
+  steps: V2Step[],
+): { step?: Extract<V2Step, { action: "switchTab" | "navigate" }>; inForEach: boolean } {
+  for (const step of steps) {
+    if (step.action === "wait") continue;
+    if (step.action === "switchTab" || step.action === "navigate") {
+      return { step, inForEach: false };
+    }
+    if (step.action === "forEach") {
+      const inner = unwrapLeadingTabOrNav(step.steps);
+      if (inner.step) return { step: inner.step, inForEach: true };
+    }
+    return { inForEach: false };
+  }
+  return { inForEach: false };
+}
+
+function scriptStartsWithTabOrNav(steps: V2Step[]): boolean {
+  return Boolean(unwrapLeadingTabOrNav(steps).step);
+}
+
+function collectScriptTabTargets(steps: V2Step[]): FlowTabTarget[] {
+  const targets: FlowTabTarget[] = [];
+  const walk = (list: V2Step[]): void => {
+    for (const step of list) {
+      if (step.action === "switchTab") {
+        const host = (step.url ? tryHostFromUrl(step.url) : undefined) ?? step.host;
+        if (step.url || host) {
+          targets.push({ ...(step.url ? { url: step.url } : {}), ...(host ? { host } : {}) });
+        }
+      } else if (step.action === "navigate") {
+        const host = tryHostFromUrl(step.url);
+        targets.push({ url: step.url, ...(host ? { host } : {}) });
+      } else if (step.action === "forEach") {
+        walk(step.steps);
+      }
+    }
+  };
+  walk(steps);
+  return targets;
+}
+
+function extractFlowStartTarget(cmdUrl?: string, steps: V2Step[] = []): FlowTabTarget {
+  const leading = unwrapLeadingTabOrNav(steps).step;
+  const url =
+    cmdUrl ??
+    (leading?.action === "switchTab"
+      ? leading.url
+      : leading?.action === "navigate"
+        ? leading.url
+        : undefined);
+  const host =
+    tryHostFromUrl(url) ?? (leading?.action === "switchTab" ? leading.host : undefined);
+  return { ...(url ? { url } : {}), ...(host ? { host } : {}) };
+}
+
+function tabMatchesFlowTarget(tabUrl: string | undefined, target: FlowTabTarget): boolean {
+  if (!tabUrl || !isRunnablePageUrl(tabUrl)) return false;
+  if (target.url) {
+    try {
+      const tabParsed = new URL(tabUrl);
+      const targetParsed = new URL(target.url);
+      if (
+        (tabParsed.protocol === "http:" || tabParsed.protocol === "https:") &&
+        (targetParsed.protocol === "http:" || targetParsed.protocol === "https:")
+      ) {
+        return (
+          normalizeLoopbackHost(tabParsed.host) === normalizeLoopbackHost(targetParsed.host)
+        );
+      }
+    } catch {
+      // fall through to scoreTabUrlMatch
+    }
+    return scoreTabUrlMatch(tabUrl, target.url) > 0;
+  }
+  if (target.host) {
+    return tabMatchesHost(tabUrl, target.host);
+  }
+  return false;
+}
+
+function findBestTabForTarget(tabs: ChromeTab[], target: FlowTabTarget): ChromeTab | undefined {
+  const runnable = tabs.filter((t) => t.id !== undefined && isRunnablePageUrl(t.url));
+  if (target.url) {
+    const urlMatches = runnable
+      .map((t) => ({ tab: t, score: scoreTabUrlMatch(t.url, target.url!) }))
+      .filter((entry) => entry.score > 0);
+    urlMatches.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const accessDiff = (b.tab.lastAccessed ?? 0) - (a.tab.lastAccessed ?? 0);
+      if (accessDiff !== 0) return accessDiff;
+      if (Boolean(a.tab.active) !== Boolean(b.tab.active)) return a.tab.active ? -1 : 1;
+      return 0;
+    });
+    if (urlMatches[0]?.tab) return urlMatches[0].tab;
+  }
+  if (target.host) {
+    const hostMatches = runnable.filter((t) => tabMatchesHost(t.url, target.host!));
+    hostMatches.sort((a, b) => {
+      const exactDiff =
+        Number(isExactHostMatch(b.url, target.host!)) -
+        Number(isExactHostMatch(a.url, target.host!));
+      if (exactDiff !== 0) return exactDiff;
+      const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
+      if (accessDiff !== 0) return accessDiff;
+      if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;
+      return 0;
+    });
+    if (hostMatches[0]) return hostMatches[0];
+  }
+  return undefined;
+}
+
+function isTargetlessSingleInsertSnippet(steps: V2Step[]): boolean {
+  if (steps.length !== 1) return false;
+  const only = steps[0];
+  return (
+    only?.action === "insertText" &&
+    !only.target &&
+    !only.targets?.length &&
+    !only.within
+  );
+}
+
+function withFlowStartSwitch(script: V2ActionScript, startUrl?: string): V2ActionScript {
+  if (!startUrl || !isRunnablePageUrl(startUrl)) return script;
+  const steps = script.steps ?? [];
+  if (steps.length === 0 || isTargetlessSingleInsertSnippet(steps)) return script;
+
+  const first = steps[0];
+  if (first?.action === "switchTab") {
+    if (!first.url && (!first.host || tabMatchesHost(startUrl, first.host))) {
+      return {
+        ...script,
+        steps: [{ ...first, url: startUrl }, ...steps.slice(1)],
+      };
+    }
+    return script;
+  }
+  if (first?.action === "navigate") {
+    return script;
+  }
+  if (first?.action === "forEach" && scriptStartsWithTabOrNav(first.steps)) {
+    const innerFirst = first.steps[0];
+    if (
+      innerFirst?.action === "switchTab" &&
+      !innerFirst.url &&
+      (!innerFirst.host || tabMatchesHost(startUrl, innerFirst.host))
+    ) {
+      return {
+        ...script,
+        steps: [
+          {
+            ...first,
+            steps: [{ ...innerFirst, url: startUrl }, ...first.steps.slice(1)],
+          },
+          ...steps.slice(1),
+        ],
+      };
+    }
+    return script;
+  }
+
+  const host = tryHostFromUrl(startUrl);
+  return {
+    ...script,
+    steps: [
+      { action: "switchTab", ...(host ? { host } : {}), url: startUrl },
+      ...steps,
+    ],
+  };
+}
+
+export async function resolveDecideTabId(cmd: HandsCommand): Promise<number | undefined> {
+  const api = getChromeApi();
+  let allTabs: ChromeTab[] = [];
+  if (api?.tabs?.query) {
+    try {
+      allTabs = (await api.tabs.query({})) ?? [];
+    } catch {
+      allTabs = [];
+    }
+  }
+  const runnableTabs = allTabs.filter((t) => t.id !== undefined && isRunnablePageUrl(t.url));
+  const tabById = new Map<number, ChromeTab>();
+  for (const tab of runnableTabs) {
+    if (tab.id !== undefined) tabById.set(tab.id, tab);
+  }
+
+  const lookupRunnableTab = async (tabId: number): Promise<ChromeTab | undefined> => {
+    const fromList = tabById.get(tabId);
+    if (fromList) return fromList;
+    if (runnableTabs.length === 0 && !api?.tabs?.query && api?.tabs?.get) {
+      try {
+        const tab = await api.tabs.get(tabId);
+        if (tab?.id !== undefined && isRunnablePageUrl(tab.url)) return tab;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  };
+
+  const steps = cmd.script?.steps ?? [];
+  const flowStart = extractFlowStartTarget(cmd.url, steps);
+  const scriptTargets = collectScriptTabTargets(steps);
+  const allFlowTargets: FlowTabTarget[] = [
+    ...(cmd.url ? [{ url: cmd.url, host: tryHostFromUrl(cmd.url) }] : []),
+    ...scriptTargets,
+  ];
+  const flowCoversStart = Boolean(cmd.url) || scriptStartsWithTabOrNav(steps);
+
+  const isTabConsistentWithFlow = (tab: ChromeTab, eventUrl?: string): boolean => {
+    if (eventUrl && !tabMatchesFlowTarget(tab.url, { url: eventUrl })) {
+      return false;
+    }
+    if (flowCoversStart && allFlowTargets.length > 0) {
+      return allFlowTargets.some((target) => tabMatchesFlowTarget(tab.url, target));
+    }
+    return true;
+  };
+
+  // 1. Explicit tabId from server (last meaningful event of the session / recall trigger)
+  if (cmd.tabId !== undefined) {
+    const explicitTab = await lookupRunnableTab(cmd.tabId);
+    if (explicitTab?.id !== undefined && isTabConsistentWithFlow(explicitTab)) {
+      return explicitTab.id;
+    }
+  }
+
+  // 2. Last meaningful event tracked in background.ts (matching flow targets when known)
+  for (let i = recentEvents.length - 1; i >= 0; i -= 1) {
+    const evt = recentEvents[i];
+    if (!evt || !isMeaningfulEvent(evt)) continue;
+    const evtTabId = typeof evt.meta?.tabId === "number" ? evt.meta.tabId : undefined;
+    if (evtTabId === undefined) continue;
+    const tab = await lookupRunnableTab(evtTabId);
+    if (!tab || tab.id === undefined) continue;
+    if (isTabConsistentWithFlow(tab, evt.url)) {
+      return tab.id;
+    }
+  }
+
+  if (lastMeaningfulTab) {
+    const tab = await lookupRunnableTab(lastMeaningfulTab.tabId);
+    if (tab?.id !== undefined && isTabConsistentWithFlow(tab, lastMeaningfulTab.url)) {
+      return tab.id;
+    }
+  }
+
+  // 3. Open tab matching the flow start URL / host
+  if (flowStart.url || flowStart.host) {
+    const startMatch = findBestTabForTarget(runnableTabs, flowStart);
+    if (startMatch?.id !== undefined) {
+      return startMatch.id;
+    }
+  }
+
+  // 4. Open tab matching any flow step URL / host
+  for (const target of allFlowTargets) {
+    const match = findBestTabForTarget(runnableTabs, target);
+    if (match?.id !== undefined) {
+      return match.id;
+    }
+  }
+
+  // 5. Fallback to active runnable tab
+  return resolveActiveTabId();
 }
 
 export async function handleHandsCommand(
@@ -1042,8 +1356,10 @@ export async function handleHandsCommand(
         pauseNotice: cmd.pauseNotice,
       });
       const appHost =
-        tryHostFromUrl(lastActiveTab?.url) ??
+        tryHostFromUrl(cmd.url) ??
         decideScript.steps.find((s): s is Extract<typeof s, { action: "switchTab" }> => s.action === "switchTab")?.host ??
+        tryHostFromUrl(lastMeaningfulTab?.url) ??
+        tryHostFromUrl(lastActiveTab?.url) ??
         "Browser";
       const suggestedItem = suggestionToOptimization(suggestion, {
         app: appHost,
@@ -1063,7 +1379,7 @@ export async function handleHandsCommand(
         error?: string;
       };
       try {
-        const tabId = await resolveActiveTabId();
+        const tabId = await resolveDecideTabId(cmd);
         console.log("[eyes-bg] decide target tabId =", tabId);
         if (tabId === undefined) throw new Error("No active web tab open");
         if (!api?.tabs?.sendMessage) {
@@ -1182,7 +1498,25 @@ export async function handleHandsCommand(
       error?: string;
     };
     try {
-      const openTab = await resolveOpenRunnableTab();
+      let openTab: { id?: number; url?: string } = {};
+      if (cmd.url && api?.tabs?.query) {
+        try {
+          const allTabs = (await api.tabs.query({})) ?? [];
+          const host = tryHostFromUrl(cmd.url);
+          const matched = findBestTabForTarget(allTabs, {
+            url: cmd.url,
+            ...(host ? { host } : {}),
+          });
+          if (matched?.id !== undefined && matched.url) {
+            openTab = { id: matched.id, url: matched.url };
+          }
+        } catch {
+          // fall back to resolveOpenRunnableTab
+        }
+      }
+      if (openTab.id === undefined || !openTab.url) {
+        openTab = await resolveOpenRunnableTab();
+      }
       if (openTab.id === undefined || !openTab.url) {
         throw new Error("No active web tab open");
       }
@@ -1259,15 +1593,18 @@ export async function handleHandsCommand(
     console.log("[eyes-bg] received run command", cmd.id, "steps=", cmd.script.steps.length);
     let payload: { id: string; ok: boolean; results?: StepResult[]; error?: string };
     try {
-      const preferredTabId = lastApprovedDecideTabId;
+      const scriptToRun = withFlowStartSwitch(cmd.script, cmd.url);
+      const preferredTabId = cmd.tabId ?? lastApprovedDecideTabId;
       lastApprovedDecideTabId = undefined;
       const tabId = await resolveActiveTabId(preferredTabId);
       console.log("[eyes-bg] run target tabId =", tabId);
-      if (tabId === undefined) throw new Error("No active web tab open");
+      if (tabId === undefined && !scriptStartsWithTabOrNav(scriptToRun.steps)) {
+        throw new Error("No active web tab open");
+      }
       const initialParams =
         cmd.paramValues ??
         (cmd.params && !Array.isArray(cmd.params) ? cmd.params : undefined);
-      const results = await runActionScript(tabId, cmd.script, initialParams);
+      const results = await runActionScript(tabId ?? -1, scriptToRun, initialParams);
       console.log("[eyes-bg] runActionScript results:", results);
       payload = { id: cmd.id, ok: true, results };
     } catch (err) {
@@ -1392,7 +1729,7 @@ export async function runActionScript(
     if (activeRunControl === runControl) {
       activeRunControl = null;
     }
-    if (!paused) {
+    if (!paused && currentTabId >= 0) {
       await sendWatchMessage(currentTabId, { kind: "EYES_WATCH_STOP" });
     }
   }
@@ -1571,6 +1908,30 @@ async function runStepsInternal(
         getChromeApi()?.windows ?? (typeof chrome !== "undefined" ? chrome.windows : undefined);
 
       if (step.action === "navigate") {
+        if (currentTabId < 0) {
+          if (tabsApi?.create) {
+            const created = await tabsApi.create({ url: step.url, active: true });
+            if (created?.id === undefined) {
+              throw new Error(`Failed to open tab for ${step.url}`);
+            }
+            if (created.windowId !== undefined && windowsApi?.update) {
+              await windowsApi.update(created.windowId, { focused: true });
+            }
+            if (created.status !== "complete") {
+              await waitForTabLoad(created.id);
+            }
+            const createdTab = tabsApi.get
+              ? await tabsApi.get(created.id).catch(() => created)
+              : created;
+            if (createdTab?.url?.startsWith("chrome-error://")) {
+              throw new Error(`Navigation failed for ${step.url} (error page)`);
+            }
+            currentTabId = created.id;
+            results.push({ ok: true, url: createdTab?.url ?? step.url });
+            continue;
+          }
+          throw new Error("No active web tab open");
+        }
         lastFieldFrameByTab.delete(currentTabId);
         const currentTab = tabsApi?.get
           ? await tabsApi.get(currentTabId).catch(() => undefined)
@@ -1706,6 +2067,9 @@ async function runStepsInternal(
         continue;
       }
 
+      if (currentTabId < 0) {
+        throw new Error("No active web tab open");
+      }
       const watchLocators = stepLocatorsForWatch(step);
       await sendWatchMessage(currentTabId, {
         kind: "EYES_WATCH_STEP",
