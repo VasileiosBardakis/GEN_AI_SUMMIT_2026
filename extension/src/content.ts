@@ -278,7 +278,40 @@ function collapseWsLocal(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function resolvePrecheckMatches(locator: WatchLocator): Element[] {
+function isPrecheckRowEl(el: Element): boolean {
+  const tag = el.tagName.toLowerCase();
+  if (tag === "tr" || tag === "li") return true;
+  const role = (el.getAttribute("role") || "").toLowerCase();
+  return role === "row" || role === "listitem";
+}
+
+function findPrecheckRowWithin(el: Element, boundary?: Element): Element {
+  let curr: Element | null = el;
+  while (curr && curr !== boundary) {
+    if (
+      isPrecheckRowEl(curr) &&
+      (!boundary || (typeof boundary.contains === "function" && boundary.contains(curr)))
+    ) {
+      return curr;
+    }
+    curr = curr.parentElement;
+  }
+  return el;
+}
+
+function pruneNestedPrecheckText(matches: Element[]): Element[] {
+  return matches.filter(
+    (el) =>
+      !matches.some(
+        (other) =>
+          other !== el &&
+          typeof el.contains === "function" &&
+          el.contains(other)
+      )
+  );
+}
+
+function resolvePrecheckMatches(locator: WatchLocator, root: ParentNode = document): Element[] {
   if (typeof document === "undefined") return [];
   const kind = locator.kind;
   const raw = locator.value?.trim() ?? "";
@@ -287,15 +320,16 @@ function resolvePrecheckMatches(locator: WatchLocator): Element[] {
   let found: Element[] = [];
   try {
     if (kind === "css") {
-      found = Array.from(document.querySelectorAll(raw));
+      found = Array.from(root.querySelectorAll(raw));
     } else if (kind === "testid") {
       found = Array.from(
-        document.querySelectorAll(`[data-testid="${cssEscapeIdentLocal(raw)}"]`)
+        root.querySelectorAll(`[data-testid="${cssEscapeIdentLocal(raw)}"]`)
       );
     } else if (kind === "xpath" && typeof XPathResult !== "undefined") {
+      const expr = root !== document && raw.startsWith("/") ? `.${raw}` : raw;
       const snap = document.evaluate(
-        raw,
-        document,
+        expr,
+        root as Node,
         null,
         XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
         null
@@ -308,7 +342,7 @@ function resolvePrecheckMatches(locator: WatchLocator): Element[] {
       }
     } else if (kind === "aria") {
       if (raw.startsWith("[")) {
-        found = Array.from(document.querySelectorAll(raw));
+        found = Array.from(root.querySelectorAll(raw));
       } else {
         const roleMatch = /^([a-z]+)\[\s*name\s*=\s*["']([\s\S]*?)["']\s*\]$/i.exec(raw);
         const wantedRole = roleMatch ? roleMatch[1].toLowerCase() : null;
@@ -317,7 +351,7 @@ function resolvePrecheckMatches(locator: WatchLocator): Element[] {
         ).toLowerCase();
         if (wantedName) {
           const candidates = Array.from(
-            document.querySelectorAll(
+            root.querySelectorAll(
               'input, textarea, select, button, a, summary, [role], [aria-label], [aria-labelledby], [contenteditable="true"]'
             )
           );
@@ -368,13 +402,15 @@ function resolvePrecheckMatches(locator: WatchLocator): Element[] {
     } else if (kind === "text") {
       const wantedLower = collapseWsLocal(raw).toLowerCase();
       const submits = Array.from(
-        document.querySelectorAll('input[type="submit"], input[type="button"], input[type="reset"]')
+        root.querySelectorAll('input[type="submit"], input[type="button"], input[type="reset"]')
       ).filter((el) => {
         const val = collapseWsLocal((el as HTMLInputElement).value || "").toLowerCase();
         return val === wantedLower;
       });
-      const textEls = Array.from(document.querySelectorAll("*")).filter(
-        (el) => collapseWsLocal(el.textContent || "").toLowerCase() === wantedLower
+      const textEls = pruneNestedPrecheckText(
+        Array.from(root.querySelectorAll("*")).filter(
+          (el) => collapseWsLocal(el.textContent || "").toLowerCase() === wantedLower
+        )
       );
       found = [...submits, ...textEls];
     }
@@ -385,14 +421,74 @@ function resolvePrecheckMatches(locator: WatchLocator): Element[] {
   return found.filter((el) => !isEyesUiTarget(el));
 }
 
-export function precheckStepLocators(locators: WatchLocator[]): {
+function resolvePrecheckWithinRoot(within: WatchLocator[]): {
+  ok: boolean;
+  root?: ParentNode;
+  matchCount?: number;
+} {
+  const containerLocs = within.filter((loc) => loc.kind !== "text");
+  const textLocs = within.filter((loc) => loc.kind === "text");
+
+  const resolveUnique = (
+    locs: WatchLocator[],
+    searchRoot: ParentNode
+  ): { ok: boolean; el?: Element; matchCount: number } => {
+    let fallbackCount = 0;
+    for (const loc of locs) {
+      const matches = resolvePrecheckMatches(loc, searchRoot);
+      if (matches.length === 1) {
+        return { ok: true, el: matches[0], matchCount: 1 };
+      }
+      if (matches.length > 1 && fallbackCount === 0) {
+        fallbackCount = matches.length;
+      }
+    }
+    return { ok: false, matchCount: fallbackCount };
+  };
+
+  if (containerLocs.length > 0 && textLocs.length > 0) {
+    const containerRes = resolveUnique(containerLocs, document);
+    if (!containerRes.ok || !containerRes.el) {
+      return { ok: false, matchCount: containerRes.matchCount };
+    }
+    const textRes = resolveUnique(textLocs, containerRes.el);
+    if (!textRes.ok || !textRes.el) {
+      return { ok: false, matchCount: textRes.matchCount };
+    }
+    return { ok: true, root: findPrecheckRowWithin(textRes.el, containerRes.el) };
+  }
+
+  const singleRes = resolveUnique(within, document);
+  if (!singleRes.ok || !singleRes.el) {
+    return { ok: false, matchCount: singleRes.matchCount };
+  }
+  const rootEl =
+    containerLocs.length === 0 && textLocs.length > 0
+      ? findPrecheckRowWithin(singleRes.el)
+      : singleRes.el;
+  return { ok: true, root: rootEl };
+}
+
+export function precheckStepLocators(
+  locators: WatchLocator[],
+  within?: WatchLocator[]
+): {
   matchCount: number;
   unique: boolean;
   matchedLocator?: WatchLocator;
 } {
+  let scopeRoot: ParentNode = document;
+  if (Array.isArray(within) && within.length > 0) {
+    const scoped = resolvePrecheckWithinRoot(within);
+    if (!scoped.ok || !scoped.root) {
+      return { matchCount: scoped.matchCount ?? 0, unique: false };
+    }
+    scopeRoot = scoped.root;
+  }
+
   let fallback: { matchCount: number; matchedLocator: WatchLocator } | undefined;
   for (const loc of locators) {
-    const matches = resolvePrecheckMatches(loc);
+    const matches = resolvePrecheckMatches(loc, scopeRoot);
     if (matches.length === 1) {
       return { matchCount: 1, unique: true, matchedLocator: loc };
     }
@@ -1456,11 +1552,19 @@ export function setupEventListeners(): void {
     (e: MouseEvent) => {
       const dwellMs = Math.max(0, Date.now() - lastPointerDownTs);
       const editable = resolveEditableField(e.target);
+      const rawClickEl =
+        e.target instanceof HTMLElement
+          ? e.target
+          : typeof Node !== "undefined" && e.target instanceof Node
+            ? e.target.parentElement
+            : null;
+      const sourceSummary = !isEyesUiTarget(e.target) ? captureSourceSummary(rawClickEl) : undefined;
       emit("click", e.target, editable ? getElementValue(editable) : undefined, {
         button: e.button,
         clientX: Math.round(e.clientX),
         clientY: Math.round(e.clientY),
         dwellMs: dwellMs < 15000 ? dwellMs : undefined,
+        ...(sourceSummary ? { pageSummary: { source: sourceSummary } } : {}),
       });
     },
     true
@@ -2334,13 +2438,14 @@ function setupHandsTracker(): void {
       solution?: string;
       script?: ActionScript;
       pauseBeforeSubmit?: boolean;
-      runMode?: "run" | "save_only";
+      runMode?: "run" | "run_remaining" | "save_only";
       params?: SuggestionParam[];
       primaryLabel?: string;
       pauseNotice?: string;
       target?: WatchLocator | WatchLocator[];
+      within?: WatchLocator | WatchLocator[];
       locators?: WatchLocator[];
-      step?: { target?: WatchLocator | WatchLocator[] };
+      step?: { target?: WatchLocator | WatchLocator[]; within?: WatchLocator | WatchLocator[] };
       stepIndex?: number;
       totalSteps?: number;
       label?: string;
@@ -2358,13 +2463,20 @@ function setupHandsTracker(): void {
         sendResponse({ ok: false, error: "Invalid decider payload" });
         return false;
       }
+      const rawRunMode = msg.runMode ?? msg.script.runMode;
+      const normalizedRunMode =
+        rawRunMode === "save_only"
+          ? "save_only"
+          : rawRunMode === "run" || rawRunMode === "run_remaining"
+            ? "run"
+            : undefined;
       const suggestion = buildDeciderSuggestion({
         name: typeof msg.name === "string" ? msg.name : "",
         solution: msg.solution,
         script: msg.script,
         pauseBeforeSubmit:
           typeof msg.pauseBeforeSubmit === "boolean" ? msg.pauseBeforeSubmit : undefined,
-        runMode: msg.runMode === "run" || msg.runMode === "save_only" ? msg.runMode : undefined,
+        runMode: normalizedRunMode,
         params: Array.isArray(msg.params) ? msg.params : undefined,
         primaryLabel: typeof msg.primaryLabel === "string" ? msg.primaryLabel : undefined,
         pauseNotice: typeof msg.pauseNotice === "string" ? msg.pauseNotice : undefined,
@@ -2394,11 +2506,17 @@ function setupHandsTracker(): void {
               : msg.step?.target
                 ? [msg.step.target]
                 : [];
+      const rawWithin = msg.within ?? msg.step?.within;
+      const withinLocators: WatchLocator[] = Array.isArray(rawWithin)
+        ? rawWithin
+        : rawWithin
+          ? [rawWithin]
+          : [];
       if (candidateLocators.length === 0) {
         sendResponse({ ok: false, matchCount: 0, unique: false, error: "No locators provided" });
         return false;
       }
-      const precheck = precheckStepLocators(candidateLocators);
+      const precheck = precheckStepLocators(candidateLocators, withinLocators);
       sendResponse({ ok: true, ...precheck });
       return false;
     }
