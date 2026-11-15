@@ -1,6 +1,6 @@
-# Eyes
+# AIz (Eyes)
 
-Eyes is a Chrome extension and a local backend AI that watches repetitive browser work and automates it for you.
+An adaptive assistant that observes repetitive workflows as you work and automates them on the fly. Powered by Gemini and Oumi Iris, it supervises the user while they work, and suggests improved workflows.
 
 ## What it is
 
@@ -20,38 +20,39 @@ Instead of writing scripts or configuring integrations ahead of time, you work i
 ## Architecture
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontFamily': 'ui-sans-serif, system-ui, sans-serif', 'lineColor': '#64748b', 'textColor': '#f1f5f9', 'edgeLabelBackground': '#1e293b'}, 'flowchart': {'curve': 'basis', 'nodeSpacing': 30, 'rankSpacing': 52}}}%%
 flowchart LR
-    classDef eyes fill:#0ea5e9,stroke:#0369a1,stroke-width:2px,color:#ffffff
-    classDef brain fill:#6366f1,stroke:#4338ca,stroke-width:2px,color:#ffffff
-    classDef gemini fill:#f59e0b,stroke:#b45309,stroke-width:2px,color:#ffffff
-    classDef iris fill:#ec4899,stroke:#be185d,stroke-width:2px,color:#ffffff
-    classDef hands fill:#10b981,stroke:#047857,stroke-width:2px,color:#ffffff
+    classDef eyes fill:#0c192c,stroke:#38bdf8,stroke-width:1.5px,color:#f8fafc
+    classDef brain fill:#141830,stroke:#818cf8,stroke-width:1.5px,color:#f8fafc
+    classDef gemini fill:#1c1917,stroke:#fbbf24,stroke-width:1.5px,color:#fef3c7
+    classDef iris fill:#0f2424,stroke:#2dd4bf,stroke-width:1.5px,color:#ccfbf1
+    classDef hands fill:#0d211b,stroke:#34d399,stroke-width:1.5px,color:#d1fae5
 
-    subgraph S1["Eyes — Chrome Extension"]
-        E["Capture browser actions<br/>& mask personal data"]:::eyes
+    subgraph S1["Eyes — Browser Sensor"]
+        E(["Capture actions &<br/>mask personal data"]):::eyes
     end
 
     subgraph S2["Brain — Local Backend AI"]
-        B1["Session trace & recall"]:::brain
-        B2["Pattern detection &<br/>workflow validation"]:::brain
-        M1["Gemini<br/>Compile workflow & variables"]:::gemini
-        M2["Oumi Iris<br/>Worthiness & safety judge"]:::iris
+        B1("Session trace & recall"):::brain
+        B2("Pattern detection &<br/>validation"):::brain
+        M1(["Gemini · Workflow compiler"]):::gemini
+        M2(["Oumi Iris · Safety & recall judge"]):::iris
         B1 --> B2
         B2 <--> M1
         B2 <--> M2
     end
 
-    subgraph S3["Hands — Saved Skills & Replay"]
-        H["Side Panel library &<br/>step-by-step replay with Stop"]:::hands
+    subgraph S3["Hands — Replay & Library"]
+        H(["Side Panel library &<br/>supervised replay"]):::hands
     end
 
-    E -->|Local event stream| B1
-    B2 -->|Automation prompt| H
-    H -->|Replay actions in tab| E
+    E -->|Local stream| B1
+    B2 -->|Skill prompt| H
+    H -->|Step-by-step replay| E
 
-    style S1 fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0c4a6e
-    style S2 fill:#eef2ff,stroke:#4f46e5,stroke-width:2px,color:#1e1b4b
-    style S3 fill:#d1fae5,stroke:#059669,stroke-width:2px,color:#064e3b
+    style S1 fill:#0b1120,stroke:#1e3a5f,stroke-width:1.5px,color:#bae6fd
+    style S2 fill:#0b1120,stroke:#312e81,stroke-width:1.5px,color:#c7d2fe
+    style S3 fill:#0b1120,stroke:#14532d,stroke-width:1.5px,color:#a7f3d0
 ```
 
 - **Eyes (Browser Sensor):** Runs inside Chrome as an extension. It watches clicks, navigation, and form inputs, summarizes the page layout, and masks personal info locally before sending anything out.

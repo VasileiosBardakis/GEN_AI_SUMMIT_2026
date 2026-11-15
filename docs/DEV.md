@@ -1,7 +1,47 @@
 # Developer Guide
 
-Configuration, npm scripts, verification commands, and troubleshooting for local development.
-See the [README](../README.md) for quick start and [ARCHITECTURE.md](./ARCHITECTURE.md) for the v2 pipeline design.
+Setup, manual launch steps, configuration, scripts, verification commands, and troubleshooting.
+See the [README](../README.md) for the overview and [ARCHITECTURE.md](./ARCHITECTURE.md) for the v2 pipeline design.
+
+## Setup
+
+```bash
+pnpm install
+pnpm exec playwright install chromium   # only if no Chrome/Chromium is installed
+```
+
+## Start
+
+```bash
+pnpm dev
+```
+
+Starts the backend (`:8787`), demo app (`:5173`), extension watcher, Chrome with `.dev/chrome-profile`, and a live trace tail. Press `Ctrl+C` to stop.
+
+```bash
+pnpm dev --no-browser   # backend + demo + watcher + tail
+pnpm dev --no-watch     # no rebuild
+pnpm dev --no-tail      # no trace output
+pnpm dev --headless     # headless browser
+pnpm dev --port=8787    # backend port
+pnpm dev --app-port=5173
+pnpm dev --url=http://localhost:3000
+```
+
+## Manual
+
+```bash
+pnpm server        # backend :8787
+pnpm dev:build     # build extension/dist
+pnpm dev:demo      # demo app :5173
+pnpm dev:tail      # follow traces/*.jsonl
+```
+
+Load the extension in Chrome: open `chrome://extensions`, enable Developer mode, click **Load unpacked**, and select `extension/`. After running `pnpm dev:build`, reload the extension and the target tab.
+
+```bash
+pnpm dev:browser -- --url=http://127.0.0.1:5173/
+```
 
 ## Verify
 
