@@ -648,7 +648,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
     for (const [name, value] of entries) {
       const idx = out.findIndex((p) => p.name === name);
       if (idx >= 0) {
-        if (!out[idx].example) out[idx].example = value;
+        out[idx].example = value;
       } else {
         out.push({ name, example: value });
       }
