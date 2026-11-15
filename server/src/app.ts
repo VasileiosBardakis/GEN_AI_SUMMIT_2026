@@ -8,11 +8,12 @@ import { STEP_TRIGGER_TYPES } from "./common/target.ts";
 import {
   buildLibraryEntryFromScript,
   buildStartSignature,
+  formatStartSignature,
   implementForLibrary,
   type ImplementContext,
-  type StartSignature,
 } from "./hands/implementor.ts";
 import {
+  dedupeLibraryEntries,
   deleteLibraryEntry,
   readLibrary,
   recordLibraryRun,
@@ -110,6 +111,7 @@ type HandsCommand =
       script: ActionScript;
       primaryLabel?: string;
       isRecall?: boolean;
+      entryId?: string;
     }
   | {
       id: string;
@@ -125,18 +127,6 @@ function isProposeTriggerEvent(ev: Event): boolean {
     return ev.meta?.key === "Enter";
   }
   return false;
-}
-
-function formatStartSignature(sig: StartSignature): string {
-  const host = sig.host ?? "*";
-  const urlPattern = sig.urlPattern ?? "/*";
-  const firstLoc = sig.locators[0];
-  const targetPart = firstLoc
-    ? `${firstLoc.kind}:${firstLoc.value}`
-    : sig.roles[0]
-      ? `${sig.roles[0]}:${sig.labelContains[0] ?? ""}`
-      : sig.labelContains[0] ?? "";
-  return `${host}|${urlPattern}|${sig.action}${targetPart ? `:${targetPart}` : ""}`;
 }
 
 function countFlatScriptSteps(steps: ActionScript["steps"]): number {
@@ -302,6 +292,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
     script: ActionScript;
     primaryLabel?: string;
     isRecall?: boolean;
+    entryId?: string;
     timeoutMs?: number;
   }): Promise<{ id: string; outcome: HandsOutcome }> {
     const id = input.id ?? crypto.randomUUID();
@@ -318,6 +309,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         script: input.script,
         ...(input.primaryLabel ? { primaryLabel: input.primaryLabel } : {}),
         ...(input.isRecall ? { isRecall: true } : {}),
+        ...(input.entryId ? { entryId: input.entryId } : {}),
       },
       timeoutMs,
       "Timed out waiting for user decision",
@@ -343,6 +335,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         solution: entry.solution,
         script: recallDecideScript,
         isRecall: true,
+        entryId: entry.id,
       });
       if (
         !outcome.ok &&
@@ -399,6 +392,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const proposer = autoPropose
     ? createProposer({
         readSessionEvents: (sessionId) => readEvents(opts.tracesDir, sessionId),
+        readLibrary: () => readLibrary(dataDir),
         compileV2: (input) =>
           compileWorkflow(input, { gemini: opts.gemini, iris: opts.iris }),
         precheck: (script, meta) =>
@@ -836,7 +830,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
       }
 
       if (req.method === "GET" && url.pathname === "/library") {
-        const items = await readLibrary(dataDir);
+        const items = dedupeLibraryEntries(await readLibrary(dataDir));
         sendJson(res, 200, { ok: true, items });
         return;
       }

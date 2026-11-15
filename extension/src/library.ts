@@ -100,10 +100,13 @@ export function suggestionToOptimization(
   const isText = suggestion.kind === "text";
   const text = suggestion.snippetText ?? suggestion.preview;
 
+  const resolvedSolution = suggestion.solution?.trim() || suggestion.detail?.trim();
+
   return {
     id: suggestion.id,
     title: suggestion.headline,
     description: suggestion.detail,
+    ...(resolvedSolution ? { solution: resolvedSolution } : {}),
     kind: isText ? "snippet" : "workflow",
     status,
     app: opts.app || "Browser",
@@ -289,19 +292,46 @@ export function mergeServerAndLocalOptimizations(
     }
   }
 
-  const serverSignatures = new Set(
-    serverEntries.map((entry) => `${entry.name}\0${entry.solution}`)
-  );
+  const serverBySignature = new Map<string, number>();
+  serverEntries.forEach((entry, index) => {
+    serverBySignature.set(`${entry.name}\0${entry.solution}`, index);
+  });
 
   for (const item of localItems) {
     if (serverIds.has(item.id)) continue;
     if (DEFAULT_MOCK_IDS.has(item.id)) continue;
-    if (
-      item.id.startsWith("decider_") &&
-      item.solution &&
-      serverSignatures.has(`${item.title}\0${item.solution}`)
-    ) {
-      continue;
+    if (item.id.startsWith("decider_")) {
+      const sigMatchIdx =
+        item.solution !== undefined
+          ? serverBySignature.get(`${item.title}\0${item.solution}`)
+          : undefined;
+      const fuzzyMatchIdx =
+        sigMatchIdx !== undefined
+          ? sigMatchIdx
+          : merged.findIndex(
+              (entry) =>
+                entry.title.trim().toLowerCase() === item.title.trim().toLowerCase() &&
+                (!item.solution ||
+                  !entry.solution ||
+                  entry.solution === item.solution ||
+                  entry.solution.startsWith(item.solution.replace(/\.\.\.$/, "")))
+            );
+      if (fuzzyMatchIdx !== -1) {
+        if (item.runCount > 0) {
+          const target = merged[fuzzyMatchIdx];
+          const runCount = Math.max(target.runCount, item.runCount);
+          merged[fuzzyMatchIdx] = {
+            ...target,
+            runCount,
+            totalTimeSavedSec: Math.max(
+              runCount * target.timeSavedPerRunSec,
+              target.totalTimeSavedSec
+            ),
+            lastRunAt: Math.max(target.lastRunAt ?? 0, item.lastRunAt ?? 0) || undefined,
+          };
+        }
+        continue;
+      }
     }
     merged.push(item);
   }

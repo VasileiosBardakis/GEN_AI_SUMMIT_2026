@@ -29,6 +29,7 @@ export interface Suggestion {
   snippetText?: string;
   headline: string;
   detail: string;
+  solution?: string;
   meta: string;
   videoUrl?: string;
   pauseBeforeSubmit?: boolean;
@@ -143,6 +144,7 @@ export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion 
       : {}),
     headline: collapsePreview(name, 56),
     detail: collapsePreview(solution, 140),
+    ...(solution ? { solution } : {}),
     meta: isFlowTip ? "Flow tip" : `${stepLabel} · ${metaSuffix}`,
     ...(pauseBeforeSubmit !== undefined ? { pauseBeforeSubmit } : {}),
     ...(runMode !== undefined ? { runMode } : {}),
