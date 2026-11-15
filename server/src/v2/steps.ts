@@ -1,4 +1,5 @@
 import type { Event, Locator, Step } from "@gen/shared";
+import { normalizeHost, resolveEventHost } from "../common/host.ts";
 import { formatTarget, targetKey, V2_STEP_EVENT_TYPES } from "../common/target.ts";
 
 export type V2Action = Step["action"] | "tab_switch" | "key";
@@ -216,4 +217,198 @@ export function eventsToSteps(
   }
 
   return { steps, piiMap: map };
+}
+
+export type MeaningfulWindowStep = {
+  index: number;
+  action: string;
+  host: string;
+  label?: string;
+  value?: string;
+  copiedFromStep?: number;
+};
+
+export type MeaningfulWindowGap = {
+  afterIndex: number;
+  marker: string;
+};
+
+export type MeaningfulWindow = {
+  meaningfulCount: number;
+  steps: MeaningfulWindowStep[];
+  gaps: MeaningfulWindowGap[];
+};
+
+const MEANINGFUL_INTERACTION_ACTIONS = new Set<V2Action>([
+  "copy",
+  "paste",
+  "fill",
+  "submit",
+  "click",
+  "key",
+]);
+
+const TRANSITION_ACTIONS = new Set<V2Action>(["nav", "tab_switch"]);
+const GAP_THRESHOLD_MS = 60_000;
+
+function inferTargetLabel(target?: Locator[]): string | undefined {
+  if (!target) return undefined;
+  const aria = target.find((l) => l.kind === "aria");
+  if (aria) return aria.value;
+  const text = target.find((l) => l.kind === "text");
+  if (text) return text.value;
+  return undefined;
+}
+
+function matchStepLabels(
+  steps: readonly V2Step[],
+  events?: readonly Event[],
+): (string | undefined)[] {
+  if (!events || events.length === 0) {
+    return steps.map((s) => inferTargetLabel(s.target));
+  }
+
+  const queues = new Map<string, Event[]>();
+  for (const ev of events) {
+    const mappedAction =
+      ev.type === "input" || ev.type === "change"
+        ? "fill"
+        : ev.type === "keydown" || ev.type === "key"
+          ? "key"
+          : ev.type;
+    const key = `${ev.session}::${mappedAction}`;
+    const q = queues.get(key);
+    if (q) q.push(ev);
+    else queues.set(key, [ev]);
+  }
+
+  const cursors = new Map<string, number>();
+  return steps.map((step) => {
+    const key = `${step.session}::${step.action}`;
+    const q = queues.get(key);
+    let matched: Event | undefined;
+    if (q) {
+      let idx = cursors.get(key) ?? 0;
+      while (idx < q.length && q[idx].ts < step.ts) {
+        idx += 1;
+      }
+      if (idx < q.length) {
+        matched = q[idx];
+        cursors.set(key, idx + 1);
+      }
+    }
+    return matched?.target?.label ?? inferTargetLabel(step.target);
+  });
+}
+
+function resolveStepHost(step: Pick<V2Step, "app" | "url">): string {
+  return (
+    resolveEventHost(step, { preferUrl: true }) ??
+    (step.app ? normalizeHost(step.app) : "")
+  );
+}
+
+export function buildMeaningfulWindow(
+  steps: V2Step[],
+  events?: Event[],
+  maxSteps = 40,
+): MeaningfulWindow {
+  const labels = matchStepLabels(steps, events);
+  const kept: Array<{
+    step: V2Step;
+    host: string;
+    label?: string;
+    rawIndex: number;
+  }> = [];
+  let prevHost: string | undefined;
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const host = resolveStepHost(step);
+    if (MEANINGFUL_INTERACTION_ACTIONS.has(step.action)) {
+      kept.push({ step, host, label: labels[i], rawIndex: i });
+      if (host) prevHost = host;
+    } else if (TRANSITION_ACTIONS.has(step.action)) {
+      if (prevHost !== undefined && host !== "" && host !== prevHost) {
+        kept.push({ step, host, label: labels[i], rawIndex: i });
+        prevHost = host;
+      }
+    }
+  }
+
+  const meaningfulCount = kept.length;
+  const cap = Math.max(1, Math.trunc(maxSteps));
+  const windowItems = kept.length > cap ? kept.slice(-cap) : kept;
+
+  const windowSteps: MeaningfulWindowStep[] = [];
+  const copyIndexByValue = new Map<string, number>();
+
+  for (let idx = 0; idx < windowItems.length; idx++) {
+    const { step, host, label } = windowItems[idx];
+    const value =
+      step.value !== undefined
+        ? step.value
+        : step.action === "key" && step.key !== undefined
+          ? step.key
+          : undefined;
+
+    let copiedFromStep: number | undefined;
+    if (step.action === "copy" && value !== undefined && value.length > 0) {
+      copyIndexByValue.set(value, idx);
+    } else if (step.action === "paste" && value !== undefined && value.length > 0) {
+      copiedFromStep = copyIndexByValue.get(value);
+    }
+
+    windowSteps.push({
+      index: idx,
+      action: step.action,
+      host,
+      ...(label ? { label } : {}),
+      ...(value !== undefined ? { value } : {}),
+      ...(copiedFromStep !== undefined ? { copiedFromStep } : {}),
+    });
+  }
+
+  const gaps: MeaningfulWindowGap[] = [];
+  for (let idx = 1; idx < windowItems.length; idx++) {
+    const prev = windowItems[idx - 1];
+    const curr = windowItems[idx];
+    const deltaMs = curr.step.ts - prev.step.ts;
+    if (deltaMs >= GAP_THRESHOLD_MS) {
+      const mins = Math.max(1, Math.round(deltaMs / 60_000));
+      let elsewhereHost = "";
+      for (let s = prev.rawIndex + 1; s < curr.rawIndex; s++) {
+        const h = resolveStepHost(steps[s]);
+        if (h && h !== prev.host) {
+          elsewhereHost = h;
+          break;
+        }
+      }
+      if (!elsewhereHost && events && events.length > 0) {
+        for (const ev of events) {
+          if (ev.ts > prev.step.ts && ev.ts < curr.step.ts) {
+            const h =
+              resolveEventHost(ev, { preferUrl: true }) ?? normalizeHost(ev.app);
+            if (h && h !== prev.host) {
+              elsewhereHost = h;
+              break;
+            }
+          }
+        }
+      }
+      if (!elsewhereHost) {
+        elsewhereHost = curr.host || prev.host;
+      }
+      const marker = elsewhereHost
+        ? `${mins} min elsewhere (${elsewhereHost})`
+        : `${mins} min elsewhere`;
+      gaps.push({ afterIndex: idx - 1, marker });
+    }
+  }
+
+  return {
+    meaningfulCount,
+    steps: windowSteps,
+    gaps,
+  };
 }

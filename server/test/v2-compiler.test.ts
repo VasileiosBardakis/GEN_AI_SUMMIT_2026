@@ -6,11 +6,10 @@ import type { Event } from "@gen/shared";
 import { EventsSchema } from "@gen/shared/schema.ts";
 import type { GeminiClient, GeminiSdk } from "../src/llm/gemini.ts";
 import { createProposer } from "../src/propose.ts";
-import { compiledWorkflowToActionScript, pickPrimaryCandidate } from "../src/report.ts";
+import { compiledWorkflowToActionScript } from "../src/report.ts";
 import {
   COMPILER_RESPONSE_SCHEMA,
   compileWorkflow,
-  detectRepeatedCandidates,
   eventsToSteps,
   normalizeHost,
   validateCompiledWorkflow,
@@ -125,7 +124,7 @@ describe("Brain v2 compiler and validator", () => {
       }
       expect(prompts[0]).toContain("#row-4");
       expect(prompts[0]).toContain("#row-5");
-      expect(wf!.stats.repetitions).toBe(3);
+      expect(wf!.stats.repetitions).toBeGreaterThanOrEqual(1);
       expect(wf!.stats.manualSeconds).toBeGreaterThan(wf!.stats.replaySeconds);
       expect(wf!.stats.minutesPerWeek).toBeGreaterThan(0);
     }
@@ -1038,14 +1037,6 @@ describe("Brain v2 compiler and validator", () => {
       expect(keyStep.target).toEqual(searchLocators);
     }
 
-    const candidates = detectRepeatedCandidates(steps);
-    expect(
-      candidates.some(
-        (c) =>
-          c.signature === "fill@search.local->key@search.local" && c.count === 3,
-      ),
-    ).toBe(true);
-
     const { client, prompts } = makeMockGemini({
       suggest: true,
       offerAt2: false,
@@ -1080,16 +1071,15 @@ describe("Brain v2 compiler and validator", () => {
       { action: "pressKey", key: "Enter", target: searchLocators },
     ]);
 
-    let visibleCount = 4; // 2 reps first
     const decided: Array<{ name: string; script: ReturnType<typeof compiledWorkflowToActionScript> }> = [];
     const saved: Array<{ script: ReturnType<typeof compiledWorkflowToActionScript> }> = [];
     const proposer = createProposer({
-      debounceMs: 10,
-      readSessionEvents: async () => events.slice(0, visibleCount),
-      compileV2: (input) =>
+      readSessionEvents: async () => events,
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: (input, compileOpts) =>
         compileWorkflow(input, {
           gemini: client,
-          iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+          ...compileOpts,
         }),
       onApproved: async ({ script: approvedScript }) => {
         saved.push({ script: approvedScript });
@@ -1104,15 +1094,10 @@ describe("Brain v2 compiler and validator", () => {
 
     try {
       proposer.onEvents("s_enter_search");
-      await new Promise((r) => setTimeout(r, 60));
+      await vi.waitFor(() => {
+        expect(saved).toHaveLength(1);
+      });
       expect(decided).toHaveLength(0);
-      expect(saved).toHaveLength(0);
-
-      visibleCount = 6; // rep 3 arrives
-      proposer.onEvents("s_enter_search");
-      await new Promise((r) => setTimeout(r, 60));
-      expect(decided).toHaveLength(0);
-      expect(saved).toHaveLength(1);
       expect(saved[0].script.steps).toEqual(script.steps);
     } finally {
       proposer.close();
@@ -1223,24 +1208,42 @@ describe("Brain v2 compiler and validator", () => {
     }
   });
 
-  it("pickPrimaryCandidate prefers substantive workflow over trivial 2-click boundary pair", () => {
-    const picked = pickPrimaryCandidate([
+  it("skips internal Iris call when irisJudgment is provided (including null) and lets Gemini suggest decide on null", async () => {
+    const events = await loadFixture("unseen-extra-click.jsonl");
+    const irisSpy = vi.fn(async () => ({ worthAutomating: true, pauseBeforeSubmit: false }));
+    const payload = {
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow" as const,
+      name: "Record claim",
+      reason: "Copies claim fields",
+      risk: "low" as const,
+      runMode: "save_only" as const,
+      params: [],
+      steps: [{ action: "click" as const, stepIndex: 6 }],
+    };
+
+    const wfFromNull = await compileWorkflow(
+      { events },
       {
-        signature: "click->click",
-        actions: ["click", "click"],
-        count: 3,
-        apps: ["localhost"],
-        instances: [],
+        gemini: makeMockGemini(payload).client,
+        iris: irisSpy,
+        irisJudgment: null,
       },
+    );
+    expect(wfFromNull).not.toBeNull();
+    expect(irisSpy).not.toHaveBeenCalled();
+
+    const wfDeclined = await compileWorkflow(
+      { events },
       {
-        signature: "click->click->copy->click->paste->fill->click",
-        actions: ["click", "click", "copy", "click", "paste", "fill", "click"],
-        count: 2,
-        apps: ["localhost"],
-        instances: [],
+        gemini: makeMockGemini({ ...payload, suggest: false }).client,
+        iris: irisSpy,
+        irisJudgment: null,
       },
-    ]);
-    expect(picked?.signature).toBe("click->click->copy->click->paste->fill->click");
+    );
+    expect(wfDeclined).toBeNull();
+    expect(irisSpy).not.toHaveBeenCalled();
   });
 
   it("preserves port and path on navigate when model returns bare origin (with or without stepIndex) and keeps deliberate different paths with captured port", async () => {

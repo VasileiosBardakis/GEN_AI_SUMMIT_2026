@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Event } from "@gen/shared";
 import { mergeWithinSession } from "../src/merge-sessions.ts";
-import { eventsToSteps } from "../src/v2/steps.ts";
-import { countRepeatedPatterns, splitEpisodes } from "../src/v2/tries.ts";
+import { buildMeaningfulWindow, eventsToSteps } from "../src/v2/steps.ts";
 
 let seq = 0;
 
@@ -23,94 +22,8 @@ function makeEvent(
   };
 }
 
-describe("v2 steps, mergeWithinSession, and tries pattern counter", () => {
-  it("acceptance 1: triggers count = 3 for both 0s continuous and >10min spaced copy -> tab_switch -> paste in one session", () => {
-    const baseTs = 1_740_000_000_000;
-    const continuousEvents: Event[] = [];
-    for (let i = 0; i < 3; i++) {
-      continuousEvents.push(
-        makeEvent("copy", {
-          ts: baseTs,
-          session: "sess_cont",
-          app: "portal.local",
-          clipboard: { text: `row-${i}` },
-        }),
-        makeEvent("tab_switch", {
-          ts: baseTs,
-          session: "sess_cont",
-          app: "erp.local",
-        }),
-        makeEvent("paste", {
-          ts: baseTs,
-          session: "sess_cont",
-          app: "erp.local",
-          value: `row-${i}`,
-        }),
-      );
-    }
-
-    const contMerged = mergeWithinSession([continuousEvents]);
-    expect(contMerged).toHaveLength(1);
-    const { steps: contSteps } = eventsToSteps(contMerged[0].events);
-    expect(splitEpisodes(contSteps)).toHaveLength(1);
-    const contPatterns = countRepeatedPatterns(contSteps);
-    expect(
-      contPatterns.find(
-        (p) =>
-          p.signature ===
-          "copy@portal.local->tab_switch@erp.local->paste@erp.local",
-      ),
-    ).toEqual({
-      signature: "copy@portal.local->tab_switch@erp.local->paste@erp.local",
-      actions: ["copy", "tab_switch", "paste"],
-      count: 3,
-    });
-
-    const spacedEvents: Event[] = [];
-    const elevenMinMs = 11 * 60_000;
-    for (let i = 0; i < 3; i++) {
-      const start = baseTs + i * elevenMinMs;
-      spacedEvents.push(
-        makeEvent("copy", {
-          ts: start,
-          session: "sess_spaced",
-          app: "portal.local",
-          clipboard: { text: `val-${i}` },
-        }),
-        makeEvent("tab_switch", {
-          ts: start + 500,
-          session: "sess_spaced",
-          app: "erp.local",
-        }),
-        makeEvent("paste", {
-          ts: start + 1000,
-          session: "sess_spaced",
-          app: "erp.local",
-          value: `val-${i}`,
-        }),
-      );
-    }
-
-    const spacedMerged = mergeWithinSession([spacedEvents]);
-    expect(spacedMerged).toHaveLength(1);
-    expect(spacedMerged[0].session).toBe("sess_spaced");
-    const { steps: spacedSteps } = eventsToSteps(spacedMerged[0].events);
-    expect(splitEpisodes(spacedSteps)).toHaveLength(3);
-    const spacedPatterns = countRepeatedPatterns(spacedSteps);
-    expect(
-      spacedPatterns.find(
-        (p) =>
-          p.signature ===
-          "copy@portal.local->tab_switch@erp.local->paste@erp.local",
-      ),
-    ).toEqual({
-      signature: "copy@portal.local->tab_switch@erp.local->paste@erp.local",
-      actions: ["copy", "tab_switch", "paste"],
-      count: 3,
-    });
-  });
-
-  it("acceptance 2: 3 identical sequences split across 2 distinct session IDs produce 0 triggers and mergeWithinSession keeps them separate", () => {
+describe("v2 steps, mergeWithinSession, and buildMeaningfulWindow", () => {
+  it("acceptance 2: mergeWithinSession keeps distinct session IDs separate", () => {
     const baseTs = 1_740_000_000_000;
     const makePair = (session: string, startTs: number): Event[] => [
       makeEvent("copy", {
@@ -143,10 +56,6 @@ describe("v2 steps, mergeWithinSession, and tries pattern counter", () => {
     expect(merged.map((m) => m.session)).toEqual(["sess_a", "sess_b"]);
     expect(merged[0].events.every((e) => e.session === "sess_a")).toBe(true);
     expect(merged[1].events.every((e) => e.session === "sess_b")).toBe(true);
-
-    const allEvents = merged.flatMap((m) => m.events);
-    const { steps } = eventsToSteps(allEvents);
-    expect(countRepeatedPatterns(steps)).toEqual([]);
   });
 
   it("acceptance 3: 3 Tab-filled fields with colliding aria-label='Value' and distinct css selectors produce 3 distinct fill steps", () => {
@@ -277,33 +186,55 @@ describe("v2 steps, mergeWithinSession, and tries pattern counter", () => {
     expect(steps[8].url).toBe("http://portal.local/next");
   });
 
-  it("splitEpisodes splits only on >= idleGapMs or session change and keeps nav/tab_switch inside episodes", () => {
-    const { steps } = eventsToSteps([
-      makeEvent("click", { ts: 1000, session: "s1" }),
-      makeEvent("tab_switch", { ts: 5000, session: "s1" }),
-      makeEvent("nav", { ts: 10_000, session: "s1", url: "http://a.local" }),
-      makeEvent("click", { ts: 39_999, session: "s1" }),
-      makeEvent("click", { ts: 69_999, session: "s1" }), // gap == 30_000 -> split
-      makeEvent("click", { ts: 70_500, session: "s2" }), // session change -> split
-    ]);
+  it("buildMeaningfulWindow keeps host-changing nav/tab_switch, links paste to copy, emits >=60s gap markers, and caps window", () => {
+    const events: Event[] = [
+      makeEvent("nav", { ts: 1000, app: "portal.local", url: "http://portal.local/list" }),
+      makeEvent("copy", {
+        ts: 2000,
+        app: "portal.local",
+        url: "http://portal.local/list",
+        target: { label: "Invoice ID", locators: [{ kind: "testid", value: "inv" }] },
+        clipboard: { text: "INV-42" },
+      }),
+      makeEvent("nav", { ts: 2500, app: "portal.local", url: "http://portal.local/list?p=2" }),
+      makeEvent("tab_switch", { ts: 3000, app: "erp.local", url: "http://erp.local/form" }),
+      makeEvent("paste", {
+        ts: 243_000,
+        app: "erp.local",
+        url: "http://erp.local/form",
+        target: { label: "ERP Invoice", locators: [{ kind: "testid", value: "erp-inv" }] },
+        value: "INV-42",
+      }),
+    ];
 
-    const episodes = splitEpisodes(steps, 30_000);
-    expect(episodes).toHaveLength(3);
-    expect(episodes[0]).toMatchObject({
-      session: "s1",
-      startTs: 1000,
-      endTs: 39_999,
-    });
-    expect(episodes[0].steps).toHaveLength(4);
-    expect(episodes[1]).toMatchObject({
-      session: "s1",
-      startTs: 69_999,
-      endTs: 69_999,
-    });
-    expect(episodes[2]).toMatchObject({
-      session: "s2",
-      startTs: 70_500,
-      endTs: 70_500,
-    });
+    const { steps } = eventsToSteps(events);
+    const window = buildMeaningfulWindow(steps, events, 40);
+
+    expect(window.meaningfulCount).toBe(3);
+    expect(window.steps).toEqual([
+      {
+        index: 0,
+        action: "copy",
+        host: "portal.local",
+        label: "Invoice ID",
+        value: "INV-42",
+      },
+      {
+        index: 1,
+        action: "tab_switch",
+        host: "erp.local",
+      },
+      {
+        index: 2,
+        action: "paste",
+        host: "erp.local",
+        label: "ERP Invoice",
+        value: "INV-42",
+        copiedFromStep: 0,
+      },
+    ]);
+    expect(window.gaps).toEqual([
+      { afterIndex: 1, marker: "4 min elsewhere (erp.local)" },
+    ]);
   });
 });

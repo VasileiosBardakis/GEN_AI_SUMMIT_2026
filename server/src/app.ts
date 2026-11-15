@@ -31,7 +31,7 @@ import {
   type GeminiClient,
   type GeminiClientOptions,
 } from "./llm/gemini.ts";
-import type { IrisJudgeOptions } from "./llm/iris.ts";
+import { judgeWorkflowIris, type IrisJudgeOptions } from "./llm/iris.ts";
 import {
   collectFlatSteps,
   createProposer,
@@ -393,8 +393,19 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const proposer = autoPropose
     ? createProposer({
         readSessionEvents: (sessionId) => readEvents(opts.tracesDir, sessionId),
-        compileV2: (input) =>
-          compileWorkflow(input, { gemini: opts.gemini, iris: opts.iris }),
+        judgeIris: (digest) =>
+          typeof opts.iris === "function"
+            ? opts.iris(digest)
+            : judgeWorkflowIris(
+                digest,
+                typeof opts.iris === "object" ? opts.iris : undefined,
+              ),
+        compileV2: (input, compileOpts) =>
+          compileWorkflow(input, {
+            gemini: opts.gemini,
+            iris: opts.iris,
+            ...compileOpts,
+          }),
         precheck: (script, meta) =>
           awaitHands(
             {
@@ -483,8 +494,6 @@ export function createServer(opts: CreateServerOptions): http.Server {
             },
             30000,
           ),
-        debounceMs: opts.proposeDebounceMs,
-        siteCooldownMs: opts.siteCooldownMs,
         now: opts.now,
         stageLog: emitStageLog,
         log: (line) => console.log(line),

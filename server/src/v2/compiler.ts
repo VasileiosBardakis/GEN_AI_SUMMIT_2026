@@ -14,7 +14,6 @@ import {
   type WorkflowIrisJudgment,
 } from "../llm/iris.ts";
 import { eventsToSteps, type PiiMap, type V2Step } from "./steps.ts";
-import { countRepeatedPatterns, resolveRepeatCount, splitEpisodes } from "./tries.ts";
 import {
   isPlaceholderHost,
   normalizeHost,
@@ -52,6 +51,7 @@ export type CompileOptions = {
   gemini?: GeminiClient | GeminiClientOptions;
   iris?: IrisJudgeOptions | IrisWorkflowJudge;
   irisOptions?: IrisJudgeOptions;
+  irisJudgment?: WorkflowIrisJudgment | null;
   maxSteps?: number;
   timeoutMs?: number;
   model?: string;
@@ -140,7 +140,7 @@ type ModelStep = z.infer<typeof ModelStepSchema>;
 
 export const ModelCompileOutputSchema = z.object({
   suggest: z.boolean(),
-  offerAt2: z.boolean(),
+  offerAt2: z.boolean().default(false),
   kind: z.enum(["snippet", "workflow"]),
   name: z.string(),
   reason: z.string(),
@@ -293,8 +293,93 @@ type PromptContext = {
   items: Map<string, PageSummaryListItem>;
   sourceMetaByContainerId: Map<string, SourceColumnMeta>;
   summaryViews: Array<{ host: string; viewKey: string; content: string }>;
-  repeatCount: number;
 };
+
+function buildCompilerSchemaForPrompt(prompt: string): Record<string, unknown> {
+  const lines = prompt.split("\n");
+  const hasContainers = lines.includes(
+    "PageSummary Containers (for withinId ONLY, NEVER targetId):",
+  );
+  const hasTargets = lines.includes("PageSummary Targets:") || hasContainers;
+  const hasLists = lines.includes("PageSummary Lists:");
+  if (hasTargets && hasLists) {
+    return COMPILER_RESPONSE_SCHEMA as unknown as Record<string, unknown>;
+  }
+
+  const leafProps: Record<string, unknown> = {
+    action: { type: "string", enum: [...MODEL_LEAF_ACTIONS] },
+    stepIndex: { type: "integer" },
+    bind: { type: "string" },
+    value: { type: "string" },
+    host: { type: "string" },
+    url: { type: "string" },
+    key: { type: "string" },
+    ms: { type: "number" },
+    timeoutMs: { type: "number" },
+    optional: { type: "boolean" },
+    ...(hasTargets
+      ? {
+          targetId: { type: "string" },
+          withinId: { type: "string" },
+          targetTextParam: { type: "string" },
+          withinTextParam: { type: "string" },
+        }
+      : {}),
+  };
+
+  const topStepProps: Record<string, unknown> = {
+    ...leafProps,
+    ...(hasLists
+      ? {
+          action: { type: "string", enum: [...MODEL_LEAF_ACTIONS, "forEach"] },
+          items: { type: "string" },
+          itemIds: { type: "array", items: { type: "string" } },
+          steps: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: leafProps,
+              required: ["action"],
+            },
+          },
+        }
+      : {}),
+  };
+
+  return {
+    type: "object",
+    properties: {
+      suggest: { type: "boolean" },
+      offerAt2: { type: "boolean" },
+      kind: { type: "string", enum: ["snippet", "workflow"] },
+      name: { type: "string" },
+      reason: { type: "string" },
+      risk: { type: "string", enum: ["low", "medium", "high"] },
+      runMode: { type: "string", enum: ["run_remaining", "save_only"] },
+      params: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            description: { type: "string" },
+            example: { type: "string" },
+          },
+          required: ["name"],
+        },
+      },
+      steps: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: topStepProps,
+          required: ["action"],
+        },
+      },
+    },
+    required: [...COMPILER_RESPONSE_SCHEMA.required],
+  };
+}
 
 function isGeminiClient(
   value: GeminiClient | GeminiClientOptions | undefined,
@@ -1036,19 +1121,21 @@ function buildCompilePrompt(ctx: PromptContext): string {
     .filter((v) => !v.content.startsWith("{"))
     .map((v) => `[${v.host} / ${v.viewKey}]\n${v.content}`);
 
+  const rule1 =
+    targetLines.length > 0
+      ? "1. Never write CSS/DOM selectors. Every UI step (`click`, `fill`, `select`, `readText`, `readValue`, `extractList`, `waitFor`, `key`, `submit`) must reference a `stepIndex` from Steps or an exact `targetId` from PageSummary Targets."
+      : "1. Never write CSS/DOM selectors. Every UI step (`click`, `fill`, `select`, `readText`, `readValue`, `extractList`, `waitFor`, `key`, `submit`) must reference a `stepIndex` from Steps (omit `targetId` and `withinId` since no PageSummary Targets exist).";
+
   return [
-    "Compile the repeated browser steps into ONE concise parameterized workflow JSON.",
+    "Compile the user's browser steps into ONE concise parameterized workflow JSON if worth automating.",
     "",
     "RULES:",
-    "1. Never write CSS/DOM selectors. Every UI step (`click`, `fill`, `select`, `readText`, `readValue`, `extractList`, `waitFor`, `key`, `submit`) must reference a `stepIndex` from Steps or an exact `targetId` from PageSummary Targets.",
-    "2. Output one clean generalized workflow repetition; drop one-off stray clicks or irrelevant side excursions.",
+    rule1,
+    "2. Output one clean generalized workflow repetition; drop one-off stray clicks or irrelevant side excursions, and do not add extra `navigate` steps unless the user navigated between distinct pages as part of the task.",
     "3. Keep all distinct form inputs and submit keys (e.g. `Enter`).",
     "4. Parameterize user-supplied variables in `params[]` and `\"{{paramName}}\"`. Use `readText`/`readValue` with `bind` and `\"{{varName}}\"` for values copied across steps or tabs.",
     "5. `switchTab` uses `stepIndex` or `host` (hostname only). Any `navigate` must preserve the full URL (scheme, host, port, path).",
-    "6. Use `forEach` with `runMode: \"run_remaining\"` and `itemIds` only when PageSummary Lists contains unprocessed items; scope row-level steps with `withinId` and `withinTextParam`. Otherwise set `runMode: \"save_only\"` with flat steps.",
-    "7. Set `offerAt2: true` when clearly generalizable at 2 repeats; `risk: \"high\"` for irreversible external actions; `suggest: false` only if one-off.",
-    "",
-    `Observed repeat count: ${ctx.repeatCount}`,
+    "6. Use `forEach` with `runMode: \"run_remaining\"` and `itemIds` only when PageSummary Lists contains unprocessed items; scope row-level steps with `withinId` and `withinTextParam`. Otherwise set `runMode: \"save_only\"` with flat steps. Set `risk: \"high\"` for irreversible external actions; only set `suggest: true` when the steps show a repeated workflow (2+ completed cycles) or a clear multi-field copy/paste transfer with unprocessed items in PageSummary Lists — set `suggest: false` if one-off or incomplete.",
     "",
     "Steps:",
     ...stepLines,
@@ -1652,13 +1739,19 @@ function computeStats(
   allSteps: readonly V2Step[],
   repetitions: number,
 ): CompiledWorkflowStats {
-  const episodes = splitEpisodes([...allSteps]);
-  let observedSeconds = 0;
-  for (const ep of episodes) {
-    observedSeconds += Math.max(0, (ep.endTs - ep.startTs) / 1000);
+  let observedMs = 0;
+  for (let i = 1; i < allSteps.length; i++) {
+    const prev = allSteps[i - 1];
+    const curr = allSteps[i];
+    if (curr.session === prev.session) {
+      const dt = curr.ts - prev.ts;
+      if (dt > 0 && dt < 60_000) {
+        observedMs += dt;
+      }
+    }
   }
 
-  const manualSeconds = Number(observedSeconds.toFixed(2));
+  const manualSeconds = Number((observedMs / 1000).toFixed(2));
   const replaySeconds = 0;
   const minutesPerWeek = Number((manualSeconds / 60).toFixed(2));
 
@@ -1670,7 +1763,10 @@ function computeStats(
   };
 }
 
-function createCompileGeminiClient(opts?: CompileOptions): GeminiClient {
+function createCompileGeminiClient(
+  opts?: CompileOptions,
+  prompt?: string,
+): GeminiClient {
   if (isGeminiClient(opts?.gemini)) {
     return opts.gemini;
   }
@@ -1679,7 +1775,9 @@ function createCompileGeminiClient(opts?: CompileOptions): GeminiClient {
     ...baseOpts,
     model: opts?.model ?? baseOpts.model ?? resolveCompileModel(),
     thinkingBudget: baseOpts.thinkingBudget ?? 0,
-    responseSchema: baseOpts.responseSchema ?? COMPILER_RESPONSE_SCHEMA,
+    responseSchema:
+      baseOpts.responseSchema ??
+      (prompt ? buildCompilerSchemaForPrompt(prompt) : COMPILER_RESPONSE_SCHEMA),
     timeoutMs: baseOpts.timeoutMs ?? opts?.timeoutMs ?? resolveCompileTimeoutMs(),
   });
 }
@@ -1704,13 +1802,7 @@ export async function compileWorkflow(
       ? enrichedAll.slice(-MAX_PROMPT_STEPS)
       : enrichedAll;
 
-  const precompileAt = Math.max(2, resolveRepeatCount() - 1);
-  const patterns = countRepeatedPatterns(rawSteps, { minRepeats: precompileAt });
-  const inferredRepeats = patterns[0]?.count ?? 1;
-  const repeatCount = Math.max(
-    1,
-    Math.trunc(input.repeatCount ?? inferredRepeats),
-  );
+  const repeatCount = Math.max(1, Math.trunc(input.repeatCount ?? 1));
 
   const summaryData = extractPageSummaryData(enrichedAll);
 
@@ -1718,11 +1810,10 @@ export async function compileWorkflow(
     allSteps: enrichedAll,
     indexedSteps,
     ...summaryData,
-    repeatCount,
   };
 
   const prompt = buildCompilePrompt(ctx);
-  const gemini = createCompileGeminiClient(opts);
+  const gemini = createCompileGeminiClient(opts, prompt);
 
   const distinctApps = Array.from(
     new Set(
@@ -1746,8 +1837,10 @@ export async function compileWorkflow(
     }),
   };
 
-  const irisPromise: Promise<WorkflowIrisJudgment | null> =
-    typeof opts?.iris === "function"
+  const hasPrecomputedIris = opts !== undefined && opts.irisJudgment !== undefined;
+  const irisPromise: Promise<WorkflowIrisJudgment | null> = hasPrecomputedIris
+    ? Promise.resolve(opts.irisJudgment!)
+    : typeof opts?.iris === "function"
       ? opts.iris(irisDigest, opts.irisOptions).catch(() => null)
       : judgeWorkflowIris(irisDigest, opts?.iris ?? opts?.irisOptions).catch(
           () => null,
