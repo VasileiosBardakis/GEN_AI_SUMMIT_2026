@@ -1338,6 +1338,279 @@ describe("Brain v2 compiler and validator", () => {
     });
     expect(differentPathPromptCheck.prompts[0]).toContain("full URL including port and path");
   });
+
+  it("validateCompiledWorkflow enforces seenHosts (including port) on startUrl, navigate, switchTab, and apps", () => {
+    const validWithPort: CompiledWorkflow = {
+      kind: "workflow",
+      name: "Open form",
+      reason: "Navigates to form and saves",
+      risk: "low",
+      offerAt2: false,
+      runMode: "save_only",
+      pauseBeforeSubmit: false,
+      startUrl: "http://localhost:4173/form.html",
+      apps: ["localhost"],
+      params: [],
+      steps: [
+        { action: "switchTab", host: "localhost" },
+        { action: "navigate", url: "http://localhost:4173/form.html" },
+        {
+          action: "click",
+          target: [{ kind: "css", value: "#save" }],
+        },
+      ],
+      stats: {
+        repetitions: 3,
+        minutesPerWeek: 1.5,
+        manualSeconds: 18,
+        replaySeconds: 2,
+      },
+    };
+
+    expect(
+      validateCompiledWorkflow(validWithPort, { seenHosts: ["127.0.0.1:4173"] })
+        .ok,
+    ).toBe(true);
+    expect(
+      validateCompiledWorkflow(validWithPort, {
+        seenHosts: new Set(["localhost:4173"]),
+      }).ok,
+    ).toBe(true);
+
+    // Reject navigate.url with unseen host
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "localhost" },
+            { action: "navigate", url: "https://invented.example/form.html" },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject navigate.url inside forEach with unseen host
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "localhost" },
+            {
+              action: "forEach",
+              items: [{ item: "row1" }],
+              steps: [
+                { action: "navigate", url: "https://invented.example/form.html" },
+              ],
+            },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject startUrl with unseen host or lost port
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          startUrl: "https://invented.example/form.html",
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          startUrl: "http://localhost/form.html",
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject navigate.url that drops captured port or changes port
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "localhost" },
+            { action: "navigate", url: "http://localhost/form.html" },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "localhost" },
+            { action: "navigate", url: "http://localhost:9999/form.html" },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject switchTab.host with unseen host
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "invented.example" },
+            { action: "navigate", url: "http://localhost:4173/form.html" },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject apps with unseen host
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          apps: ["localhost", "invented.example"],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+  });
+
+  it("compileWorkflow uses captured.url when stepIndex is set and model invents raw.url, and rejects invented-host navigate without stepIndex", async () => {
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "inv-nav-1",
+        ts: 1000,
+        session: "s_invented_nav",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "nav",
+      },
+      {
+        v: 1,
+        id: "inv-fill-1",
+        ts: 2000,
+        session: "s_invented_nav",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "input",
+        target: {
+          tag: "input",
+          label: "Name",
+          locators: [{ kind: "css", value: "#name" }],
+        },
+        value: "Ada",
+      },
+      {
+        v: 1,
+        id: "inv-click-1",
+        ts: 3000,
+        session: "s_invented_nav",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "click",
+        target: {
+          tag: "button",
+          label: "Save",
+          locators: [{ kind: "css", value: "#save" }],
+        },
+      },
+    ];
+
+    // 1) stepIndex is set and model invents an unseen URL -> uses captured.url
+    const withStepIndexInvented = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            {
+              action: "navigate",
+              stepIndex: 0,
+              url: "https://invented.example/phishing",
+            },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withStepIndexInvented).not.toBeNull();
+    expect(withStepIndexInvented!.steps[1]).toEqual({
+      action: "navigate",
+      url: "http://localhost:4173/form.html",
+    });
+
+    // 2) stepIndex is absent and model invents an unseen host -> dropped/rejected (null)
+    const withoutStepIndexInvented = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            { action: "navigate", url: "https://invented.example/phishing" },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withoutStepIndexInvented).toBeNull();
+
+    // 3) stepIndex is absent and model emits seen host with wrong port -> rejected by validator (null)
+    const withoutStepIndexWrongPort = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            { action: "navigate", url: "http://localhost:9999/form.html" },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withoutStepIndexWrongPort).toBeNull();
+  });
 });
 
 describe("v2 compiler model and timeout configuration", () => {
