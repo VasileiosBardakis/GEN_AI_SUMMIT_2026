@@ -6,11 +6,13 @@
 
 An adaptive assistant that observes repetitive workflows as you work and automates them on the fly. Powered by Gemini and Oumi Iris, it supervises the user while they work, and suggests improved workflows.
 
-## What it is
+Built as a Chrome extension paired with a local backend AI. Instead of writing scripts or setting up integrations ahead of time, you just work normally. When Eyes sees you repeating a workflow, it creates an automated repeatable action for it.
 
-AIz (Eyes) is a Chrome extension paired with a local backend AI. The extension watches how you work across tabs, forms, spreadsheets, and internal tools, while the backend detects repeated routines and turns them into reusable automations.
-
-Instead of writing scripts or setting up integrations ahead of time, you just work normally. When Eyes sees you repeating a workflow, it offers to finish the remaining items or save it as a one-click skill, pausing before major actions like submitting a form.
+<p align="center">
+  <img src="docs/images/pattern-detected.png" alt="Pattern detected suggestion card" width="340" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/images/optimization-library.png" alt="Side panel optimization library" width="290" />
+</p>
 
 ## How it works
 
