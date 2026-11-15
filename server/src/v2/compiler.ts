@@ -51,7 +51,17 @@ export type CompileOptions = {
   model?: string;
 };
 
-const DEFAULT_COMPILE_TIMEOUT_MS = 5000;
+export const DEFAULT_V2_COMPILE_MODEL = "gemini-3.1-flash-lite";
+export const DEFAULT_COMPILE_TIMEOUT_MS = 5000;
+
+export function resolveCompileTimeoutMs(): number {
+  const n = Number(process.env.V2_COMPILE_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_COMPILE_TIMEOUT_MS;
+}
+
+export function resolveCompileModel(): string {
+  return process.env.V2_COMPILE_MODEL?.trim() || DEFAULT_V2_COMPILE_MODEL;
+}
 const MAX_PROMPT_STEPS = 60;
 const MAX_SUMMARY_CHARS = 4096;
 
@@ -1481,11 +1491,11 @@ function createCompileGeminiClient(
   const baseOpts: GeminiClientOptions = opts?.gemini ?? {};
   return createGeminiClient({
     ...baseOpts,
-    ...(opts?.model !== undefined ? { model: opts.model } : {}),
+    model: opts?.model ?? baseOpts.model ?? resolveCompileModel(),
     thinkingBudget: baseOpts.thinkingBudget ?? 0,
     responseSchema:
       baseOpts.responseSchema ?? buildCompilerResponseSchema(ctx),
-    timeoutMs: baseOpts.timeoutMs ?? opts?.timeoutMs ?? DEFAULT_COMPILE_TIMEOUT_MS,
+    timeoutMs: baseOpts.timeoutMs ?? opts?.timeoutMs ?? resolveCompileTimeoutMs(),
   });
 }
 
