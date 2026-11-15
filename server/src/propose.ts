@@ -555,7 +555,16 @@ export function createProposer(deps: ProposerDeps): Proposer {
           ...(compiled ? { name: compiled.name } : {}),
         });
 
-        if (!compiled || !compiled.offerAt2) {
+        if (!compiled) {
+          return;
+        }
+        if (!compiled.offerAt2) {
+          deps.onCompiled?.({
+            sessionId,
+            finding: compiledWorkflowToFinding(compiled),
+            script: compiledWorkflowToActionScript(compiled),
+            workflow: compiled,
+          });
           return;
         }
       }

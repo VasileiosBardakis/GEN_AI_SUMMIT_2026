@@ -19,7 +19,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["dist/replay-demo.mp4"],
+      "resources": ["dist/replay-demo.webm"],
       "matches": ["<all_urls>"]
     }
   ],

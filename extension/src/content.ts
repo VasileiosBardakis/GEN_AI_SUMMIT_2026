@@ -136,12 +136,18 @@ export function renderReplay(suggestion: Suggestion): string {
   if (suggestion.kind === "text" || suggestion.primaryLabel === "Got it") return "";
   const videoUrl =
     suggestion.videoUrl ??
-    extensionAssetUrl("dist/replay-demo.mp4") ??
+    extensionAssetUrl("dist/replay-demo.webm") ??
     getConfig().clickReplayUrl;
   if (!videoUrl) return "";
   return `
     <div class="replay" data-eyes-replay>
-      <video src="${escapeHtml(videoUrl)}" autoplay muted loop playsinline preload="metadata"></video>
+      <div class="replay-stage">
+        <video src="${escapeHtml(videoUrl)}" autoplay muted loop playsinline preload="auto"></video>
+        <div class="replay-loading" data-eyes-replay-loading>
+          <span class="replay-spinner" aria-hidden="true"></span>
+          <span>Loading preview…</span>
+        </div>
+      </div>
       <div class="replay-bar">
         <span class="replay-caption">Automation replay</span>
       </div>
@@ -876,13 +882,47 @@ export function showSuggestion(
         border-radius: 7px;
         background: #171614;
       }
+      .replay-stage {
+        position: relative;
+        width: 100%;
+        max-height: 118px;
+        aspect-ratio: 16 / 9;
+        background: #171614;
+      }
       .replay video {
         display: block;
         width: 100%;
+        height: 100%;
         max-height: 118px;
         aspect-ratio: 16 / 9;
         object-fit: contain;
         background: #171614;
+      }
+      .replay-loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        background: #171614;
+        color: #b8b0a4;
+        font-size: 11px;
+        pointer-events: none;
+      }
+      .replay-loading[hidden] {
+        display: none;
+      }
+      .replay-spinner {
+        width: 13px;
+        height: 13px;
+        border: 1.6px solid rgba(184, 176, 164, 0.28);
+        border-top-color: #ccb08d;
+        border-radius: 50%;
+        animation: eyes-spin 680ms linear infinite;
+      }
+      @keyframes eyes-spin {
+        to { transform: rotate(360deg); }
       }
       .replay-bar {
         display: flex;
@@ -1189,7 +1229,27 @@ export function showSuggestion(
     if (success) success.hidden = false;
     setTimeout(() => host.remove(), 1000);
   });
-  shadow.querySelector("video")?.addEventListener("error", () => {
+  const videoEl = shadow.querySelector("video");
+  const loadingEl = shadow.querySelector<HTMLElement>("[data-eyes-replay-loading]");
+  const hideReplayLoading = (): void => {
+    if (loadingEl) loadingEl.hidden = true;
+  };
+  if (videoEl) {
+    if (videoEl.readyState >= 2) {
+      hideReplayLoading();
+    } else {
+      videoEl.addEventListener("loadeddata", hideReplayLoading);
+      videoEl.addEventListener("canplay", hideReplayLoading);
+      videoEl.addEventListener("playing", hideReplayLoading);
+    }
+  }
+  videoEl?.addEventListener("error", () => {
+    const fallbackUrl = extensionAssetUrl("dist/replay-demo.webm") ?? getConfig().clickReplayUrl;
+    if (fallbackUrl && videoEl.getAttribute("src") !== fallbackUrl) {
+      videoEl.setAttribute("src", fallbackUrl);
+      videoEl.load?.();
+      return;
+    }
     shadow.querySelector("[data-eyes-replay]")?.remove();
   });
 
@@ -2291,6 +2351,7 @@ function setupHandsTracker(): void {
       name?: string;
       solution?: string;
       script?: ActionScript;
+      videoUrl?: string;
       pauseBeforeSubmit?: boolean;
       runMode?: "run" | "run_remaining" | "save_only";
       params?: SuggestionParam[];
@@ -2333,6 +2394,7 @@ function setupHandsTracker(): void {
         name: typeof msg.name === "string" ? msg.name : "",
         solution: msg.solution,
         script: msg.script,
+        videoUrl: typeof msg.videoUrl === "string" ? msg.videoUrl : undefined,
         pauseBeforeSubmit:
           typeof msg.pauseBeforeSubmit === "boolean" ? msg.pauseBeforeSubmit : undefined,
         runMode: normalizedRunMode,

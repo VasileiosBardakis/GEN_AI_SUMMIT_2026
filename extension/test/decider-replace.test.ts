@@ -256,7 +256,7 @@ describe("EYES_SHOW_DECIDER popup replacement", () => {
       const host = fakeDocument.getElementById("__eyes_suggestion_host__");
       const html = host?.shadowRoot?.innerHTML ?? "";
       const body = html.split("</style>")[1] ?? "";
-      expect(body).toContain("chrome-extension://test-extension/dist/replay-demo.mp4");
+      expect(body).toContain("chrome-extension://test-extension/dist/replay-demo.webm");
       expect(body).toContain("data-eyes-replay");
       expect(body).not.toContain("dag-canvas");
       expect(body).not.toContain('class="preview keycap"');

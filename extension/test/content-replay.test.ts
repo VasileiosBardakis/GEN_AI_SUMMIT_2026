@@ -38,7 +38,7 @@ describe("renderReplay", () => {
     const html = renderReplay(baseSuggestion);
 
     expect(html).toContain(
-      'src="chrome-extension://test-extension/dist/replay-demo.mp4"'
+      'src="chrome-extension://test-extension/dist/replay-demo.webm"'
     );
     expect(html).toContain("Automation replay");
   });

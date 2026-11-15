@@ -992,6 +992,7 @@ export interface HandsCommand {
   name?: string;
   solution?: string;
   script?: V2ActionScript;
+  videoUrl?: string;
   steps?: PrecheckStepInput[];
   url?: string;
   pauseBeforeSubmit?: boolean;
@@ -1083,11 +1084,18 @@ export async function handleHandsCommand(
             }),
           );
         }
+        const resolvedVideoUrl =
+          typeof cmd.videoUrl === "string" && cmd.videoUrl.trim().length > 0
+            ? /^https?:\/\//i.test(cmd.videoUrl.trim())
+              ? cmd.videoUrl.trim()
+              : `${serverUrl.replace(/\/+$/, "")}/${cmd.videoUrl.trim().replace(/^\/+/, "")}`
+            : undefined;
         const msgPayload = {
           kind: "EYES_SHOW_DECIDER",
           name: decideName,
           solution: decideSolution,
           script: decideScript,
+          ...(resolvedVideoUrl ? { videoUrl: resolvedVideoUrl } : {}),
           ...(cmd.isRecall ? { isRecall: true } : {}),
           ...(cmd.entryId ? { entryId: cmd.entryId } : {}),
           ...(pauseBeforeSubmit !== undefined ? { pauseBeforeSubmit } : {}),
