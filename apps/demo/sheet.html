@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Client Sheet Workflow — Local Demo</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #0f172a; color: #e2e8f0; }
+    header { padding: 20px 28px; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+    h1 { font-size: 20px; margin: 0; }
+    .badge { background: #0ea5e9; color: #082f49; font-weight: 700; font-size: 12px; padding: 3px 8px; border-radius: 999px; }
+    main { max-width: 1100px; margin: 0 auto; padding: 24px 28px 60px; display: grid; gap: 20px; }
+    section { background: #111c33; border: 1px solid #1e293b; border-radius: 10px; padding: 20px; }
+    section h2 { margin: 0 0 4px; font-size: 15px; }
+    section p { margin: 0 0 16px; color: #94a3b8; font-size: 13px; }
+    label { display: grid; gap: 6px; font-size: 12px; color: #94a3b8; margin-bottom: 12px; }
+    input, button { font: inherit; }
+    input { background: #0b1325; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px; padding: 9px 10px; width: 100%; max-width: 360px; }
+    input:focus { outline: 2px solid #38bdf8; outline-offset: 1px; }
+    button { background: #1d4ed8; border: 0; color: white; border-radius: 6px; padding: 9px 14px; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    button.ghost { background: #1e293b; border: 1px solid #334155; }
+    button.ghost:hover { background: #334155; }
+    button.compact { padding: 5px 10px; font-size: 12px; }
+    .tabs { display: flex; gap: 8px; border-bottom: 1px solid #1e293b; padding-bottom: 12px; }
+    .tabs [role="tab"] { background: #1e293b; border: 1px solid #334155; color: #cbd5e1; }
+    .tabs [role="tab"][aria-selected="true"] { background: #1d4ed8; border-color: #2563eb; color: #ffffff; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid #1e293b; padding: 10px 12px; text-align: left; }
+    th { background: #0b1325; color: #94a3b8; font-weight: 600; }
+    .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    .hint { color: #64748b; font-size: 12px; }
+    .status { font-size: 12px; color: #38bdf8; min-height: 18px; }
+    .pill { display: inline-block; background: #1e293b; border: 1px solid #334155; border-radius: 999px; padding: 3px 9px; font-size: 12px; color: #94a3b8; }
+    .pill.saved { background: #0c4a6e; border-color: #0284c7; color: #e0f2fe; }
+    .cell-value { user-select: text; font-family: ui-monospace, monospace; font-size: 12px; background: #0b1325; border: 1px solid #334155; border-radius: 6px; padding: 4px 8px; display: inline-block; }
+    .lookup-cell { user-select: text; }
+    .lookup-cell:focus { outline: 2px solid #38bdf8; outline-offset: -2px; }
+    .detail-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Client Sheet Workflow</h1>
+      <div class="hint">Open each client, look up their rate in the Sheet tab, copy it back, and save.</div>
+    </div>
+    <span class="badge">LOCAL ONLY</span>
+  </header>
+
+  <main>
+    <div class="tabs" role="tablist" aria-label="Workspace views">
+      <button type="button" role="tab" id="tab-clients" data-testid="tab-clients" aria-selected="true" aria-controls="clients-panel">Clients</button>
+      <button type="button" role="tab" id="tab-sheet" data-testid="tab-sheet" aria-selected="false" aria-controls="sheet-panel">Sheet</button>
+    </div>
+
+    <div id="clients-panel" role="tabpanel" aria-labelledby="tab-clients">
+      <section id="client-list-section" data-testid="client-list">
+        <h2>Clients</h2>
+        <p>Select a client to inspect or update their lookup value.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Client</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="client-list-body"></tbody>
+        </table>
+      </section>
+
+      <section id="client-detail-section" data-testid="client-detail" hidden>
+        <div class="detail-header">
+          <div>
+            <h2 id="detail-client-name" data-testid="detail-client-name">Client</h2>
+            <div class="hint" id="detail-client-status" data-testid="detail-client-status">Status: Pending</div>
+          </div>
+          <button type="button" class="ghost" id="back-to-list-btn" data-testid="back-to-list-btn">Back to list</button>
+        </div>
+        <form id="client-detail-form">
+          <label for="client-value-input">
+            Lookup value
+            <input id="client-value-input" data-testid="client-value-input" name="client_value" type="text" placeholder="Paste value from Sheet" />
+          </label>
+          <div class="toolbar" style="margin-bottom: 0;">
+            <button type="submit" id="save-client-btn" data-testid="save-client-btn">Save</button>
+            <span class="status" id="detail-status" aria-live="polite"></span>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div id="sheet-panel" role="tabpanel" aria-labelledby="tab-sheet" hidden>
+      <section>
+        <h2>Reference Sheet</h2>
+        <p>Locate a client row, select the lookup value and press Ctrl+C (or click Copy), then switch back to Clients.</p>
+        <table data-testid="sheet-table">
+          <thead>
+            <tr>
+              <th>Client</th>
+              <th>Lookup Value</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="sheet-table-body"></tbody>
+        </table>
+        <div class="toolbar" style="margin-top: 12px; margin-bottom: 0;">
+          <span class="status" id="sheet-copy-status" aria-live="polite"></span>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const CLIENTS = [
+      { id: 1, name: "Nordic Freight Co", sheetValue: "RATE-1042", savedValue: "" },
+      { id: 2, name: "Helios Energy Ltd", sheetValue: "RATE-2085", savedValue: "" },
+      { id: 3, name: "Boreal Timber SA", sheetValue: "RATE-3190", savedValue: "" },
+      { id: 4, name: "Vanguard Marine Inc", sheetValue: "RATE-4418", savedValue: "" }
+    ];
+
+    let activeTab = "clients";
+    let clientsSubView = "list";
+    let selectedClientId = null;
+
+    const tabClientsBtn = document.getElementById("tab-clients");
+    const tabSheetBtn = document.getElementById("tab-sheet");
+    const clientsPanel = document.getElementById("clients-panel");
+    const sheetPanel = document.getElementById("sheet-panel");
+    const clientListSection = document.getElementById("client-list-section");
+    const clientDetailSection = document.getElementById("client-detail-section");
+    const clientListBody = document.getElementById("client-list-body");
+    const sheetTableBody = document.getElementById("sheet-table-body");
+    const detailClientName = document.getElementById("detail-client-name");
+    const detailClientStatus = document.getElementById("detail-client-status");
+    const clientValueInput = document.getElementById("client-value-input");
+    const detailForm = document.getElementById("client-detail-form");
+    const backToListBtn = document.getElementById("back-to-list-btn");
+    const detailStatus = document.getElementById("detail-status");
+    const sheetCopyStatus = document.getElementById("sheet-copy-status");
+
+    function getSelectedClient() {
+      return CLIENTS.find((c) => c.id === selectedClientId) || null;
+    }
+
+    function renderClientList() {
+      clientListBody.innerHTML = "";
+      for (const client of CLIENTS) {
+        const tr = document.createElement("tr");
+        tr.setAttribute("data-testid", `client-row-${client.id}`);
+        tr.setAttribute("data-client-name", client.name);
+
+        const nameTd = document.createElement("td");
+        nameTd.textContent = client.name;
+
+        const statusTd = document.createElement("td");
+        const pill = document.createElement("span");
+        pill.className = client.savedValue ? "pill saved" : "pill";
+        pill.setAttribute("data-testid", `client-status-${client.id}`);
+        pill.textContent = client.savedValue ? `Saved: ${client.savedValue}` : "Pending";
+        statusTd.appendChild(pill);
+
+        const actionTd = document.createElement("td");
+        const openBtn = document.createElement("button");
+        openBtn.type = "button";
+        openBtn.className = "ghost compact";
+        openBtn.setAttribute("data-testid", `open-client-${client.id}`);
+        openBtn.setAttribute("data-client-name", client.name);
+        openBtn.textContent = "Open";
+        openBtn.addEventListener("click", () => {
+          selectedClientId = client.id;
+          clientsSubView = "detail";
+          detailStatus.textContent = "";
+          render();
+        });
+        actionTd.appendChild(openBtn);
+
+        tr.appendChild(nameTd);
+        tr.appendChild(statusTd);
+        tr.appendChild(actionTd);
+        clientListBody.appendChild(tr);
+      }
+    }
+
+    function renderSheetTable() {
+      sheetTableBody.innerHTML = "";
+      for (const client of CLIENTS) {
+        const tr = document.createElement("tr");
+        tr.setAttribute("data-testid", `sheet-row-${client.id}`);
+        tr.setAttribute("data-client-name", client.name);
+
+        const nameTd = document.createElement("td");
+        nameTd.textContent = client.name;
+
+        const valueTd = document.createElement("td");
+        valueTd.className = "lookup-cell";
+        valueTd.tabIndex = 0;
+        valueTd.setAttribute("data-col", "lookup");
+        valueTd.setAttribute("data-cell", `B${client.id}`);
+        valueTd.setAttribute("data-row", String(client.id));
+        valueTd.setAttribute("data-col-index", "2");
+
+        const valueSpan = document.createElement("span");
+        valueSpan.className = "cell-value";
+        valueSpan.id = `sheet-value-${client.id}`;
+        valueSpan.setAttribute("data-testid", `sheet-value-${client.id}`);
+        valueSpan.textContent = client.sheetValue;
+        valueTd.appendChild(valueSpan);
+
+        const actionTd = document.createElement("td");
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "ghost compact copy-row-btn";
+        copyBtn.setAttribute("data-testid", `copy-sheet-value-${client.id}`);
+        copyBtn.setAttribute("data-copy-target", `sheet-value-${client.id}`);
+        copyBtn.textContent = "Copy";
+        copyBtn.addEventListener("click", async () => {
+          const selection = window.getSelection();
+          if (selection) {
+            const range = document.createRange();
+            range.selectNodeContents(valueSpan);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+          let copied = false;
+          try {
+            copied = document.execCommand("copy");
+          } catch {
+            copied = false;
+          }
+          if (!copied && navigator.clipboard && navigator.clipboard.writeText) {
+            try {
+              await navigator.clipboard.writeText(client.sheetValue);
+              copied = true;
+            } catch {
+              copied = false;
+            }
+          }
+          sheetCopyStatus.textContent = copied
+            ? `Copied "${client.sheetValue}" for ${client.name}`
+            : "Selection ready — press Ctrl+C to copy.";
+        });
+        actionTd.appendChild(copyBtn);
+
+        tr.appendChild(nameTd);
+        tr.appendChild(valueTd);
+        tr.appendChild(actionTd);
+        sheetTableBody.appendChild(tr);
+      }
+    }
+
+    function renderDetail() {
+      const client = getSelectedClient();
+      if (!client) return;
+      detailClientName.textContent = client.name;
+      detailClientStatus.textContent = client.savedValue
+        ? `Status: Saved (${client.savedValue})`
+        : "Status: Pending";
+      clientValueInput.value = client.savedValue;
+    }
+
+    function render() {
+      const isClients = activeTab === "clients";
+      tabClientsBtn.setAttribute("aria-selected", String(isClients));
+      tabSheetBtn.setAttribute("aria-selected", String(!isClients));
+      clientsPanel.hidden = !isClients;
+      sheetPanel.hidden = isClients;
+
+      clientListSection.hidden = clientsSubView !== "list";
+      clientDetailSection.hidden = clientsSubView !== "detail";
+
+      renderClientList();
+      if (clientsSubView === "detail") {
+        renderDetail();
+      }
+    }
+
+    tabClientsBtn.addEventListener("click", () => {
+      activeTab = "clients";
+      render();
+    });
+
+    tabSheetBtn.addEventListener("click", () => {
+      activeTab = "sheet";
+      render();
+    });
+
+    backToListBtn.addEventListener("click", () => {
+      clientsSubView = "list";
+      selectedClientId = null;
+      detailStatus.textContent = "";
+      render();
+    });
+
+    detailForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const client = getSelectedClient();
+      if (!client) return;
+      const val = clientValueInput.value.trim();
+      if (!val) {
+        detailStatus.textContent = "Paste or enter a value before saving.";
+        return;
+      }
+      client.savedValue = val;
+      detailStatus.textContent = `Saved ${val} for ${client.name}.`;
+      render();
+    });
+
+    renderSheetTable();
+    render();
+  </script>
+</body>
+</html>
