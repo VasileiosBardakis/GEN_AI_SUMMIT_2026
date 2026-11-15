@@ -241,6 +241,30 @@ describe("EYES_SHOW_DECIDER popup replacement", () => {
     expect(fakeDocument.documentElement.children).toEqual([hostB]);
   });
 
+  it("keeps the popup minimal when a replay video is available", () => {
+    (globalThis as Record<string, unknown>).chrome = {
+      runtime: {
+        id: "test-extension",
+        getURL: (path: string) => `chrome-extension://test-extension/${path}`,
+      },
+    };
+
+    try {
+      const onMessage = fakeWindow.__HANDS_ON_MESSAGE__;
+      onMessage?.(makeDeciderPayload("Workflow A", "Run workflow A"), null, vi.fn());
+
+      const host = fakeDocument.getElementById("__eyes_suggestion_host__");
+      const html = host?.shadowRoot?.innerHTML ?? "";
+      const body = html.split("</style>")[1] ?? "";
+      expect(body).toContain("chrome-extension://test-extension/dist/replay-demo.mp4");
+      expect(body).toContain("data-eyes-replay");
+      expect(body).not.toContain("dag-canvas");
+      expect(body).not.toContain('class="preview keycap"');
+    } finally {
+      delete (globalThis as Record<string, unknown>).chrome;
+    }
+  });
+
   it("resolves popup B on primary click without double-resolving popup A", () => {
     const onMessage = fakeWindow.__HANDS_ON_MESSAGE__;
     expect(onMessage).toBeTypeOf("function");

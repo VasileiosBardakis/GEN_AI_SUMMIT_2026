@@ -70,6 +70,7 @@ function getConfig(): WatcherConfig {
     endpoint: win.__EYES_CONFIG__?.endpoint ?? `${DEFAULT_SERVER_URL}/events`,
     batchMs: win.__EYES_CONFIG__?.batchMs ?? 250,
     maxBatchSize: win.__EYES_CONFIG__?.maxBatchSize ?? 50,
+    clickReplayUrl: win.__EYES_CONFIG__?.clickReplayUrl,
   };
 }
 
@@ -121,11 +122,26 @@ function renderFlows(suggestion: Suggestion): string {
   `;
 }
 
-function renderReplay(suggestion: Suggestion): string {
-  if (suggestion.kind === "text" || !suggestion.videoUrl) return "";
+function extensionAssetUrl(assetPath: string): string | undefined {
+  const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
+    | { runtime?: { id?: string; getURL?: (path: string) => string } }
+    | undefined;
+  if (chromeGlobal?.runtime?.id && typeof chromeGlobal.runtime.getURL === "function") {
+    return chromeGlobal.runtime.getURL(assetPath);
+  }
+  return undefined;
+}
+
+export function renderReplay(suggestion: Suggestion): string {
+  if (suggestion.kind === "text" || suggestion.primaryLabel === "Got it") return "";
+  const videoUrl =
+    suggestion.videoUrl ??
+    extensionAssetUrl("dist/replay-demo.mp4") ??
+    getConfig().clickReplayUrl;
+  if (!videoUrl) return "";
   return `
     <div class="replay" data-eyes-replay>
-      <video src="${escapeHtml(suggestion.videoUrl)}" autoplay muted loop playsinline preload="metadata"></video>
+      <video src="${escapeHtml(videoUrl)}" autoplay muted loop playsinline preload="metadata"></video>
       <div class="replay-bar">
         <span class="replay-caption">Automation replay</span>
       </div>
@@ -662,6 +678,9 @@ export function showSuggestion(
 
   const shadow = host.attachShadow({ mode: "open" });
   const previewClass = suggestion.kind === "text" ? "snippet" : "keycap";
+  const replayHtml = renderReplay(suggestion);
+  const hasReplay = replayHtml.length > 0;
+  const showPreview = suggestion.kind === "text" || !hasReplay;
   const eyesMark = `
     <svg class="eyes-mark" data-eyes-brand-mark viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
       <path d="M2 10c2.2-3.6 5-5.4 8-5.4s5.8 1.8 8 5.4c-2.2 3.6-5 5.4-8 5.4S4.2 13.6 2 10Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
@@ -1088,9 +1107,9 @@ export function showSuggestion(
           <h2>${escapeHtml(suggestion.headline)}</h2>
           <p>${escapeHtml(suggestion.detail)}</p>
         </div>
-        <div class="preview ${previewClass}">${escapeHtml(suggestion.preview)}</div>
-        ${renderReplay(suggestion)}
-        ${renderFlows(suggestion)}
+        ${showPreview ? `<div class="preview ${previewClass}">${escapeHtml(suggestion.preview)}</div>` : ""}
+        ${replayHtml}
+        ${hasReplay ? "" : renderFlows(suggestion)}
         ${pauseNotice ? `<div class="pause-notice" data-eyes-pause-notice>${escapeHtml(pauseNotice)}</div>` : ""}
         ${
           params.length > 0
