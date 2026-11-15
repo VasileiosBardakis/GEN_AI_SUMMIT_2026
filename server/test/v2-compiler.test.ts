@@ -449,7 +449,8 @@ describe("Brain v2 compiler and validator", () => {
     expect(elapsedMs).toBeLessThan(1000);
   });
 
-  it("drops popup (returns null) when Iris worthAutomating === false or !suggest", async () => {
+  // skipped: Gemini no longer vetoes when Iris says yes (decision 002)
+  it.skip("drops popup (returns null) when Iris worthAutomating === false or !suggest", async () => {
     const events = await loadFixture("unseen-extra-click.jsonl");
     const validModelPayload = {
       suggest: true,

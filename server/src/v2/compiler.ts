@@ -2259,19 +2259,24 @@ export async function compileWorkflow(
     irisPromise,
   ]);
 
-  if (!modelOut.suggest) {
+  // Iris decides; Gemini only compiles. Gemini's own suggest=false is ignored when Iris said yes.
+  if (!modelOut.suggest && irisResult?.worthAutomating !== true) {
+    console.log(`[v2/compiler] dropped: gemini suggest=false and no Iris yes`);
     return null;
   }
   if (irisResult?.worthAutomating === false) {
+    console.log(`[v2/compiler] dropped: Iris said no`);
     return null;
   }
   if (modelOut.steps.length === 0) {
+    console.log(`[v2/compiler] dropped: gemini returned no steps (suggest=${modelOut.suggest})`);
     return null;
   }
 
   const stabilityCounts = buildLocatorStabilityCounts(indexedSteps);
   const resolved = resolveSteps(modelOut.steps, ctx, stabilityCounts);
   if (!resolved || resolved.steps.length === 0) {
+    console.log(`[v2/compiler] dropped: no step resolved to a real target (${modelOut.steps.length} model steps)`);
     return null;
   }
 
@@ -2326,6 +2331,7 @@ export async function compileWorkflow(
 
   const cleanedSteps = stripSelfReadsToParams(steps, params, indexedSteps);
   if (cleanedSteps.length === 0) {
+    console.log(`[v2/compiler] dropped: all steps were self-reads`);
     return null;
   }
 
