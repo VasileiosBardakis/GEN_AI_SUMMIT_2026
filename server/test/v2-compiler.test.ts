@@ -594,6 +594,118 @@ describe("Brain v2 compiler and validator", () => {
     }
   });
 
+  it("scrubs emails, card numbers, and [REDACTED: markers in target labels, inferred labels, and container itemKeys before Gemini/Iris prompts", async () => {
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "lbl-1",
+        ts: 1000,
+        session: "s_lbl_pii",
+        source: "browser",
+        app: "billing.local",
+        url: "http://billing.local/pay",
+        type: "input",
+        target: {
+          tag: "input",
+          label: "Receipt for vip@acme.example",
+          locators: [{ kind: "testid", value: "receipt-note" }],
+        },
+        value: "Invoice paid",
+        meta: {
+          container: {
+            testid: "invoice-row",
+            itemKey: "owner@acme.example",
+          },
+        },
+      },
+      {
+        v: 1,
+        id: "lbl-2",
+        ts: 2000,
+        session: "s_lbl_pii",
+        source: "browser",
+        app: "billing.local",
+        url: "http://billing.local/pay",
+        type: "click",
+        target: {
+          tag: "button",
+          locators: [
+            { kind: "aria", value: 'button[name="Pay with 4111-1111-1111-1111"]' },
+          ],
+        },
+        meta: {
+          container: {
+            testid: "card-row",
+            itemKey: "4532-1234-5678-9012",
+          },
+        },
+      },
+      {
+        v: 1,
+        id: "lbl-3",
+        ts: 3000,
+        session: "s_lbl_pii",
+        source: "browser",
+        app: "billing.local",
+        url: "http://billing.local/pay",
+        type: "click",
+        target: {
+          tag: "button",
+          label: "Confirm [REDACTED:CARD#h_99887766]",
+          locators: [{ kind: "testid", value: "confirm-pay" }],
+        },
+      },
+    ];
+
+    const seenIrisDigests: Array<Record<string, unknown>> = [];
+    const { client, prompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Submit payment",
+      reason: "Fills receipt note and submits payment",
+      risk: "high",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "fill", stepIndex: 0, value: "Invoice paid" },
+        { action: "click", stepIndex: 1 },
+        { action: "click", stepIndex: 2 },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events },
+      {
+        gemini: client,
+        iris: async (digest) => {
+          seenIrisDigests.push(digest);
+          return { worthAutomating: true, pauseBeforeSubmit: true };
+        },
+      },
+    );
+
+    expect(wf).not.toBeNull();
+
+    const prompt = prompts[0] ?? "";
+    const irisText = JSON.stringify(seenIrisDigests);
+
+    expect(prompt).not.toContain("vip@acme.example");
+    expect(prompt).not.toContain("owner@acme.example");
+    expect(prompt).not.toContain("4111-1111-1111-1111");
+    expect(prompt).not.toContain("4532-1234-5678-9012");
+    expect(prompt).not.toContain("[REDACTED:");
+    expect(prompt).toContain("__PII_EMAIL_1__");
+    expect(prompt).toContain("__PII_EMAIL_2__");
+    expect(prompt).toContain("__PII_CARD_");
+
+    expect(irisText).not.toContain("vip@acme.example");
+    expect(irisText).not.toContain("4111-1111-1111-1111");
+    expect(irisText).not.toContain("[REDACTED:");
+    expect(irisText).toContain("__PII_EMAIL_1__");
+    expect(irisText).toContain("__PII_CARD_");
+  });
+
   it("forwards thinkingBudget: 0, COMPILER_RESPONSE_SCHEMA, and timeoutMs through GeminiSdk", async () => {
     const events = await loadFixture("unseen-extra-click.jsonl");
     const { sdk, generateContent } = makeMockSdk({
