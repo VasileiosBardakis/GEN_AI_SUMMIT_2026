@@ -614,6 +614,54 @@ export async function executeStep(
     return resolve(target, root);
   }
 
+  function isRowTagOrRole(el: Element): boolean {
+    const tag = el.tagName.toLowerCase();
+    if (tag === "tr" || tag === "li") return true;
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    return role === "row" || role === "listitem";
+  }
+
+  function findRowWithinBoundary(el: Element, boundary?: Element): Element {
+    let curr: Element | null = el;
+    while (curr && curr !== boundary) {
+      if (isRowTagOrRole(curr) && (!boundary || containsElement(boundary, curr))) {
+        return curr;
+      }
+      curr = curr.parentElement;
+    }
+    return el;
+  }
+
+  function resolveWithinScope(
+    withinLocators: Locator[],
+    allowHidden: boolean,
+  ): Element | null {
+    const containerLocs = withinLocators.filter((loc) => loc.kind !== "text");
+    const textLocs = withinLocators.filter((loc) => loc.kind === "text");
+
+    if (containerLocs.length > 0 && textLocs.length > 0) {
+      const containerAttempt = resolveFromLocatorsOnce(containerLocs, document, false);
+      const container =
+        containerAttempt.element ?? (allowHidden ? containerAttempt.hiddenCandidate : null);
+      if (!container) return null;
+
+      const textAttempt = resolveFromLocatorsOnce(textLocs, container, false);
+      const textMatch =
+        textAttempt.element ?? (allowHidden ? textAttempt.hiddenCandidate : null);
+      if (!textMatch) return null;
+
+      return findRowWithinBoundary(textMatch, container);
+    }
+
+    const attempt = resolveFromLocatorsOnce(withinLocators, document, false);
+    const matched = attempt.element ?? (allowHidden ? attempt.hiddenCandidate : null);
+    if (!matched) return null;
+    if (containerLocs.length === 0 && textLocs.length > 0) {
+      return findRowWithinBoundary(matched);
+    }
+    return matched;
+  }
+
   async function resolveStepTarget(): Promise<Element | null> {
     const locators = toLocatorList(step.target, step.targets);
     const withinLocators = toLocatorList(step.within);
@@ -624,10 +672,7 @@ export async function executeStep(
     while (true) {
       let scopeRoot: ParentNode = document;
       if (withinLocators.length > 0) {
-        const containerAttempt = resolveFromLocatorsOnce(withinLocators, document, false);
-        const container =
-          containerAttempt.element ??
-          (Date.now() >= deadline ? containerAttempt.hiddenCandidate : null);
+        const container = resolveWithinScope(withinLocators, Date.now() >= deadline);
         if (!container) {
           if (Date.now() >= deadline) {
             throw new Error("Container not found");
@@ -664,10 +709,7 @@ export async function executeStep(
     while (true) {
       let scopeRoot: ParentNode = document;
       if (withinLocators.length > 0) {
-        const containerAttempt = resolveFromLocatorsOnce(withinLocators, document, false);
-        const container =
-          containerAttempt.element ??
-          (Date.now() >= deadline ? containerAttempt.hiddenCandidate : null);
+        const container = resolveWithinScope(withinLocators, Date.now() >= deadline);
         if (!container) {
           if (Date.now() >= deadline) {
             throw new Error("Container not found");
