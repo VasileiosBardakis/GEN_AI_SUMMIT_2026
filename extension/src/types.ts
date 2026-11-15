@@ -80,11 +80,19 @@ export type Step =
       optional?: boolean;
     };
 
+export type ScriptParam = {
+  name: string;
+  description?: string;
+  example?: string;
+  piiHash?: string;
+};
+
 export type ActionScript = {
   name?: string;
   steps: Step[];
   pauseBeforeSubmit?: boolean;
   runMode?: "run_remaining" | "save_only";
+  params?: ScriptParam[];
 };
 
 export type BindingValue = string | Record<string, string>[];

@@ -1108,6 +1108,107 @@ describe("Brain v2 compiler and validator", () => {
     }
   });
 
+  it("binds unmapped [REDACTED:EMAIL#h_...] tokens to {{param}} with piiHash and backfills missing param examples without leaking PII", async () => {
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "u-1",
+        ts: 1000,
+        session: "s_unmapped_pii",
+        source: "browser",
+        app: "wire.local",
+        url: "http://wire.local/wire",
+        type: "input",
+        target: {
+          tag: "input",
+          role: "textbox",
+          label: "Recipient Email",
+          locators: [{ kind: "testid", value: "recipient-email" }],
+        },
+        value: "[REDACTED:EMAIL#h_9a8b7c6d]",
+      },
+      {
+        v: 1,
+        id: "u-2",
+        ts: 1500,
+        session: "s_unmapped_pii",
+        source: "browser",
+        app: "wire.local",
+        url: "http://wire.local/wire",
+        type: "input",
+        target: {
+          tag: "input",
+          role: "textbox",
+          label: "Amount",
+          locators: [{ kind: "testid", value: "wire-amount" }],
+        },
+        value: "500.00",
+      },
+      {
+        v: 1,
+        id: "u-3",
+        ts: 2000,
+        session: "s_unmapped_pii",
+        source: "browser",
+        app: "wire.local",
+        url: "http://wire.local/wire",
+        type: "click",
+        target: {
+          tag: "button",
+          role: "button",
+          label: "Wire funds",
+          locators: [{ kind: "testid", value: "wire-funds-btn" }],
+        },
+      },
+    ];
+
+    // No piiMap passed -> server only has hash h_9a8b7c6d, simulating real Chrome extension local PII
+    const { client } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Wire funds to __PII_EMAIL_1__",
+      reason: "Fills email and amount and pauses before Wire funds",
+      risk: "high",
+      runMode: "save_only",
+      params: [{ name: "wire_amount" }],
+      steps: [
+        { action: "fill", stepIndex: 0, value: "__PII_EMAIL_1__" },
+        { action: "fill", stepIndex: 1, value: "{{wire_amount}}" },
+        { action: "click", stepIndex: 2 },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events },
+      {
+        gemini: client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: true }),
+      },
+    );
+
+    expect(wf).not.toBeNull();
+    expect(wf!.pauseBeforeSubmit).toBe(true);
+    expect(wf!.runMode).toBe("save_only");
+    const serialized = JSON.stringify(wf);
+    expect(serialized).not.toContain("[REDACTED:");
+    expect(serialized).not.toMatch(/__PII_[A-Za-z0-9_]+__/);
+
+    const amountParam = wf!.params.find((p) => p.name === "wire_amount");
+    expect(amountParam?.example).toBe("500.00");
+
+    const piiParam = wf!.params.find((p) => p.piiHash === "h_9a8b7c6d");
+    expect(piiParam).toBeDefined();
+    const emailFill = wf!.steps[1];
+    expect(emailFill.action).toBe("fill");
+    if (emailFill.action === "fill") {
+      expect(emailFill.value).toBe(`{{${piiParam!.name}}}`);
+    }
+
+    const script = compiledWorkflowToActionScript(wf!);
+    expect(script.params).toEqual(wf!.params);
+  });
+
   it("preserves port and path on navigate when model returns bare origin (with or without stepIndex) and keeps deliberate different paths with captured port", async () => {
     const events: Event[] = [
       {
@@ -1241,6 +1342,279 @@ describe("Brain v2 compiler and validator", () => {
       url: "http://localhost:4173/other",
     });
     expect(differentPathPromptCheck.prompts[0]).toContain("full URL including port and path");
+  });
+
+  it("validateCompiledWorkflow enforces seenHosts (including port) on startUrl, navigate, switchTab, and apps", () => {
+    const validWithPort: CompiledWorkflow = {
+      kind: "workflow",
+      name: "Open form",
+      reason: "Navigates to form and saves",
+      risk: "low",
+      offerAt2: false,
+      runMode: "save_only",
+      pauseBeforeSubmit: false,
+      startUrl: "http://localhost:4173/form.html",
+      apps: ["localhost"],
+      params: [],
+      steps: [
+        { action: "switchTab", host: "localhost" },
+        { action: "navigate", url: "http://localhost:4173/form.html" },
+        {
+          action: "click",
+          target: [{ kind: "css", value: "#save" }],
+        },
+      ],
+      stats: {
+        repetitions: 3,
+        minutesPerWeek: 1.5,
+        manualSeconds: 18,
+        replaySeconds: 2,
+      },
+    };
+
+    expect(
+      validateCompiledWorkflow(validWithPort, { seenHosts: ["127.0.0.1:4173"] })
+        .ok,
+    ).toBe(true);
+    expect(
+      validateCompiledWorkflow(validWithPort, {
+        seenHosts: new Set(["localhost:4173"]),
+      }).ok,
+    ).toBe(true);
+
+    // Reject navigate.url with unseen host
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "localhost" },
+            { action: "navigate", url: "https://invented.example/form.html" },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject navigate.url inside forEach with unseen host
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "localhost" },
+            {
+              action: "forEach",
+              items: [{ item: "row1" }],
+              steps: [
+                { action: "navigate", url: "https://invented.example/form.html" },
+              ],
+            },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject startUrl with unseen host or lost port
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          startUrl: "https://invented.example/form.html",
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          startUrl: "http://localhost/form.html",
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject navigate.url that drops captured port or changes port
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "localhost" },
+            { action: "navigate", url: "http://localhost/form.html" },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "localhost" },
+            { action: "navigate", url: "http://localhost:9999/form.html" },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject switchTab.host with unseen host
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            { action: "switchTab", host: "invented.example" },
+            { action: "navigate", url: "http://localhost:4173/form.html" },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+
+    // Reject apps with unseen host
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          apps: ["localhost", "invented.example"],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+  });
+
+  it("compileWorkflow uses captured.url when stepIndex is set and model invents raw.url, and rejects invented-host navigate without stepIndex", async () => {
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "inv-nav-1",
+        ts: 1000,
+        session: "s_invented_nav",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "nav",
+      },
+      {
+        v: 1,
+        id: "inv-fill-1",
+        ts: 2000,
+        session: "s_invented_nav",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "input",
+        target: {
+          tag: "input",
+          label: "Name",
+          locators: [{ kind: "css", value: "#name" }],
+        },
+        value: "Ada",
+      },
+      {
+        v: 1,
+        id: "inv-click-1",
+        ts: 3000,
+        session: "s_invented_nav",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "click",
+        target: {
+          tag: "button",
+          label: "Save",
+          locators: [{ kind: "css", value: "#save" }],
+        },
+      },
+    ];
+
+    // 1) stepIndex is set and model invents an unseen URL -> uses captured.url
+    const withStepIndexInvented = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            {
+              action: "navigate",
+              stepIndex: 0,
+              url: "https://invented.example/phishing",
+            },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withStepIndexInvented).not.toBeNull();
+    expect(withStepIndexInvented!.steps[1]).toEqual({
+      action: "navigate",
+      url: "http://localhost:4173/form.html",
+    });
+
+    // 2) stepIndex is absent and model invents an unseen host -> dropped/rejected (null)
+    const withoutStepIndexInvented = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            { action: "navigate", url: "https://invented.example/phishing" },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withoutStepIndexInvented).toBeNull();
+
+    // 3) stepIndex is absent and model emits seen host with wrong port -> rejected by validator (null)
+    const withoutStepIndexWrongPort = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            { action: "navigate", url: "http://localhost:9999/form.html" },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withoutStepIndexWrongPort).toBeNull();
   });
 });
 

@@ -372,8 +372,10 @@ function luhnCheck(digitsOnly: string): boolean {
 function createPromptScrubber(piiMap: PiiMap): {
   scrubText: (raw: string) => string;
   restoreMap: Map<string, string>;
+  unmappedHashByToken: Map<string, string>;
 } {
   const restoreMap = new Map<string, string>();
+  const unmappedHashByToken = new Map<string, string>();
   const rawToToken = new Map<string, string>();
   const redactedToToken = new Map<string, string>();
   const typeCounters = new Map<string, number>();
@@ -399,7 +401,7 @@ function createPromptScrubber(piiMap: PiiMap): {
   }
 
   function scrubText(raw: string): string {
-    let out = raw.replace(REDACTED_MARKER_RE, (full, kind: string) => {
+    let out = raw.replace(REDACTED_MARKER_RE, (full, kind: string, hash?: string) => {
       const existing = redactedToToken.get(full);
       if (existing) return existing;
       const token = nextToken(kind || "REDACTED");
@@ -407,6 +409,8 @@ function createPromptScrubber(piiMap: PiiMap): {
       const localReal = piiMap.get(full);
       if (localReal !== undefined) {
         restoreMap.set(token, localReal);
+      } else if (hash && hash.trim()) {
+        unmappedHashByToken.set(token, hash.trim());
       }
       return token;
     });
@@ -445,7 +449,7 @@ function createPromptScrubber(piiMap: PiiMap): {
     return out;
   }
 
-  return { scrubText, restoreMap };
+  return { scrubText, restoreMap, unmappedHashByToken };
 }
 
 function scrubUnknown(value: unknown, scrubText: (s: string) => string): unknown {
@@ -988,7 +992,7 @@ function buildCompilePrompt(
     "3. Keep all distinct form fields (multi-field Tab forms keep every `fill` via its own `stepIndex`). Always preserve Enter-key submissions (`action: \"key\", key: \"Enter\"` with the `key` step's `stepIndex`) rather than dropping them.",
     "4. Copied values use `readText` with `bind` (REQUIRED on every `readText`, e.g. `\"bind\":\"<varName>\"`, NEVER omit `bind`) and `fill` with `\"{{<varName>}}\"`.",
     "5. User-supplied variables go in `params[]` and `\"{{paramName}}\"`. Never invent placeholder/masked literals; preserve `__PII_*__` tokens if typed literally.",
-    "6. `switchTab` uses `stepIndex` or `host` (hostname only), never `url`. `navigate` MUST reuse `stepIndex` or keep the full URL including port and path (never strip to bare host/origin).",
+    "6. Tab switching is automatic; do NOT emit `navigate` for the start page load. `switchTab` uses `stepIndex` or `host` (hostname only), never `url`. Any `navigate` MUST reuse `stepIndex` or keep the full URL including port and path (never strip to bare host/origin).",
     "7. Use `forEach` ONLY when PageSummary Lists is printed below AND has remaining unprocessed items (`runMode: \"run_remaining\"`, `itemIds` = ONLY remaining `itemId`s). Inside `forEach.steps`, only set `withinId` to a container `targetId` from PageSummary Targets (if any) and `withinTextParam` to an item field name from PageSummary Lists. Otherwise set `runMode: \"save_only\"` and emit flat steps.",
     "8. `offerAt2: true` when clearly generalizable at 2 repeats; `risk: \"high\"` for irreversible external actions (payments/wires/deletes/external sends); `suggest: false` only if one-off.",
     "",
@@ -1271,36 +1275,87 @@ function resolveLeafStep(
       };
     }
     case "navigate": {
-      let targetHost: string | undefined;
-      if (raw.url) {
+      const seenHostnames = new Set<string>();
+      for (const s of ctx.indexedSteps) {
+        if (s.app) {
+          seenHostnames.add(normalizeHost(s.app));
+        }
+        if (s.url) {
+          try {
+            seenHostnames.add(
+              normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname),
+            );
+          } catch {
+            // ignore invalid captured URL
+          }
+        }
+      }
+
+      const rawUrl = raw.url?.trim() ? raw.url.trim() : undefined;
+      let rawUrlHost: string | undefined;
+      if (rawUrl) {
         try {
-          targetHost = normalizeHost(new URL(raw.url).hostname);
+          rawUrlHost = normalizeHost(
+            new URL(restoreText(rawUrl, restoreMap)).hostname,
+          );
         } catch {
           // ignore invalid URL when inferring host
         }
       }
-      if (!targetHost && raw.host?.trim()) {
-        targetHost = normalizeHost(raw.host);
+      const rawUrlSeen =
+        rawUrlHost !== undefined && seenHostnames.has(rawUrlHost);
+
+      if (captured?.url) {
+        const mergedUrl =
+          rawUrl && rawUrlSeen
+            ? mergeCapturedNavigateUrl(rawUrl, captured.url)
+            : captured.url;
+        const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
+        let navHost = stepHost;
+        try {
+          navHost = normalizeHost(new URL(normalized).hostname);
+        } catch {
+          // Keep stepHost if URL parsing fails; validator will catch invalid URL
+        }
+        return {
+          step: { action: "navigate", url: normalized, ...optionalPart },
+          host: navHost,
+          url: normalized,
+        };
       }
-      if (!targetHost && captured?.app) {
-        targetHost = normalizeHost(captured.app);
+
+      if (rawUrl && !rawUrlSeen) {
+        return null;
       }
+
+      const targetHost =
+        rawUrlHost ??
+        (raw.host?.trim()
+          ? normalizeHost(raw.host)
+          : captured?.app
+            ? normalizeHost(captured.app)
+            : undefined);
       const matchingHostUrl = targetHost
         ? ctx.indexedSteps.find((s) => {
             if (!s.url) return false;
             if (normalizeHost(s.app) === targetHost) return true;
             try {
-              return normalizeHost(new URL(s.url).hostname) === targetHost;
+              return (
+                normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname) ===
+                targetHost
+              );
             } catch {
               return false;
             }
           })?.url
         : undefined;
-      const fallbackUrl = captured?.url ?? matchingHostUrl;
-      const candidateUrl = raw.url ?? fallbackUrl;
+      const candidateUrl = rawUrl
+        ? mergeCapturedNavigateUrl(rawUrl, matchingHostUrl)
+        : matchingHostUrl;
       if (!candidateUrl) {
         if (raw.host?.trim()) {
           const host = normalizeHost(raw.host);
+          if (!seenHostnames.has(host)) return null;
           return {
             step: { action: "switchTab", host, ...optionalPart },
             host,
@@ -1309,10 +1364,7 @@ function resolveLeafStep(
         }
         return null;
       }
-      const mergedUrl = raw.url
-        ? mergeCapturedNavigateUrl(raw.url, fallbackUrl)
-        : candidateUrl;
-      const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
+      const normalized = normalizeUrlHost(restoreText(candidateUrl, restoreMap));
       let navHost = stepHost;
       try {
         navHost = normalizeHost(new URL(normalized).hostname);
@@ -1588,7 +1640,7 @@ export async function compileWorkflow(
     Math.trunc(input.repeatCount ?? inferredRepeats),
   );
 
-  const { scrubText, restoreMap } = createPromptScrubber(piiMap);
+  const { scrubText, restoreMap, unmappedHashByToken } = createPromptScrubber(piiMap);
   const summaryData = extractPageSummaryData(enrichedAll, scrubText);
 
   const ctx: PromptContext = {
@@ -1686,6 +1738,13 @@ export async function compileWorkflow(
       p.example !== undefined
         ? restoreText(p.example, restoreMap)
         : undefined;
+    const exampleTokenMatch =
+      restoredExample !== undefined
+        ? /(__PII_[A-Z0-9_]+__)/.exec(restoredExample)
+        : null;
+    const piiHash = exampleTokenMatch
+      ? unmappedHashByToken.get(exampleTokenMatch[1])
+      : undefined;
     return {
       name: stripParamBraces(p.name),
       ...(restoredDesc && !hasAnyPiiMarker(restoredDesc)
@@ -1694,8 +1753,98 @@ export async function compileWorkflow(
       ...(restoredExample && !hasAnyPiiMarker(restoredExample)
         ? { example: restoredExample }
         : {}),
+      ...(piiHash ? { piiHash } : {}),
     };
   });
+
+  // Backfill missing param examples or piiHash from referenced captured steps, and bind any unmapped __PII_*__ tokens
+  const paramByName = new Map<string, CompiledParam>();
+  for (const param of params) {
+    paramByName.set(param.name, param);
+  }
+
+  const rawLeafPairs: Array<{ stepIndex?: number; value?: string }> = [];
+  for (const rawStep of modelOut.steps) {
+    if (rawStep.action === "forEach" && Array.isArray(rawStep.steps)) {
+      for (const nested of rawStep.steps) {
+        rawLeafPairs.push({ stepIndex: nested.stepIndex, value: nested.value });
+      }
+    } else {
+      rawLeafPairs.push({ stepIndex: rawStep.stepIndex, value: rawStep.value });
+    }
+  }
+  for (const rawRef of rawLeafPairs) {
+    if (
+      rawRef.stepIndex === undefined ||
+      rawRef.stepIndex < 0 ||
+      rawRef.stepIndex >= ctx.indexedSteps.length ||
+      typeof rawRef.value !== "string"
+    ) {
+      continue;
+    }
+    const tmplMatch = /^\{\{\s*([^}]+?)\s*\}\}$/.exec(rawRef.value.trim());
+    if (!tmplMatch) continue;
+    const param = paramByName.get(tmplMatch[1]);
+    if (!param || param.example !== undefined || param.piiHash !== undefined) continue;
+    const capturedVal = ctx.indexedSteps[rawRef.stepIndex]?.value;
+    if (typeof capturedVal !== "string" || capturedVal.length === 0) continue;
+    const restoredCaptured = restoreText(scrubText(capturedVal), restoreMap);
+    const piiTokMatch = /(__PII_[A-Z0-9_]+__)/.exec(restoredCaptured);
+    if (piiTokMatch) {
+      const hash = unmappedHashByToken.get(piiTokMatch[1]);
+      if (hash) param.piiHash = hash;
+    } else if (!hasAnyPiiMarker(restoredCaptured)) {
+      param.example = restoredCaptured;
+    }
+  }
+
+  const ensureParamForUnmappedToken = (token: string, hash: string): string => {
+    for (const existing of params) {
+      if (existing.piiHash === hash) return existing.name;
+    }
+    const baseName = token
+      .replace(/^__/, "")
+      .replace(/__$/, "")
+      .toLowerCase();
+    let candidateName = baseName;
+    let suffix = 1;
+    while (paramByName.has(candidateName)) {
+      suffix += 1;
+      candidateName = `${baseName}_${suffix}`;
+    }
+    const created: CompiledParam = { name: candidateName, piiHash: hash };
+    params.push(created);
+    paramByName.set(candidateName, created);
+    return candidateName;
+  };
+
+  const bindUnmappedInSteps = (stepList: CompiledStep[]): void => {
+    for (const s of stepList) {
+      if (s.action === "forEach") {
+        bindUnmappedInSteps(s.steps);
+        continue;
+      }
+      if ("value" in s && typeof s.value === "string" && unmappedHashByToken.size > 0) {
+        s.value = s.value.replace(/(__PII_[A-Z0-9_]+__)/g, (tok) => {
+          const hash = unmappedHashByToken.get(tok);
+          if (!hash) return tok;
+          const pName = ensureParamForUnmappedToken(tok, hash);
+          return `{{${pName}}}`;
+        });
+      }
+    }
+  };
+  bindUnmappedInSteps(steps);
+
+  const sanitizeDisplayText = (raw: string): string => {
+    let out = restoreText(raw, restoreMap).trim();
+    for (const tok of unmappedHashByToken.keys()) {
+      if (out.includes(tok)) {
+        out = out.split(tok).join("private value");
+      }
+    }
+    return out;
+  };
 
   const pauseBeforeSubmit =
     irisResult?.pauseBeforeSubmit === true || modelOut.risk === "high";
@@ -1704,8 +1853,8 @@ export async function compileWorkflow(
 
   const candidate: CompiledWorkflow = {
     kind: modelOut.kind,
-    name: restoreText(modelOut.name, restoreMap).trim(),
-    reason: restoreText(modelOut.reason, restoreMap).trim(),
+    name: sanitizeDisplayText(modelOut.name),
+    reason: sanitizeDisplayText(modelOut.reason),
     risk: modelOut.risk,
     offerAt2: modelOut.offerAt2,
     runMode: modelOut.runMode,
@@ -1717,8 +1866,28 @@ export async function compileWorkflow(
     stats,
   };
 
+  const seenHosts = new Set<string>();
+  const sourceEntries: ReadonlyArray<{ app?: string; url?: string }> =
+    input.events && input.events.length > 0 ? input.events : rawSteps;
+  for (const e of sourceEntries) {
+    if (e.url) {
+      try {
+        seenHosts.add(
+          normalizeHost(new URL(restoreText(e.url, restoreMap)).host),
+        );
+        continue;
+      } catch {
+        // fall back to app if URL is invalid
+      }
+    }
+    if (e.app) {
+      seenHosts.add(normalizeHost(e.app));
+    }
+  }
+
   const validated = validateCompiledWorkflow(candidate, {
     maxSteps: opts?.maxSteps,
+    seenHosts,
   });
   if (!validated.ok) {
     console.log(`[v2/compiler] validation failed: ${validated.error}`);

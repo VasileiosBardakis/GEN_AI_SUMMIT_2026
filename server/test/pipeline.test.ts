@@ -21,6 +21,7 @@ import {
   isSelectStep,
   runPipeline,
 } from "../src/pipeline.ts";
+import { buildReport } from "../src/report.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -881,6 +882,107 @@ describe("pipeline unit & config tests", () => {
     expect(implement).toHaveBeenCalledTimes(1);
     expect(capturedSolution).toContain('select <select> css="#priority" with "high"');
     expect(capturedSolution).toContain('fill css="#summary" with "Item 1"');
+  });
+
+  it("buildSolutionText emits pressKey \"Enter\" for submit steps and buildReport detects the 3-tag-plus-Save workflow", async () => {
+    const tagLocators = [{ kind: "testid" as const, value: "tag-input" }];
+    const saveLocators = [{ kind: "testid" as const, value: "save-tags" }];
+
+    const wf: Workflow = {
+      id: "wf_tags",
+      name: "tags.local workflow (8 steps)",
+      sourceApp: "tags.local",
+      destApp: "tags.local",
+      steps: [
+        { action: "click", target: tagLocators },
+        { action: "fill", target: tagLocators, value: { param: "tag_1" } },
+        { action: "submit", target: tagLocators, value: "Enter" },
+        { action: "fill", target: tagLocators, value: { param: "tag_2" } },
+        { action: "submit", target: tagLocators, value: "Enter" },
+        { action: "fill", target: tagLocators, value: { param: "tag_3" } },
+        { action: "submit", target: tagLocators, value: "Enter" },
+        { action: "click", target: saveLocators },
+      ],
+      params: [
+        { name: "tag_1", example: "alpha" },
+        { name: "tag_2", example: "beta" },
+        { name: "tag_3", example: "gamma" },
+      ],
+      instances: [],
+    };
+
+    const solution = buildSolutionText("rung2", wf);
+    expect(solution).not.toBeNull();
+    expect(solution).toContain('pressKey "Enter" on testid="tag-input"');
+    expect(solution?.match(/pressKey "Enter" on testid="tag-input"/g)).toHaveLength(3);
+    expect(solution).toContain('click testid="save-tags"');
+
+    const baseTs = 1_750_000_000_000;
+    const tagTriples = [
+      ["alpha", "beta", "gamma"],
+      ["delta", "epsilon", "zeta"],
+      ["eta", "theta", "iota"],
+    ];
+    let idx = 0;
+    const nextEvent = (
+      type: Event["type"],
+      extra: Partial<Omit<Event, "type">>,
+    ): Event => {
+      idx += 1;
+      return {
+        v: 1,
+        id: `tag-ev-${idx}`,
+        ts: baseTs + idx * 500,
+        session: "sess_tags_v1",
+        source: "browser",
+        app: "tags.local",
+        type,
+        ...extra,
+      };
+    };
+
+    const events: Event[] = tagTriples.flatMap(([t1, t2, t3]) => [
+      nextEvent("click", { target: { tag: "input", locators: tagLocators } }),
+      nextEvent("input", { target: { tag: "input", locators: tagLocators }, value: t1 }),
+      nextEvent("keydown", { target: { tag: "input", locators: tagLocators }, meta: { key: "Enter" } }),
+      nextEvent("input", { target: { tag: "input", locators: tagLocators }, value: t2 }),
+      nextEvent("keydown", { target: { tag: "input", locators: tagLocators }, meta: { key: "Enter" } }),
+      nextEvent("input", { target: { tag: "input", locators: tagLocators }, value: t3 }),
+      nextEvent("keydown", { target: { tag: "input", locators: tagLocators }, meta: { key: "Enter" } }),
+      nextEvent("click", { target: { tag: "button", locators: saveLocators } }),
+    ]);
+
+    let capturedSolution = "";
+    const scriptStore = new Map<string, ActionScript>();
+    const report = await buildReport("sess_tags_v1", events, {
+      pipeline: "v1",
+      llm: true,
+      gemini: {
+        sdk: {
+          models: {
+            generateContent: async () => ({
+              text: JSON.stringify({
+                verdict: "rung2",
+                confidence: 0.95,
+                name: "Add 3 tags and save",
+                risky: false,
+              }),
+            }),
+          },
+        },
+      },
+      implement: async (sol, opts) => {
+        capturedSolution = sol;
+        return makeFakeActionScript(opts?.name);
+      },
+      scriptStore,
+    });
+
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].verdict).toBe("rung2");
+    expect(report.findings[0].stats.repetitions).toBe(3);
+    expect(capturedSolution.match(/pressKey "Enter" on testid="tag-input"/g)).toHaveLength(3);
+    expect(capturedSolution).toContain('click testid="save-tags"');
   });
 });
 
