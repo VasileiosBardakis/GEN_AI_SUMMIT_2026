@@ -2414,4 +2414,98 @@ describe("GEN-95: offer popup tab targeting and Run flow-start tab switch", () =
       results: [{ index: 3, action: "fill", ok: true, matchCount: 1, unique: true }],
     });
   });
+
+  it("GEN-128: runs on first click after reload without page interaction (stale tabId fallback, loading wait, and HANDS_RUN_SCRIPT url switch)", async () => {
+    const postedResults: unknown[] = [];
+    const baseUrl = await startResultServer(postedResults);
+
+    let tabStatus: "loading" | "complete" = "loading";
+    const listeners = new Set<
+      (tabId: number, changeInfo: { status?: string; url?: string }, tab: { id: number; url?: string; status?: string }) => void
+    >();
+    const updatedTabs: number[] = [];
+    const executedOnTabs: number[] = [];
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        get: vi.fn(async (tabId: number) => {
+          if (tabId === 999) throw new Error("No tab with id: 999");
+          return { id: tabId, url: "https://portal.example/form", status: tabStatus };
+        }),
+        query: vi.fn(async ({ active, currentWindow }: { active?: boolean; currentWindow?: boolean }) => {
+          if (active && currentWindow) return [];
+          if (active) {
+            return [{ id: 501, url: "https://portal.example/form", active: true, status: tabStatus, lastAccessed: 900 }];
+          }
+          return [
+            { id: 401, url: "https://other.example/", active: false, windowId: 1, status: "complete", lastAccessed: 100 },
+            { id: 501, url: "https://portal.example/form", active: true, windowId: 1, status: tabStatus, lastAccessed: 900 },
+          ];
+        }),
+        update: vi.fn(async (tabId: number) => {
+          updatedTabs.push(tabId);
+          return { id: tabId };
+        }),
+        onUpdated: {
+          addListener: vi.fn((cb) => listeners.add(cb)),
+          removeListener: vi.fn((cb) => listeners.delete(cb)),
+        },
+      },
+      windows: { update: vi.fn(async () => ({})) },
+      scripting: {
+        executeScript: vi.fn(async ({ target }: { target: { tabId: number } }) => {
+          if (tabStatus === "loading") {
+            return [{ frameId: 0, result: { ok: false, error: "Target not found" } }];
+          }
+          executedOnTabs.push(target.tabId);
+          return [{ frameId: 0, result: { ok: true, url: "https://portal.example/form" } }];
+        }),
+      },
+    };
+
+    // 1) handleHandsCommand with stale cmd.tabId=999 falls back to active runnable tab 501 and waits for load completion
+    const runPromise = handleHandsCommand(
+      {
+        id: "run-gen128-stale",
+        tabId: 999,
+        script: {
+          name: "Fill form",
+          steps: [{ action: "click", target: { kind: "css", value: "#start" } }],
+        },
+      },
+      baseUrl,
+    );
+
+    await new Promise((r) => setTimeout(r, 15));
+    tabStatus = "complete";
+    for (const cb of listeners) {
+      cb(501, { status: "complete" }, { id: 501, url: "https://portal.example/form", status: "complete" });
+    }
+    await runPromise;
+
+    expect(postedResults[0]).toMatchObject({ id: "run-gen128-stale", ok: true });
+    expect(executedOnTabs).toEqual([501]);
+
+    // 2) HANDS_RUN_SCRIPT from side panel (sender.tab undefined) with url preserves GEN-95 switchTab-first behavior
+    updatedTabs.length = 0;
+    executedOnTabs.length = 0;
+    const panelRes = await new Promise<Record<string, unknown>>((resolve) => {
+      handleRuntimeMessage(
+        {
+          kind: "HANDS_RUN_SCRIPT",
+          url: "https://portal.example/form",
+          script: {
+            name: "Fill form",
+            steps: [{ action: "click", target: { kind: "css", value: "#start" } }],
+          },
+        },
+        {},
+        (res) => resolve((res ?? {}) as Record<string, unknown>),
+      );
+    });
+
+    expect(panelRes.ok).toBe(true);
+    expect(updatedTabs).toEqual([501]);
+    expect(executedOnTabs).toEqual([501]);
+  });
 });

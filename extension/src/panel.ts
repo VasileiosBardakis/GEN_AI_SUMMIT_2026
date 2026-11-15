@@ -44,6 +44,7 @@ interface ChromeTab {
 
 interface ChromePanelApi {
   runtime?: {
+    lastError?: { message?: string };
     sendMessage?: (msg: unknown, cb: (res?: LibraryResponse) => void) => void;
   };
   tabs?: {
@@ -103,11 +104,40 @@ function sendBgMessage(msg: unknown): Promise<LibraryResponse | undefined> {
   }
   return new Promise((resolve) => {
     try {
-      chromeApi.runtime!.sendMessage!(msg, (res) => resolve(res));
+      chromeApi.runtime!.sendMessage!(msg, (res) => {
+        const lastError = chromeApi.runtime?.lastError;
+        if (lastError) {
+          resolve({ ok: false, error: lastError.message || "Extension background unavailable" });
+          return;
+        }
+        resolve(res);
+      });
     } catch {
       resolve(undefined);
     }
   });
+}
+
+function resolveItemRunTarget(item: OptimizationItem): { url?: string; appHost?: string } {
+  const appHost =
+    item.eyes?.scope?.apps?.[0] ??
+    (item.app && item.app !== "Browser" && item.app !== "Recent activity" ? item.app : undefined);
+  for (const step of item.script?.steps ?? []) {
+    if (
+      (step.action === "switchTab" || step.action === "navigate") &&
+      "url" in step &&
+      typeof step.url === "string" &&
+      /^https?:\/\//i.test(step.url)
+    ) {
+      return { url: step.url, ...(appHost ? { appHost } : {}) };
+    }
+  }
+  for (const pat of item.eyes?.scope?.urlPatterns ?? []) {
+    if (/^https?:\/\//i.test(pat) && !pat.includes("*")) {
+      return { url: pat, ...(appHost ? { appHost } : {}) };
+    }
+  }
+  return appHost ? { appHost } : {};
 }
 
 function renderDag(item: OptimizationItem, isOpen: boolean): string {
@@ -603,7 +633,13 @@ async function handleAction(action: string, id: string): Promise<void> {
         return;
       }
 
-      const res = await sendBgMessage({ kind: "HANDS_RUN_SCRIPT", script: target.script });
+      const runTarget = resolveItemRunTarget(target);
+      const res = await sendBgMessage({
+        kind: "HANDS_RUN_SCRIPT",
+        script: target.script,
+        ...(runTarget.url ? { url: runTarget.url } : {}),
+        ...(runTarget.appHost ? { appHost: runTarget.appHost } : {}),
+      });
       if (res && !res.ok) {
         if (target.snippetText && (await copyFallback(target.snippetText))) {
           allItems = recordOptimizationRun(allItems, id);

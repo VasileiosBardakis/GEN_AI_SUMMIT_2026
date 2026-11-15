@@ -86,6 +86,8 @@ interface ChromeRuntimeMessage {
   value?: string;
   scopeKey?: string;
   appHost?: string;
+  url?: string;
+  tabId?: number;
 }
 
 interface ChromeTab {
@@ -411,31 +413,52 @@ export async function resolveTargetTabId(
   senderTab?: number | { id?: number; url?: string },
   senderUrl?: string,
 ): Promise<number | undefined> {
+  const api = getChromeApi();
   const tabId = typeof senderTab === "number" ? senderTab : senderTab?.id;
   const tabUrl = typeof senderTab === "number" ? senderUrl : senderTab?.url;
   if (tabId !== undefined) {
     if (typeof senderTab === "number" && tabUrl === undefined) {
-      return tabId;
-    }
-    if (isRunnablePageUrl(tabUrl)) {
+      if (!api?.tabs?.get) return tabId;
+      const tab = await api.tabs.get(tabId).catch(() => undefined);
+      if (tab && (tab.url === undefined || isRunnablePageUrl(tab.url))) {
+        return tabId;
+      }
+    } else if (isRunnablePageUrl(tabUrl)) {
       return tabId;
     }
   }
-  const api = getChromeApi();
   if (api?.tabs?.query) {
     try {
       const currentTabs = await api.tabs.query({ active: true, currentWindow: true });
       const currentMatch = currentTabs.find((t) => t.id !== undefined && isRunnablePageUrl(t.url));
       if (currentMatch?.id !== undefined) return currentMatch.id;
 
-      const anyActive = await api.tabs.query({ active: true });
-      const anyMatch = anyActive.find((t) => t.id !== undefined && isRunnablePageUrl(t.url));
-      if (anyMatch?.id !== undefined) return anyMatch.id;
+      const anyActive = (await api.tabs.query({ active: true }))
+        .filter((t) => t.id !== undefined && isRunnablePageUrl(t.url))
+        .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+      if (anyActive[0]?.id !== undefined) return anyActive[0].id;
     } catch {
       // ignore tab query errors
     }
   }
-  return lastActiveTab?.tabId;
+  if (lastActiveTab?.tabId !== undefined) {
+    if (!api?.tabs?.get) return lastActiveTab.tabId;
+    const lastTab = await api.tabs.get(lastActiveTab.tabId).catch(() => undefined);
+    if (lastTab && (lastTab.url === undefined || isRunnablePageUrl(lastTab.url))) {
+      return lastActiveTab.tabId;
+    }
+  }
+  if (api?.tabs?.query) {
+    try {
+      const runnable = (await api.tabs.query({}))
+        .filter((t) => t.id !== undefined && isRunnablePageUrl(t.url))
+        .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+      if (runnable[0]?.id !== undefined) return runnable[0].id;
+    } catch {
+      // ignore tab query errors
+    }
+  }
+  return undefined;
 }
 
 async function runOptimizationOnTab(
@@ -673,14 +696,39 @@ export function handleRuntimeMessage(
     return false;
   }
   if (msg?.kind === "HANDS_RUN_SCRIPT" && msg.script) {
-    const targetScript = withFlowStartSwitch(msg.script);
-    void resolveActiveTabId(sender.tab)
-      .then((tabId) => {
-        if (tabId === undefined && !scriptStartsWithTabOrNav(targetScript.steps)) {
-          throw new Error("No active tab");
+    const targetScript = withFlowStartSwitch(msg.script, msg.url);
+    void (async () => {
+      let tabId = await resolveActiveTabId(msg.tabId ?? sender.tab);
+      if (!scriptStartsWithTabOrNav(targetScript.steps) && (msg.url || msg.appHost)) {
+        const api = getChromeApi();
+        const activeTab =
+          tabId !== undefined && api?.tabs?.get
+            ? await api.tabs.get(tabId).catch(() => undefined)
+            : undefined;
+        const matchesActive = activeTab?.url
+          ? (msg.url ? scoreTabUrlMatch(activeTab.url, msg.url) > 0 : false) ||
+            (msg.appHost ? tabMatchesHost(activeTab.url, msg.appHost) : false)
+          : false;
+        if (!matchesActive && api?.tabs?.query) {
+          const allTabs = (await api.tabs.query({}).catch(() => [])) ?? [];
+          const matched = findBestTabForTarget(allTabs, {
+            ...(msg.url ? { url: msg.url } : {}),
+            ...(msg.appHost ? { host: msg.appHost } : {}),
+          });
+          if (matched?.id !== undefined) {
+            await api.tabs.update?.(matched.id, { active: true });
+            if (matched.windowId !== undefined) {
+              await api.windows?.update?.(matched.windowId, { focused: true });
+            }
+            tabId = matched.id;
+          }
         }
-        return runActionScript(tabId ?? -1, targetScript);
-      })
+      }
+      if (tabId === undefined && !scriptStartsWithTabOrNav(targetScript.steps)) {
+        throw new Error("No active tab");
+      }
+      return runActionScript(tabId ?? -1, targetScript);
+    })()
       .then((results) => sendResponse({ ok: true, results }))
       .catch((error: unknown) =>
         sendResponse({
@@ -741,6 +789,7 @@ if (chromeApi?.runtime?.onMessage) {
 if (chromeApi?.tabs?.onActivated) {
   const tabsApi = chromeApi.tabs;
   chromeApi.tabs.onActivated.addListener((activeInfo) => {
+    void pollHandsBridge();
     void (async () => {
       try {
         const tab = await tabsApi.get(activeInfo.tabId);
@@ -776,13 +825,21 @@ if (chromeApi?.tabs?.onActivated) {
 
 if (chromeApi?.tabs?.onUpdated) {
   chromeApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === "loading") {
+      lastFieldFrameByTab.delete(tabId);
+      return;
+    }
     if (changeInfo.status === "complete" && tab?.url && isRunnablePageUrl(tab.url)) {
+      void pollHandsBridge();
       const cleanUrl = sanitizeUrl(tab.url).url;
       let host = "local-page";
       try {
         host = new URL(tab.url).hostname || "local-page";
       } catch {
         // ignore
+      }
+      if (tab.active || lastActiveTab?.tabId === tabId) {
+        lastActiveTab = { tabId, app: host, url: cleanUrl, title: tab.title };
       }
       recordEvent({
         v: 1,
@@ -2149,6 +2206,9 @@ async function runStepsInternal(
             if (match.windowId !== undefined && windowsApi?.update) {
               await windowsApi.update(match.windowId, { focused: true });
             }
+            if (match.status === "loading") {
+              await waitForTabLoad(match.id);
+            }
             currentTabId = match.id;
             results.push({
               ok: true,
@@ -2200,6 +2260,9 @@ async function runStepsInternal(
         await tabsApi?.update?.(match.id, { active: true });
         if (match.windowId !== undefined && windowsApi?.update) {
           await windowsApi.update(match.windowId, { focused: true });
+        }
+        if (match.status === "loading") {
+          await waitForTabLoad(match.id);
         }
         currentTabId = match.id;
         results.push({ ok: true, tab: targetHost });
@@ -2330,17 +2393,18 @@ async function executeDomStep(tabId: number, step: V2DomStep): Promise<StepResul
       ? { tabId, frameIds: [knownFrameId] }
       : { tabId };
 
-  const invokeExecuteScript = async () => {
+  const invokeExecuteScript = async (allFrames = false) => {
+    const execTarget = allFrames ? { tabId, allFrames: true } : target;
     if (api?.scripting?.executeScript) {
       return api.scripting.executeScript({
-        target,
+        target: execTarget,
         func: executeStep,
         args: [step],
       });
     }
     if (typeof chrome !== "undefined" && chrome.scripting?.executeScript) {
       return chrome.scripting.executeScript({
-        target,
+        target: execTarget,
         func: executeStep,
         args: [step],
       });
@@ -2388,7 +2452,26 @@ async function executeDomStep(tabId: number, step: V2DomStep): Promise<StepResul
 
   const [injection] = injections;
   if (!injection?.result) throw new Error("Executor returned no result");
-  return injection.result;
+  let stepResult = injection.result;
+  if (!stepResult.ok) {
+    const tabsApi = api?.tabs ?? (typeof chrome !== "undefined" ? chrome.tabs : undefined);
+    const tab = tabsApi?.get ? await tabsApi.get(tabId).catch(() => undefined) : undefined;
+    if (tab?.status === "loading" && tabsApi?.onUpdated) {
+      await waitForTabLoad(tabId);
+      const retried = await invokeExecuteScript().catch(() => []);
+      if (retried[0]?.result) {
+        stepResult = retried[0].result;
+      }
+    }
+    if (!stepResult.ok && hasTarget) {
+      const allFrameInjections = await invokeExecuteScript(true).catch(() => []);
+      const subframeSuccess = allFrameInjections.find((r) => r.result?.ok);
+      if (subframeSuccess?.result) {
+        return subframeSuccess.result;
+      }
+    }
+  }
+  return stepResult;
 }
 
 export function substitute<T>(value: T, vars: Record<string, unknown>): T {
