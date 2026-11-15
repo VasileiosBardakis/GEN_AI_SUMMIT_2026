@@ -165,42 +165,15 @@ Rules for \`eyes\` (condition-driven, non-brittle, low-hallucination detection):
   - \`cooldownMs\`: 60000 (or higher).
   - \`minSignals\`: require >= 2 agreeing signals (e.g. pageHints + labelContains, or role + prefixHints) unless both \`apps\` and concrete \`locators\`/\`urlPatterns\` are present.`;
 
-const GENERIC_HINT_STOPWORDS = new Set([
-  "input",
-  "field",
-  "box",
-  "textbox",
-  "textarea",
-  "button",
-  "btn",
-  "link",
-  "form",
-  "page",
-  "site",
-  "app",
-  "tab",
-  "click",
-  "type",
-  "text",
-  "value",
-  "item",
-  "data",
-  "current",
-  "user",
-  "submit",
-  "ok",
-  "enter",
-  "select",
-  "fill",
-  "insert",
-  "here",
-  "control",
-  "element",
-  "the",
-  "and",
-  "for",
-  "with",
-]);
+export type StartSignature = {
+  host?: string;
+  urlPattern?: string;
+  action: "copy" | "click" | "input" | "paste" | "change";
+  locators: Locator[];
+  roles: string[];
+  labelContains: string[];
+  fieldEmptyOnly: boolean;
+};
 
 function dedupeStrings(values: string[], limit = 10): string[] {
   const out: string[] = [];
@@ -215,8 +188,6 @@ function dedupeStrings(values: string[], limit = 10): string[] {
   return out;
 }
 
-const SINGLE_WORD_HINT_STOPWORDS = new Set(["name", "names", "info", "details", "form", "field"]);
-
 function cleanHintTokens(rawList: string[], limit = 8): string[] {
   const cleaned: string[] = [];
   for (const raw of rawList) {
@@ -226,15 +197,15 @@ function cleanHintTokens(rawList: string[], limit = 8): string[] {
       .replace(/\s+/g, " ")
       .trim();
     if (!norm) continue;
-    const words = norm.split(" ").filter((w) => w.length >= 2 && !GENERIC_HINT_STOPWORDS.has(w));
+    const words = norm.split(" ").filter((w) => w.length >= 2);
     if (words.length === 0) continue;
     const phrase = words.join(" ");
-    if (phrase.length >= 3 && !(words.length === 1 && SINGLE_WORD_HINT_STOPWORDS.has(phrase))) {
+    if (phrase.length >= 3) {
       cleaned.push(phrase);
     }
     if (words.length > 1) {
       for (const word of words) {
-        if (word.length >= 4 && !SINGLE_WORD_HINT_STOPWORDS.has(word)) cleaned.push(word);
+        if (word.length >= 4) cleaned.push(word);
       }
     }
   }
@@ -336,6 +307,131 @@ function extractPrefixHint(text: string): string | null {
   return snapped.trim().length >= 4 ? snapped.trim() : null;
 }
 
+function normalizeTargetLocators(
+  target: Locator | Locator[] | undefined | null,
+): Locator[] {
+  return dedupeLocators(toLocatorList(target ?? undefined));
+}
+
+function findStartStepInfo(steps: Step[]): {
+  navUrl?: string;
+  domStep?: Step;
+  fallbackWaitFor?: Step;
+} {
+  let navUrl: string | undefined;
+  let fallbackWaitFor: Step | undefined;
+
+  const visit = (list: Step[]): Step | undefined => {
+    for (const step of list) {
+      if (step.action === "navigate") {
+        if (!navUrl) navUrl = step.url;
+        continue;
+      }
+      if (step.action === "wait" || step.action === "switchTab") {
+        continue;
+      }
+      if (step.action === "waitFor") {
+        if (!fallbackWaitFor) fallbackWaitFor = step;
+        continue;
+      }
+      if (step.action === "forEach") {
+        const inner = visit(step.steps);
+        if (inner) return inner;
+        continue;
+      }
+      return step;
+    }
+    return undefined;
+  };
+
+  const domStep = visit(steps);
+  return { navUrl, domStep, fallbackWaitFor };
+}
+
+export function buildStartSignature(
+  script: ActionScript,
+  context?: ImplementContext,
+): StartSignature {
+  const { navUrl, domStep, fallbackWaitFor } = findStartStepInfo(script.steps);
+
+  const navHost = navUrl ? normalizeAppHost(navUrl) : null;
+  const navPattern = navUrl ? normalizeUrlPattern(navUrl) : null;
+  const ctxHost =
+    (context?.app ? normalizeAppHost(context.app) : null) ??
+    (context?.url ? normalizeAppHost(context.url) : null);
+  const ctxPattern = context?.url ? normalizeUrlPattern(context.url) : null;
+
+  const host = navHost ?? ctxHost ?? undefined;
+  const urlPattern = navPattern ?? ctxPattern ?? undefined;
+
+  let action: StartSignature["action"] = "click";
+  let fieldEmptyOnly = false;
+  const stepRoles: string[] = [];
+
+  switch (domStep?.action) {
+    case "readText":
+    case "readValue":
+    case "extractList":
+      action = "copy";
+      fieldEmptyOnly = false;
+      break;
+    case "fill":
+    case "insertText":
+      action = "input";
+      fieldEmptyOnly = true;
+      stepRoles.push("textbox");
+      break;
+    case "select":
+      action = "change";
+      fieldEmptyOnly = false;
+      stepRoles.push("combobox");
+      break;
+    case "click":
+    default:
+      action = "click";
+      fieldEmptyOnly = false;
+      if (domStep?.action === "click") {
+        stepRoles.push("button");
+      }
+      break;
+  }
+
+  const targetSource =
+    domStep && "target" in domStep
+      ? (domStep.target as Locator | Locator[] | undefined)
+      : fallbackWaitFor && "target" in fallbackWaitFor
+        ? (fallbackWaitFor.target as Locator | Locator[] | undefined)
+        : undefined;
+  const stepLocators = normalizeTargetLocators(targetSource);
+  const locators = dedupeLocators([...(context?.locators ?? []), ...stepLocators], 6);
+
+  const roles = dedupeStrings(
+    [
+      ...(context?.targetRole ? [context.targetRole.toLowerCase().trim()] : []),
+      ...stepRoles,
+    ].filter(Boolean),
+    4,
+  );
+
+  const labelContains = cleanHintTokens(
+    [
+      ...(context?.targetLabel ? [context.targetLabel] : []),
+      ...stepLocators.flatMap(extractLabelsFromLocator),
+    ],
+    8,
+  );
+
+  return {
+    ...(host ? { host } : {}),
+    ...(urlPattern ? { urlPattern } : {}),
+    action,
+    locators,
+    roles,
+    labelContains,
+    fieldEmptyOnly,
+  };
+}
+
 function collectStepSignals(steps: Step[]): {
   locators: Locator[];
   roles: string[];
@@ -345,6 +441,7 @@ function collectStepSignals(steps: Step[]): {
   prefixHints: string[];
   hasClick: boolean;
   hasTextEntry: boolean;
+  hasSourceRead: boolean;
   hasTargetlessInsert: boolean;
   hasNavigate: boolean;
   hasExtractList: boolean;
@@ -358,15 +455,22 @@ function collectStepSignals(steps: Step[]): {
   const prefixHints: string[] = [];
   let hasClick = false;
   let hasTextEntry = false;
+  let hasSourceRead = false;
   let hasTargetlessInsert = false;
   let hasNavigate = false;
   let hasExtractList = false;
   let hasBindingRef = false;
+  let crossedBoundary = false;
 
   const visit = (list: Step[]): void => {
     for (const step of list) {
+      if (crossedBoundary) break;
+      if (step.action === "switchTab") {
+        crossedBoundary = true;
+        break;
+      }
       if ("target" in step && step.target) {
-        for (const loc of toLocatorList(step.target)) {
+        for (const loc of dedupeLocators(toLocatorList(step.target))) {
           if (step.action !== "waitFor") {
             locators.push(loc);
           }
@@ -374,6 +478,10 @@ function collectStepSignals(steps: Step[]): {
         }
       }
       switch (step.action) {
+        case "readText":
+        case "readValue":
+          hasSourceRead = true;
+          break;
         case "fill":
         case "insertText": {
           hasTextEntry = true;
@@ -397,6 +505,10 @@ function collectStepSignals(steps: Step[]): {
           roles.push("button");
           break;
         case "navigate": {
+          if (hasSourceRead) {
+            crossedBoundary = true;
+            break;
+          }
           hasNavigate = true;
           const host = normalizeAppHost(step.url);
           if (host) apps.push(host);
@@ -405,6 +517,7 @@ function collectStepSignals(steps: Step[]): {
           break;
         }
         case "extractList":
+          hasSourceRead = true;
           hasExtractList = true;
           break;
         case "forEach":
@@ -426,6 +539,7 @@ function collectStepSignals(steps: Step[]): {
     prefixHints: dedupeStrings(prefixHints, 4),
     hasClick,
     hasTextEntry,
+    hasSourceRead,
     hasTargetlessInsert,
     hasNavigate,
     hasExtractList,
@@ -464,10 +578,13 @@ export function buildGroundedEyesSpec(input: {
 }): EyesDetectionSpec {
   const { rawEyes, script, solution, name, context } = input;
   const kind = inferKind(script, input.kind);
+  const startSig = buildStartSignature(script, context);
   const signals = collectStepSignals(script.steps);
+  const isSourceRead = startSig.action === "copy" || signals.hasSourceRead;
 
   const rawApps = [
     ...(rawEyes?.scope?.apps ?? []),
+    ...(startSig.host ? [startSig.host] : []),
     ...(context?.app ? [context.app] : []),
     ...(context?.url ? [context.url] : []),
     ...signals.apps,
@@ -478,6 +595,7 @@ export function buildGroundedEyesSpec(input: {
 
   const rawPatterns = [
     ...(rawEyes?.scope?.urlPatterns ?? []),
+    ...(startSig.urlPattern ? [startSig.urlPattern] : []),
     ...(context?.url ? [context.url] : []),
     ...signals.urlPatterns,
   ]
@@ -486,36 +604,39 @@ export function buildGroundedEyesSpec(input: {
   const urlPatterns = dedupeStrings(rawPatterns, 6);
 
   const pageHints = cleanHintTokens(
-    [...(rawEyes?.scope?.pageHints ?? []), ...(context?.title ? [context.title] : [])],
+    context?.title ? [context.title] : (rawEyes?.scope?.pageHints ?? []),
     8,
   );
 
-  const roles = dedupeStrings(
-    [
-      ...(rawEyes?.targetHints?.roles ?? []).map((r) => r.toLowerCase().trim()),
-      ...(context?.targetRole ? [context.targetRole.toLowerCase().trim()] : []),
-      ...signals.roles,
-    ].filter(Boolean),
-    5,
-  );
+  const roles = isSourceRead
+    ? startSig.roles
+    : dedupeStrings(
+        [
+          ...(rawEyes?.targetHints?.roles ?? []).map((r) => r.toLowerCase().trim()),
+          ...startSig.roles,
+          ...signals.roles,
+        ].filter(Boolean),
+        5,
+      );
 
-  const labelContains = cleanHintTokens(
-    [
-      ...(rawEyes?.targetHints?.labelContains ?? []),
-      ...(context?.targetLabel ? [context.targetLabel] : []),
-      ...signals.labelHints,
-    ],
-    8,
-  );
+  const locators = isSourceRead
+    ? startSig.locators
+    : dedupeLocators(
+        [
+          ...startSig.locators,
+          ...signals.locators,
+          ...(rawEyes?.targetHints?.locators ?? []),
+        ],
+        6,
+      );
 
-  const locators = dedupeLocators(
-    [
-      ...(context?.locators ?? []),
-      ...signals.locators,
-      ...(rawEyes?.targetHints?.locators ?? []),
-    ],
-    6,
-  );
+  const groundedLabels = isSourceRead
+    ? startSig.labelContains
+    : cleanHintTokens([...startSig.labelContains, ...signals.labelHints], 8);
+  const labelContains =
+    groundedLabels.length > 0 || locators.length === 0
+      ? groundedLabels
+      : cleanHintTokens(rawEyes?.targetHints?.labelContains ?? [], 8);
 
   const prefixHints = dedupeStrings(
     [...(rawEyes?.textHints?.prefixHints ?? []), ...signals.prefixHints]
@@ -543,8 +664,10 @@ export function buildGroundedEyesSpec(input: {
     minSignals = Math.max(minSignals, 2);
   }
 
-  const fieldEmptyOnly =
-    rawEyes?.guards?.fieldEmptyOnly ?? (signals.hasTextEntry || kind === "snippet");
+  const fieldEmptyOnly = isSourceRead
+    ? false
+    : (rawEyes?.guards?.fieldEmptyOnly ??
+      (startSig.fieldEmptyOnly || signals.hasTextEntry || kind === "snippet"));
   const requireClipboard = rawEyes?.guards?.requireClipboard ?? false;
   const cooldownMs = Math.max(10_000, Math.round(rawEyes?.guards?.cooldownMs ?? 60_000));
 
