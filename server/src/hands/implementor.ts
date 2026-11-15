@@ -383,6 +383,7 @@ function findStartStepInfo(steps: Step[]): {
 } {
   let navUrl: string | undefined;
   let fallbackWaitFor: Step | undefined;
+  let fallbackOptionalStep: Step | undefined;
 
   const visit = (list: Step[]): Step | undefined => {
     for (const step of list) {
@@ -402,12 +403,16 @@ function findStartStepInfo(steps: Step[]): {
         if (inner) return inner;
         continue;
       }
+      if (step.optional) {
+        if (!fallbackOptionalStep) fallbackOptionalStep = step;
+        continue;
+      }
       return step;
     }
     return undefined;
   };
 
-  const domStep = visit(steps);
+  const domStep = visit(steps) ?? fallbackOptionalStep;
   return { navUrl, domStep, fallbackWaitFor };
 }
 
@@ -540,6 +545,18 @@ function collectStepSignals(steps: Step[]): {
   let sawDomStep = false;
   let crossedBoundary = false;
 
+  const hasRequiredDomStep = (list: Step[]): boolean =>
+    list.some((s) =>
+      s.action === "forEach"
+        ? hasRequiredDomStep(s.steps)
+        : s.action !== "wait" &&
+          s.action !== "navigate" &&
+          s.action !== "switchTab" &&
+          s.action !== "waitFor" &&
+          !s.optional,
+    );
+  const skipOptionalDom = hasRequiredDomStep(steps);
+
   const visit = (list: Step[]): void => {
     for (const step of list) {
       if (crossedBoundary) break;
@@ -548,6 +565,15 @@ function collectStepSignals(steps: Step[]): {
           crossedBoundary = true;
           break;
         }
+        continue;
+      }
+      if (
+        skipOptionalDom &&
+        step.optional &&
+        step.action !== "navigate" &&
+        step.action !== "wait" &&
+        step.action !== "waitFor"
+      ) {
         continue;
       }
       if (step.action !== "wait" && step.action !== "navigate" && step.action !== "waitFor") {
@@ -584,10 +610,19 @@ function collectStepSignals(steps: Step[]): {
         case "select":
           roles.push("combobox");
           break;
-        case "click":
+        case "click": {
           hasClick = true;
-          roles.push("button");
+          const clickLocs = "target" in step && step.target ? toLocatorList(step.target) : [];
+          const ariaRole = clickLocs
+            .map((loc) =>
+              loc.kind === "aria"
+                ? /^([a-z]+)\[\s*name\s*=/i.exec(loc.value.trim())?.[1]?.toLowerCase()
+                : undefined,
+            )
+            .find(Boolean);
+          roles.push(ariaRole || "button");
           break;
+        }
         case "navigate": {
           if (hasSourceRead) {
             crossedBoundary = true;
@@ -696,6 +731,7 @@ export function buildGroundedEyesSpec(input: {
     ? startSig.roles
     : dedupeStrings(
         [
+          ...(context?.targetRole ? [context.targetRole.toLowerCase().trim()] : []),
           ...(rawEyes?.targetHints?.roles ?? []).map((r) => r.toLowerCase().trim()),
           ...startSig.roles,
           ...signals.roles,
@@ -707,6 +743,7 @@ export function buildGroundedEyesSpec(input: {
     ? startSig.locators
     : dedupeLocators(
         [
+          ...(context?.locators ?? []),
           ...startSig.locators,
           ...signals.locators,
           ...(rawEyes?.targetHints?.locators ?? []),
@@ -716,7 +753,14 @@ export function buildGroundedEyesSpec(input: {
 
   const groundedLabels = isSourceRead
     ? startSig.labelContains
-    : cleanHintTokens([...startSig.labelContains, ...signals.labelHints], 8);
+    : cleanHintTokens(
+        [
+          ...(context?.targetLabel ? [context.targetLabel] : []),
+          ...startSig.labelContains,
+          ...signals.labelHints,
+        ],
+        8,
+      );
   const labelContains =
     groundedLabels.length > 0 || locators.length === 0
       ? groundedLabels

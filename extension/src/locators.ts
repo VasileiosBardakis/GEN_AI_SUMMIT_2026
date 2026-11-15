@@ -19,7 +19,7 @@ const INPUT_TYPE_ROLES: Record<string, string> = {
   reset: "button",
 };
 
-const TEXT_LOCATOR_ROLES = new Set(["button", "link", "menuitem", "tab"]);
+const TEXT_LOCATOR_ROLES = new Set(["button", "link", "menuitem", "tab", "option", "treeitem"]);
 
 function cssEscapeIdent(val: string): string {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
@@ -91,40 +91,105 @@ function getReadableLabel(el: HTMLElement): string | undefined {
   return undefined;
 }
 
-function buildCssSelector(el: HTMLElement): string {
+function getStableHrefAttr(el: HTMLElement): string | null {
+  if (el.tagName.toLowerCase() !== "a") return null;
+  const href = el.getAttribute("href")?.trim();
+  if (!href || href === "#" || /^javascript:/i.test(href) || href.length > 160) return null;
+  if (/[0-9a-f]{8,}/i.test(href)) return null;
+  return href;
+}
+
+function isUniqueCssSelector(selector: string): boolean {
+  if (typeof document === "undefined" || typeof document.querySelectorAll !== "function") {
+    return true;
+  }
+  try {
+    return document.querySelectorAll(selector).length === 1;
+  } catch {
+    return false;
+  }
+}
+
+function buildCssSelector(el: HTMLElement): { selector: string; unique: boolean } {
   const tag = el.tagName.toLowerCase();
   if (el.id && !/^\d/.test(el.id) && !/[0-9a-f]{8,}/i.test(el.id)) {
-    return `#${cssEscapeIdent(el.id)}`;
+    const idSel = `#${cssEscapeIdent(el.id)}`;
+    if (isUniqueCssSelector(idSel)) {
+      return { selector: idSel, unique: true };
+    }
+    const tagIdSel = `${tag}${idSel}`;
+    if (isUniqueCssSelector(tagIdSel)) {
+      return { selector: tagIdSel, unique: true };
+    }
   }
 
   const name = el.getAttribute("name");
   if (name) {
-    return `${tag}[name="${escapeCssAttr(name)}"]`;
+    const nameSel = `${tag}[name="${escapeCssAttr(name)}"]`;
+    if (isUniqueCssSelector(nameSel)) {
+      return { selector: nameSel, unique: true };
+    }
   }
 
   const dataCell = el.getAttribute("data-cell");
   if (dataCell) {
-    return `${tag}[data-cell="${escapeCssAttr(dataCell)}"]`;
+    const cellSel = `${tag}[data-cell="${escapeCssAttr(dataCell)}"]`;
+    if (isUniqueCssSelector(cellSel)) {
+      return { selector: cellSel, unique: true };
+    }
+  }
+
+  const stableHref = getStableHrefAttr(el);
+  if (stableHref) {
+    const hrefSel = `a[href="${escapeCssAttr(stableHref)}"]`;
+    if (isUniqueCssSelector(hrefSel)) {
+      return { selector: hrefSel, unique: true };
+    }
   }
 
   const parts: string[] = [];
   let curr: HTMLElement | null = el;
   let depth = 0;
+  const startedInsideRow =
+    typeof el.closest === "function" &&
+    Boolean(el.closest('tr, li, [role="row"], [role="listitem"]'));
+  let passedRowBoundary = !startedInsideRow;
 
-  while (curr && curr.nodeType === 1 && depth < 4) {
+  while (curr && curr.nodeType === 1 && depth < 10) {
     const cTag = curr.tagName.toLowerCase();
-    if (curr.id && !/[0-9a-f]{8,}/i.test(curr.id)) {
-      parts.unshift(`#${cssEscapeIdent(curr.id)}`);
-      break;
+    const cRole = (curr.getAttribute("role") || "").toLowerCase();
+    if (cTag === "tr" || cTag === "li" || cRole === "row" || cRole === "listitem") {
+      passedRowBoundary = true;
+    }
+    if (curr.id && !/^\d/.test(curr.id) && !/[0-9a-f]{8,}/i.test(curr.id)) {
+      const ancId = `#${cssEscapeIdent(curr.id)}`;
+      if (isUniqueCssSelector(ancId)) {
+        parts.unshift(ancId);
+        const path = parts.join(" > ");
+        if (isUniqueCssSelector(path)) {
+          return { selector: path, unique: true };
+        }
+        break;
+      }
     }
     let part = cTag;
     const classes = Array.from(curr.classList)
       .filter(
-        (c) => c && !/^(active|focus|hover|selected|open|js-|css-|sc-)/i.test(c) && c.length < 32
+        (c) =>
+          c &&
+          !/^(js-|css-|sc-)|(?:^|[-_])(active|focus|focused|hover|selected|open)(?:$|[-_])/i.test(c) &&
+          c.length < 32
       )
       .slice(0, 2);
     if (classes.length > 0) {
       part += "." + classes.map(cssEscapeIdent).join(".");
+    }
+    const currHref = depth === 0 ? getStableHrefAttr(curr) : null;
+    if (currHref) {
+      part += `[href="${escapeCssAttr(currHref)}"]`;
+      if (isUniqueCssSelector(part)) {
+        return { selector: part, unique: true };
+      }
     }
     if (curr.parentElement) {
       const siblings = Array.from(curr.parentElement.children).filter(
@@ -136,11 +201,17 @@ function buildCssSelector(el: HTMLElement): string {
       }
     }
     parts.unshift(part);
+    const candidate = parts.join(" > ");
+    if (depth >= 1 && passedRowBoundary && isUniqueCssSelector(candidate)) {
+      return { selector: candidate, unique: true };
+    }
+    if (cTag === "body" || cTag === "html") break;
     curr = curr.parentElement;
     depth++;
   }
 
-  return parts.join(" > ");
+  const finalPath = parts.join(" > ");
+  return { selector: finalPath, unique: isUniqueCssSelector(finalPath) };
 }
 
 export function extractTarget(rawEl: EventTarget | null): {
@@ -164,7 +235,7 @@ export function extractTarget(rawEl: EventTarget | null): {
 
   const interactive =
     el.closest<HTMLElement>(
-      'button, a, input, select, textarea, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [role="gridcell"], [role="textbox"], [role="searchbox"], [role="combobox"], [data-testid], [data-cell], td, th, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
+      'button, a, input, select, textarea, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [role="treeitem"], [role="gridcell"], [role="textbox"], [role="searchbox"], [role="combobox"], [data-testid], [data-cell], td, th, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
     ) || el;
 
   const locators: Locator[] = [];
@@ -194,7 +265,10 @@ export function extractTarget(rawEl: EventTarget | null): {
     });
   }
 
-  locators.push({ kind: "css", value: buildCssSelector(interactive) });
+  const cssRes = buildCssSelector(interactive);
+  if (cssRes.unique || locators.length === 0) {
+    locators.push({ kind: "css", value: cssRes.selector });
+  }
 
   const innerText = (interactive.innerText || interactive.textContent || "")
     .replace(/\s+/g, " ")

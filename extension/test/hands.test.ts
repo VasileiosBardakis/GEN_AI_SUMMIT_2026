@@ -787,16 +787,13 @@ describe("GEN-69: M2 Hands v2", () => {
     const handled = await pollHandsBridgeOnce(baseUrl);
     expect(handled).toBe(true);
 
-    // Only step 0 (.order-id on portal.html) and step 3 (explicit portal.html url) should be checked,
-    // NOT step 2 (#erp-order after switchTab to erp.html).
-    expect(sendMessage).toHaveBeenCalledTimes(2);
+    // Only step 0 (entry step on portal.html) should be checked;
+    // step 2 (#erp-order after switchTab to erp.html) has no open tab,
+    // and step 3 (later step on already-checked portal.html) is skipped by entry-step precheck.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage.mock.calls[0]?.[1]).toMatchObject({
       kind: "EYES_PRECHECK_STEP",
       locators: [{ kind: "css", value: ".order-id" }],
-    });
-    expect(sendMessage.mock.calls[1]?.[1]).toMatchObject({
-      kind: "EYES_PRECHECK_STEP",
-      locators: [{ kind: "testid", value: "portal-refresh" }],
     });
 
     expect(receivedResults).toHaveLength(1);
@@ -805,7 +802,6 @@ describe("GEN-69: M2 Hands v2", () => {
       ok: true,
       results: [
         { index: 0, action: "readText", ok: true, matchCount: 1, unique: true },
-        { index: 3, action: "click", ok: true, matchCount: 1, unique: true },
       ],
     });
   });
@@ -1956,5 +1952,560 @@ describe("GEN-99: navigate frame reset and chrome-error guards", () => {
     const results = await runPromise;
     expect(results).toEqual([{ ok: true, url: "http://localhost:4173/form.html" }]);
     expect(executeScript).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("GEN-95: offer popup tab targeting and Run flow-start tab switch", () => {
+  const originalChrome = (globalThis as Record<string, unknown>).chrome;
+  let mockServer: http.Server | null = null;
+
+  afterEach(async () => {
+    stopHandsRun();
+    if (originalChrome === undefined) {
+      delete (globalThis as Record<string, unknown>).chrome;
+    } else {
+      (globalThis as Record<string, unknown>).chrome = originalChrome;
+    }
+    if (mockServer) {
+      await new Promise<void>((resolve, reject) => {
+        mockServer?.close((err) => (err ? reject(err) : resolve()));
+      });
+      mockServer = null;
+    }
+  });
+
+  async function startResultServer(postedResults: unknown[]): Promise<string> {
+    mockServer = http.createServer((req, res) => {
+      if (req.method === "POST" && req.url === "/hands/result") {
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
+        req.on("end", () => {
+          postedResults.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        });
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => {
+      mockServer!.listen(0, "127.0.0.1", () => resolve());
+    });
+    return `http://127.0.0.1:${(mockServer.address() as AddressInfo).port}`;
+  }
+
+  it("delivers decide popup to the last meaningful event tab, not a focused unrelated tab after tab_switch/mousemove", async () => {
+    const postedResults: unknown[] = [];
+    const baseUrl = await startResultServer(postedResults);
+
+    const sendMessage = vi.fn(async (_tabId: number, _msg: unknown) => {
+      void _tabId;
+      void _msg;
+      return { ok: true, decision: "dismissed" };
+    });
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        query: vi.fn(async () => [
+          { id: 101, url: "http://localhost:4173/portal.html", active: false, windowId: 1 },
+          { id: 202, url: "http://127.0.0.1:4173/erp.html", active: false, windowId: 1 },
+          { id: 303, url: "https://mail.google.com/mail/u/0/#inbox", active: true, windowId: 2 },
+        ]),
+        sendMessage,
+      },
+    };
+
+    const evtRes = vi.fn();
+    handleRuntimeMessage(
+      {
+        kind: "EYES_EVENT",
+        event: {
+          v: 1,
+          id: "evt-erp-save",
+          ts: Date.now(),
+          session: "sess_test",
+          source: "browser",
+          app: "127.0.0.1",
+          url: "http://127.0.0.1:4173/erp.html",
+          type: "click",
+        },
+      },
+      { tab: { id: 202, url: "http://127.0.0.1:4173/erp.html" } },
+      evtRes,
+    );
+
+    // Unrelated tab focus + mousemove must not steal the offer popup target
+    recordEvent({
+      v: 1,
+      id: "evt-switch-gmail",
+      ts: Date.now() + 100,
+      session: BROWSER_SESSION_ID,
+      source: "browser",
+      app: "mail.google.com",
+      url: "https://mail.google.com/mail/u/0/#inbox",
+      type: "tab_switch",
+      meta: { tabId: 303 },
+    });
+    handleRuntimeMessage(
+      {
+        kind: "EYES_EVENT",
+        event: {
+          v: 1,
+          id: "evt-gmail-move",
+          ts: Date.now() + 200,
+          session: "sess_test",
+          source: "browser",
+          app: "mail.google.com",
+          url: "https://mail.google.com/mail/u/0/#inbox",
+          type: "mousemove",
+        },
+      },
+      { tab: { id: 303, url: "https://mail.google.com/mail/u/0/#inbox" } },
+      evtRes,
+    );
+
+    await handleHandsCommand(
+      {
+        id: "dec-gen95-1",
+        kind: "decide",
+        name: "Sync Portal to ERP",
+        solution: "Copy order and save in ERP",
+        url: "http://localhost:4173/portal.html",
+        script: {
+          name: "Sync Portal to ERP",
+          steps: [
+            { action: "switchTab", host: "localhost", url: "http://localhost:4173/portal.html" },
+            { action: "readText", target: { kind: "css", value: ".order" }, bind: "order" },
+            { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:4173/erp.html" },
+            { action: "fill", target: { kind: "css", value: "#order" }, value: "{{order}}" },
+          ],
+        },
+      },
+      baseUrl,
+    );
+
+    await vi.waitFor(() => {
+      expect(postedResults).toHaveLength(1);
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toBe(202);
+    expect(sendMessage.mock.calls[0]?.[1]).toMatchObject({ kind: "EYES_SHOW_DECIDER" });
+  });
+
+  it("ignores clicks on unrelated hosts and falls back to the flow start URL tab for decide", async () => {
+    const postedResults: unknown[] = [];
+    const baseUrl = await startResultServer(postedResults);
+
+    const sendMessage = vi.fn(async (_tabId: number, _msg: unknown) => {
+      void _tabId;
+      void _msg;
+      return { ok: true, decision: "dismissed" };
+    });
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        query: vi.fn(async () => [
+          { id: 101, url: "http://localhost:4173/portal.html", active: false, windowId: 1 },
+          { id: 102, url: "http://localhost:4173/other.html", active: false, windowId: 1 },
+          { id: 303, url: "https://mail.google.com/mail/u/0/#inbox", active: true, windowId: 2 },
+        ]),
+        sendMessage,
+      },
+    };
+
+    // User even clicked inside mail.google.com while compiler ran
+    handleRuntimeMessage(
+      {
+        kind: "EYES_EVENT",
+        event: {
+          v: 1,
+          id: "evt-gmail-click",
+          ts: Date.now(),
+          session: "sess_test",
+          source: "browser",
+          app: "mail.google.com",
+          url: "https://mail.google.com/mail/u/0/#inbox",
+          type: "click",
+        },
+      },
+      { tab: { id: 303, url: "https://mail.google.com/mail/u/0/#inbox" } },
+      vi.fn(),
+    );
+
+    await handleHandsCommand(
+      {
+        id: "dec-gen95-2",
+        kind: "decide",
+        name: "Submit portal order",
+        solution: "Click submit on portal",
+        url: "http://localhost:4173/portal.html",
+        script: {
+          name: "Submit portal order",
+          steps: [
+            { action: "switchTab", host: "localhost", url: "http://localhost:4173/portal.html" },
+            { action: "click", target: { kind: "testid", value: "submit-btn" } },
+          ],
+        },
+      },
+      baseUrl,
+    );
+
+    await vi.waitFor(() => {
+      expect(postedResults).toHaveLength(1);
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0]?.[0]).toBe(101);
+  });
+
+  it("Run first switches to the flow start tab (switchTab with url) before replaying, even when approved on another tab or missing leading switchTab", async () => {
+    const postedResults: unknown[] = [];
+    const baseUrl = await startResultServer(postedResults);
+
+    const updatedTabs: number[] = [];
+    const executedOnTabs: number[] = [];
+    const sendMessage = vi.fn(async (_tabId: number, msg: { kind?: string }) => {
+      if (msg.kind === "EYES_SHOW_DECIDER") {
+        return { ok: true, decision: "approved" };
+      }
+      return { ok: true };
+    });
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        query: vi.fn(async () => [
+          { id: 101, url: "http://localhost:4173/portal.html", active: false, windowId: 1 },
+          { id: 202, url: "http://127.0.0.1:4173/erp.html", active: false, windowId: 1 },
+          { id: 303, url: "https://mail.google.com/mail/u/0/#inbox", active: true, windowId: 2 },
+        ]),
+        update: vi.fn(async (tabId: number) => {
+          updatedTabs.push(tabId);
+          return { id: tabId };
+        }),
+        sendMessage,
+      },
+      windows: { update: vi.fn(async () => ({})) },
+      scripting: {
+        executeScript: vi.fn(async ({ target }: { target: { tabId: number } }) => {
+          executedOnTabs.push(target.tabId);
+          return [{ frameId: 0, result: { ok: true, value: "INV-1" } }];
+        }),
+      },
+    };
+
+    // 1. Decide arrives on cmd.tabId=202 (erp.html) and user clicks Run
+    await handleHandsCommand(
+      {
+        id: "dec-gen95-3",
+        kind: "decide",
+        name: "Sync Portal to ERP",
+        solution: "Sync",
+        tabId: 202,
+        url: "http://localhost:4173/portal.html",
+        script: {
+          name: "Sync Portal to ERP",
+          steps: [
+            { action: "switchTab", host: "localhost", url: "http://localhost:4173/portal.html" },
+            { action: "readText", target: { kind: "css", value: ".order" }, bind: "order" },
+            { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:4173/erp.html" },
+            { action: "fill", target: { kind: "css", value: "#order" }, value: "{{order}}" },
+          ],
+        },
+      },
+      baseUrl,
+    );
+    await vi.waitFor(() => {
+      expect(postedResults).toHaveLength(1);
+    });
+    expect(sendMessage.mock.calls[0]?.[0]).toBe(202);
+
+    // 2. Run starts by switching to flow start tab 101 (portal.html), reading there, then switching to 202 (erp.html)
+    await handleHandsCommand(
+      {
+        id: "run-gen95-3",
+        url: "http://localhost:4173/portal.html",
+        script: {
+          name: "Sync Portal to ERP",
+          steps: [
+            { action: "switchTab", host: "localhost", url: "http://localhost:4173/portal.html" },
+            { action: "readText", target: { kind: "css", value: ".order" }, bind: "order" },
+            { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:4173/erp.html" },
+            { action: "fill", target: { kind: "css", value: "#order" }, value: "{{order}}" },
+          ],
+        },
+      },
+      baseUrl,
+    );
+    expect(updatedTabs).toEqual([101, 202]);
+    expect(executedOnTabs).toEqual([101, 202]);
+
+    // 3. Run with cmd.url on a script lacking a leading switchTab also switches to flow start tab 101 first
+    updatedTabs.length = 0;
+    executedOnTabs.length = 0;
+    await handleHandsCommand(
+      {
+        id: "run-gen95-4",
+        url: "http://localhost:4173/portal.html",
+        script: {
+          name: "Click portal button",
+          steps: [{ action: "click", target: { kind: "testid", value: "refresh" } }],
+        },
+      },
+      baseUrl,
+    );
+    expect(updatedTabs).toEqual([101]);
+    expect(executedOnTabs).toEqual([101]);
+  });
+
+  it("GEN-123 / GEN-126: precheck checks only the first step with a locator per matching open tab (skipping revealed/later steps on already-checked tabs and missing tabs)", async () => {
+    const postedResults: unknown[] = [];
+    const baseUrl = await startResultServer(postedResults);
+
+    const sendMessage = vi.fn(async (tabId: number, msg: { kind?: string; locators?: Array<{ value: string }> }) => {
+      if (msg.kind !== "EYES_PRECHECK_STEP") return { ok: false };
+      const val = msg.locators?.[0]?.value;
+      if (tabId === 101 && val === "portal-invoice-id") {
+        return { ok: true, matchCount: 1, unique: true };
+      }
+      if (tabId === 202 && (val === "erp-invoice-id" || val === "save-btn")) {
+        return { ok: true, matchCount: 1, unique: true };
+      }
+      if (tabId === 404 && val === "summary-heading") {
+        return { ok: true, matchCount: 1, unique: true };
+      }
+      return { ok: true, matchCount: 0, unique: false };
+    });
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        query: vi.fn(async () => [
+          { id: 101, url: "http://127.0.0.1:5173/portal.html", active: false, windowId: 1 },
+          { id: 202, url: "http://127.0.0.1:5173/erp.html", active: false, windowId: 1 },
+          { id: 303, url: "https://example.com/", active: true, windowId: 2 },
+          { id: 404, url: "https://reports.local/summary", active: false, windowId: 2 },
+        ]),
+        sendMessage,
+      },
+    };
+
+    await handleHandsCommand(
+      {
+        id: "pre-gen123-1",
+        kind: "precheck",
+        url: "http://127.0.0.1:5173/portal.html",
+        script: {
+          name: "Transfer Invoices",
+          steps: [
+            {
+              action: "forEach",
+              items: [{ invoiceId: "INV-1" }],
+              steps: [
+                { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:5173/portal.html" },
+                { action: "readText", target: { kind: "testid", value: "portal-invoice-id" }, bind: "inv" },
+                { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:5173/erp.html" },
+                { action: "fill", target: { kind: "testid", value: "erp-invoice-id" }, value: "{{inv}}" },
+                { action: "click", target: { kind: "css", value: ".select2-results__option" } },
+                { action: "navigate", url: "https://missing.local/step" },
+                { action: "click", target: { kind: "testid", value: "missing-btn" } },
+                { action: "switchTab", host: "reports.local" },
+                { action: "click", target: { kind: "testid", value: "summary-heading" } },
+              ],
+            },
+            { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:5173/erp.html" },
+            { action: "click", target: { kind: "testid", value: "save-btn" } },
+          ],
+        },
+      },
+      baseUrl,
+    );
+
+    expect(sendMessage).toHaveBeenCalledTimes(3);
+    expect(sendMessage.mock.calls[0]?.[0]).toBe(101);
+    expect(sendMessage.mock.calls[1]?.[0]).toBe(202);
+    expect(sendMessage.mock.calls[2]?.[0]).toBe(404);
+    expect(postedResults[0]).toEqual({
+      id: "pre-gen123-1",
+      ok: true,
+      results: [
+        { index: 2, action: "readText", ok: true, matchCount: 1, unique: true },
+        { index: 4, action: "fill", ok: true, matchCount: 1, unique: true },
+        { index: 9, action: "click", ok: true, matchCount: 1, unique: true },
+      ],
+    });
+  });
+
+  it("GEN-123: precheck returns ok: true with empty results when no open tabs match and times out hung tabs quickly", async () => {
+    const postedResults: unknown[] = [];
+    const baseUrl = await startResultServer(postedResults);
+
+    // 1. No matching tabs open -> skips all steps instead of failing
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        query: vi.fn(async () => [
+          { id: 303, url: "https://example.com/", active: true },
+        ]),
+        sendMessage: vi.fn(),
+      },
+    };
+
+    await handleHandsCommand(
+      {
+        id: "pre-gen123-none",
+        kind: "precheck",
+        url: "http://127.0.0.1:5173/portal.html",
+        script: {
+          steps: [
+            { action: "readText", target: { kind: "testid", value: "portal-invoice-id" }, bind: "inv" },
+            { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:5173/erp.html" },
+            { action: "fill", target: { kind: "testid", value: "erp-invoice-id" }, value: "{{inv}}" },
+          ],
+        },
+      },
+      baseUrl,
+    );
+
+    expect(postedResults[0]).toEqual({ id: "pre-gen123-none", ok: true, results: [] });
+
+    // 2. Hung tabs.sendMessage on portal tab times out per message and skips remaining steps on that tab, while still checking healthy ERP tab
+    const sendMessageHung = vi.fn((tabId: number) => {
+      if (tabId === 101) {
+        return new Promise(() => {
+          // intentionally never resolves
+        });
+      }
+      return Promise.resolve({ ok: true, matchCount: 1, unique: true });
+    });
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        query: vi.fn(async () => [
+          { id: 101, url: "http://127.0.0.1:5173/portal.html", active: false },
+          { id: 202, url: "http://127.0.0.1:5173/erp.html", active: true },
+        ]),
+        sendMessage: sendMessageHung,
+      },
+    };
+
+    const started = Date.now();
+    await handleHandsCommand(
+      {
+        id: "pre-gen123-timeout",
+        kind: "precheck",
+        url: "http://127.0.0.1:5173/portal.html",
+        script: {
+          steps: [
+            { action: "readText", target: { kind: "testid", value: "portal-invoice-id" }, bind: "inv" },
+            { action: "readText", target: { kind: "testid", value: "portal-vendor" }, bind: "vendor" },
+            { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:5173/erp.html" },
+            { action: "fill", target: { kind: "testid", value: "erp-invoice-id" }, value: "{{inv}}" },
+          ],
+        },
+      },
+      baseUrl,
+    );
+    const elapsedMs = Date.now() - started;
+
+    expect(elapsedMs).toBeLessThan(3500);
+    // Hung tab 101 only waited once; second step on tab 101 was skipped immediately; tab 202 still ran
+    expect(sendMessageHung).toHaveBeenCalledTimes(2);
+    expect(postedResults[1]).toEqual({
+      id: "pre-gen123-timeout",
+      ok: true,
+      results: [{ index: 3, action: "fill", ok: true, matchCount: 1, unique: true }],
+    });
+  });
+
+  it("GEN-128: runs on first click after reload without page interaction (stale tabId fallback, loading wait, and HANDS_RUN_SCRIPT url switch)", async () => {
+    const postedResults: unknown[] = [];
+    const baseUrl = await startResultServer(postedResults);
+
+    let tabStatus: "loading" | "complete" = "loading";
+    const listeners = new Set<
+      (tabId: number, changeInfo: { status?: string; url?: string }, tab: { id: number; url?: string; status?: string }) => void
+    >();
+    const updatedTabs: number[] = [];
+    const executedOnTabs: number[] = [];
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        get: vi.fn(async (tabId: number) => {
+          if (tabId === 999) throw new Error("No tab with id: 999");
+          return { id: tabId, url: "https://portal.example/form", status: tabStatus };
+        }),
+        query: vi.fn(async ({ active, currentWindow }: { active?: boolean; currentWindow?: boolean }) => {
+          if (active && currentWindow) return [];
+          if (active) {
+            return [{ id: 501, url: "https://portal.example/form", active: true, status: tabStatus, lastAccessed: 900 }];
+          }
+          return [
+            { id: 401, url: "https://other.example/", active: false, windowId: 1, status: "complete", lastAccessed: 100 },
+            { id: 501, url: "https://portal.example/form", active: true, windowId: 1, status: tabStatus, lastAccessed: 900 },
+          ];
+        }),
+        update: vi.fn(async (tabId: number) => {
+          updatedTabs.push(tabId);
+          return { id: tabId };
+        }),
+        onUpdated: {
+          addListener: vi.fn((cb) => listeners.add(cb)),
+          removeListener: vi.fn((cb) => listeners.delete(cb)),
+        },
+      },
+      windows: { update: vi.fn(async () => ({})) },
+      scripting: {
+        executeScript: vi.fn(async ({ target }: { target: { tabId: number } }) => {
+          if (tabStatus === "loading") {
+            return [{ frameId: 0, result: { ok: false, error: "Target not found" } }];
+          }
+          executedOnTabs.push(target.tabId);
+          return [{ frameId: 0, result: { ok: true, url: "https://portal.example/form" } }];
+        }),
+      },
+    };
+
+    // 1) handleHandsCommand with stale cmd.tabId=999 falls back to active runnable tab 501 and waits for load completion
+    const runPromise = handleHandsCommand(
+      {
+        id: "run-gen128-stale",
+        tabId: 999,
+        script: {
+          name: "Fill form",
+          steps: [{ action: "click", target: { kind: "css", value: "#start" } }],
+        },
+      },
+      baseUrl,
+    );
+
+    await new Promise((r) => setTimeout(r, 15));
+    tabStatus = "complete";
+    for (const cb of listeners) {
+      cb(501, { status: "complete" }, { id: 501, url: "https://portal.example/form", status: "complete" });
+    }
+    await runPromise;
+
+    expect(postedResults[0]).toMatchObject({ id: "run-gen128-stale", ok: true });
+    expect(executedOnTabs).toEqual([501]);
+
+    // 2) HANDS_RUN_SCRIPT from side panel (sender.tab undefined) with url preserves GEN-95 switchTab-first behavior
+    updatedTabs.length = 0;
+    executedOnTabs.length = 0;
+    const panelRes = await new Promise<Record<string, unknown>>((resolve) => {
+      handleRuntimeMessage(
+        {
+          kind: "HANDS_RUN_SCRIPT",
+          url: "https://portal.example/form",
+          script: {
+            name: "Fill form",
+            steps: [{ action: "click", target: { kind: "css", value: "#start" } }],
+          },
+        },
+        {},
+        (res) => resolve((res ?? {}) as Record<string, unknown>),
+      );
+    });
+
+    expect(panelRes.ok).toBe(true);
+    expect(updatedTabs).toEqual([501]);
+    expect(executedOnTabs).toEqual([501]);
   });
 });

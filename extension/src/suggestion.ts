@@ -200,18 +200,22 @@ export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion 
   const name = input.name.trim() || (input.script.name ?? "").trim() || "Proposed automation";
   const solution = input.solution.trim();
   const steps = input.script.steps;
-  const firstStep = steps[0];
-  const isSingleInsert =
-    steps.length === 1 &&
-    firstStep?.action === "insertText" &&
-    !firstStep.target &&
-    typeof firstStep.value === "string";
+  const nonNavSteps = steps.filter(
+    (step) => step.action !== "switchTab" && step.action !== "navigate",
+  );
+  const insertStep =
+    nonNavSteps.length === 1 &&
+    nonNavSteps[0]?.action === "insertText" &&
+    typeof nonNavSteps[0].value === "string"
+      ? nonNavSteps[0]
+      : undefined;
+  const isSingleInsert = Boolean(insertStep);
   const isFlowTip = input.primaryLabel?.trim() === "Got it";
 
   const previewSource = isFlowTip
     ? (input.script.name?.trim() || name)
-    : isSingleInsert && typeof firstStep.value === "string"
-      ? firstStep.value
+    : isSingleInsert && insertStep && typeof insertStep.value === "string"
+      ? insertStep.value
       : name;
 
   const { boundKeys, loopItemKeys, hasForEach, forEachCount, bodySteps } = collectBoundAndLoopKeys(steps);
@@ -272,8 +276,8 @@ export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion 
     kind: isSingleInsert ? "text" : "click",
     count: 1,
     preview: collapsePreview(previewSource, 64),
-    ...(isSingleInsert && typeof firstStep.value === "string"
-      ? { snippetText: firstStep.value }
+    ...(isSingleInsert && insertStep && typeof insertStep.value === "string"
+      ? { snippetText: insertStep.value }
       : {}),
     headline: collapsePreview(name, 56),
     detail: collapsePreview(solution, 140),

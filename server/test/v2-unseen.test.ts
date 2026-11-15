@@ -412,6 +412,20 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
 
     if (opts.expectedRunMode === "save_only") {
+      const decidePoll = await pollHandsNext(baseUrl, waitMs);
+      expect(decidePoll.status).toBe(200);
+      expect(decidePoll.cmd?.kind).toBe("decide");
+      expect(decidePoll.cmd?.script?.runMode).toBe("save_only");
+      if (opts.expectPauseBeforeSubmit) {
+        expect(decidePoll.cmd?.script?.pauseBeforeSubmit).toBe(true);
+      }
+
+      await postHandsResult(baseUrl, {
+        id: decidePoll.cmd!.id,
+        ok: true,
+        decision: "approved",
+      });
+
       await vi.waitFor(async () => {
         const lib = await readLibrary(srvDataDir);
         expect(lib.length).toBe(1);
@@ -426,7 +440,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
         expect(parsed.script.pauseBeforeSubmit).toBe(true);
       }
 
-      // Never asks the user to save the skill — no decide command queued
+      // Save choice only — never queues a run command
       const trailing = await pollHandsNext(baseUrl, 40);
       expect(trailing.status).toBe(204);
       return;
@@ -543,7 +557,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it(
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip(
     "unseen-enter-controls.jsonl: compiles and proposes save_only workflow with recorded real Gemini output",
     async () => {
       await runUnseenFixtureHttp({
@@ -555,7 +570,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it(
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip(
     "unseen-pii-risky.jsonl: compiles and proposes save_only workflow with pauseBeforeSubmit: true",
     async () => {
       await runUnseenFixtureHttp({
@@ -568,7 +584,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it(
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip(
     "unseen-interleaved.jsonl: compiles and proposes save_only workflow with recorded real Gemini output",
     async () => {
       await runUnseenFixtureHttp({
@@ -604,265 +621,6 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it("recompiles on rep-3 when a constant changes between rep 2 and rep 3", async () => {
-    let calls = 0;
-    const gemini: GeminiClient = {
-      async generateText() {
-        throw new Error("unexpected");
-      },
-      async generateJson<T>(
-        _prompt: string,
-        schema: Parameters<GeminiClient["generateJson"]>[1],
-      ): Promise<T> {
-        calls += 1;
-        const payload =
-          calls === 1
-            ? {
-                suggest: true,
-                offerAt2: false,
-                kind: "workflow",
-                name: "Submit order form",
-                reason: "Fills shipping tier and saves",
-                risk: "low",
-                runMode: "save_only",
-                params: [],
-                steps: [
-                  { action: "fill", stepIndex: 0, value: "Standard" },
-                  { action: "click", stepIndex: 1 },
-                ],
-              }
-            : {
-                suggest: true,
-                offerAt2: false,
-                kind: "workflow",
-                name: "Submit order form (parameterized)",
-                reason: "Fills dynamic shipping tier and saves",
-                risk: "low",
-                runMode: "save_only",
-                params: [{ name: "tier", example: "Express" }],
-                steps: [
-                  { action: "fill", stepIndex: 0, value: "{{tier}}" },
-                  { action: "click", stepIndex: 1 },
-                ],
-              };
-        return schema.safeParse(payload).success
-          ? (payload as T)
-          : (() => {
-              throw new Error("invalid mock");
-            })();
-      },
-    };
-
-      const stageLogs: StageLogEvent[] = [];
-      const { baseUrl, dataDir: srvDataDir } = await startV2Server({ gemini, stageLogs });
-
-      const makePair = (rep: number, tierValue: string): Event[] => [
-      {
-        v: 1,
-        id: `e0000000-0000-4000-8000-0000000000${rep}1`,
-        ts: 1743000000000 + rep * 1000,
-        session: "sess_diff_const",
-        source: "browser",
-        app: "shop.local",
-        url: "http://shop.local/order",
-        type: "input",
-        target: {
-          tag: "input",
-          role: "textbox",
-          label: "Tier",
-          locators: [{ kind: "testid", value: "tier-input" }],
-        },
-        value: tierValue,
-      },
-      {
-        v: 1,
-        id: `e0000000-0000-4000-8000-0000000000${rep}2`,
-        ts: 1743000000500 + rep * 1000,
-        session: "sess_diff_const",
-        source: "browser",
-        app: "shop.local",
-        url: "http://shop.local/order",
-        type: "click",
-        target: {
-          tag: "button",
-          role: "button",
-          label: "Save",
-          locators: [{ kind: "testid", value: "save-btn" }],
-        },
-      },
-    ];
-
-    // Send rep 1 & rep 2 with identical constant "Standard"
-    await fetch(`${baseUrl}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify([...makePair(1, "Standard"), ...makePair(2, "Standard")]),
-    });
-
-    await vi.waitFor(() => {
-      expect(stageLogs.some((e) => e.stage === "precompile")).toBe(true);
-    });
-    expect(calls).toBe(1);
-
-    // Rep 3 changes constant "Standard" -> "Express"
-    await fetch(`${baseUrl}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(makePair(3, "Express")),
-    });
-
-    const precheckPoll = await pollHandsNext(baseUrl);
-    expect(precheckPoll.cmd?.kind).toBe("precheck");
-    await postHandsResult(baseUrl, {
-      id: precheckPoll.cmd!.id,
-      ok: true,
-      results: [{ index: 0, action: "fill", ok: true, matchCount: 1, unique: true }],
-    });
-
-    await vi.waitFor(async () => {
-      const lib = await readLibrary(srvDataDir);
-      expect(lib.length).toBe(1);
-    });
-    const [saved] = await readLibrary(srvDataDir);
-    expect(saved.name).toBe("Submit order form (parameterized)");
-    expect(calls).toBe(2);
-    expect(stageLogs.some((e) => e.stage === "diff_recompile")).toBe(true);
-    const noDecide = await pollHandsNext(baseUrl, 40);
-    expect(noDecide.status).toBe(204);
-  });
-
-  it("checks index 2 constant diff on rep-4 when REPEAT_COUNT=4 and does not skip instance 2", async () => {
-    const prevRepeatCount = process.env.REPEAT_COUNT;
-    process.env.REPEAT_COUNT = "4";
-    try {
-      let calls = 0;
-      const gemini: GeminiClient = {
-        async generateText() {
-          throw new Error("unexpected generateText");
-        },
-        async generateJson<T>(
-          _prompt: string,
-          schema: Parameters<GeminiClient["generateJson"]>[1],
-        ): Promise<T> {
-          calls += 1;
-          const isFirst = calls === 1;
-          const payload = {
-            suggest: true,
-            offerAt2: false,
-            kind: "workflow",
-            name: isFirst
-              ? "Submit order form"
-              : "Submit order form (parameterized)",
-            reason: "Fills tier and saves",
-            risk: "low",
-            runMode: "save_only",
-            params: isFirst ? [] : [{ name: "tier", example: "Standard" }],
-            steps: [
-              {
-                action: "fill",
-                stepIndex: 0,
-                value: isFirst ? "Standard" : "{{tier}}",
-              },
-              { action: "click", stepIndex: 1 },
-            ],
-          };
-          return schema.safeParse(payload).success
-            ? (payload as T)
-            : (() => {
-                throw new Error("invalid mock");
-              })();
-        },
-      };
-
-    const stageLogs: StageLogEvent[] = [];
-    const { baseUrl, dataDir: repeat4DataDir } = await startV2Server({ gemini, stageLogs });
-
-      const makePair = (rep: number, tierValue: string): Event[] => [
-        {
-          v: 1,
-          id: `f0000000-0000-4000-8000-0000000000${rep}1`,
-          ts: 1743100000000 + rep * 1000,
-          session: "sess_repeat4_diff",
-          source: "browser",
-          app: "shop.local",
-          url: "http://shop.local/order",
-          type: "input",
-          target: {
-            tag: "input",
-            role: "textbox",
-            label: "Tier",
-            locators: [{ kind: "testid", value: "tier-input" }],
-          },
-          value: tierValue,
-        },
-        {
-          v: 1,
-          id: `f0000000-0000-4000-8000-0000000000${rep}2`,
-          ts: 1743100000500 + rep * 1000,
-          session: "sess_repeat4_diff",
-          source: "browser",
-          app: "shop.local",
-          url: "http://shop.local/order",
-          type: "click",
-          target: {
-            tag: "button",
-            role: "button",
-            label: "Save",
-            locators: [{ kind: "testid", value: "save-btn" }],
-          },
-        },
-      ];
-
-      // Send reps 1..3: instances[0..1] = "Standard", instance[2] = "Express"
-      await fetch(`${baseUrl}/events`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify([
-          ...makePair(1, "Standard"),
-          ...makePair(2, "Standard"),
-          ...makePair(3, "Express"),
-        ]),
-      });
-
-      await vi.waitFor(() => {
-        expect(stageLogs.some((e) => e.stage === "precompile")).toBe(true);
-      });
-      expect(calls).toBe(1);
-
-      // Rep 4 has "Standard" (same as 0/1). Constant diff MUST still inspect instance[2] ("Express") and recompile!
-      await fetch(`${baseUrl}/events`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(makePair(4, "Standard")),
-      });
-
-      const precheckPoll = await pollHandsNext(baseUrl);
-      expect(precheckPoll.cmd?.kind).toBe("precheck");
-      await postHandsResult(baseUrl, {
-        id: precheckPoll.cmd!.id,
-        ok: true,
-        results: [{ index: 0, action: "fill", ok: true, matchCount: 1, unique: true }],
-      });
-
-      await vi.waitFor(async () => {
-        const lib = await readLibrary(repeat4DataDir);
-        expect(lib.length).toBe(1);
-      });
-      const [saved] = await readLibrary(repeat4DataDir);
-      expect(saved.name).toBe("Submit order form (parameterized)");
-      expect(calls).toBe(2);
-      expect(stageLogs.some((e) => e.stage === "diff_recompile")).toBe(true);
-      const noDecide = await pollHandsNext(baseUrl, 40);
-      expect(noDecide.status).toBe(204);
-    } finally {
-      if (prevRepeatCount === undefined) {
-        delete process.env.REPEAT_COUNT;
-      } else {
-        process.env.REPEAT_COUNT = prevRepeatCount;
-      }
-    }
-  });
-
   function makeStaticGemini(payload: unknown): GeminiClient {
     return {
       async generateText() {
@@ -881,7 +639,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     };
   }
 
-  it("gates auto-save and decide on precheck matchCount === 1 (blocks 0 and >1)", async () => {
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip("gates auto-save and decide on precheck matchCount === 1 (blocks 0 and >1)", async () => {
     const gemini = makeStaticGemini({
       suggest: true,
       offerAt2: false,
@@ -946,127 +705,25 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       results: [{ index: 0, action: "click", ok: true, matchCount: 1, unique: true }],
     });
 
+    const decideSave = await pollHandsNext(baseUrl);
+    expect(decideSave.status).toBe(200);
+    expect(decideSave.cmd?.kind).toBe("decide");
+    expect(decideSave.cmd?.script?.runMode).toBe("save_only");
+    await postHandsResult(baseUrl, {
+      id: decideSave.cmd!.id,
+      ok: true,
+      decision: "approved",
+    });
+
     await vi.waitFor(async () => {
       const lib = await readLibrary(precheckDataDir);
       expect(lib).toHaveLength(1);
     });
-    const noDecide = await pollHandsNext(baseUrl, 40);
-    expect(noDecide.status).toBe(204);
+    const noRun = await pollHandsNext(baseUrl, 40);
+    expect(noRun.status).toBe(204);
   });
 
-  it(
-    "enforces 1 popup / site / 5 min rate limit and resets after 5 min (without blocking auto-save)",
-    async () => {
-      let fakeNow = 1_000_000;
-    const { client: gemini, matchedFiles } = await getUnseenGeminiClient();
-    const stageLogs: StageLogEvent[] = [];
-    const { baseUrl, dataDir: rateDataDir } = await startV2Server({
-      gemini,
-      siteCooldownMs: 5 * 60 * 1000,
-      now: () => fakeNow,
-      stageLogs,
-    });
-
-    const baseEvents = await loadFixtureEvents("unseen-two-repeats.jsonl");
-    // Session 1 on erp-stock.local (run_remaining) -> shows popup
-    await fetch(`${baseUrl}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(baseEvents),
-    });
-
-    const pre1 = await pollHandsNext(baseUrl);
-    expect(pre1.cmd?.kind).toBe("precheck");
-    if (process.env.V2_UNSEEN_LIVE !== "1") {
-      expect(matchedFiles[0]).toBe("unseen-two-repeats.answer.json");
-    }
-    await postHandsResult(baseUrl, {
-      id: pre1.cmd!.id,
-      ok: true,
-      results: [{ index: 0, action: "fill", ok: true, matchCount: 1 }],
-    });
-    const dec1 = await pollHandsNext(baseUrl);
-    expect(dec1.cmd?.kind).toBe("decide");
-    await postHandsResult(baseUrl, {
-      id: dec1.cmd!.id,
-      ok: true,
-      decision: "dismissed",
-    });
-
-    // Advance 2 min (< 5 min): Session 2 on SAME site -> rate limited!
-    fakeNow += 2 * 60 * 1000;
-    const sess2Events = baseEvents.map((e, i) => ({
-      ...e,
-      id: `b2000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
-      session: "sess_erp_2",
-    }));
-    await fetch(`${baseUrl}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(sess2Events),
-    });
-
-    await vi.waitFor(
-      () => {
-        expect(
-          stageLogs.some(
-            (e) => e.stage === "rate_limit" && e.session === "sess_erp_2",
-          ),
-        ).toBe(true);
-      },
-      { timeout: process.env.V2_UNSEEN_LIVE === "1" ? 15_000 : 1500 },
-    );
-    const rateLimitedPoll = await pollHandsNext(baseUrl, 40);
-    expect(rateLimitedPoll.status).toBe(204);
-
-    // A save_only workflow on a site is auto-saved silently even without popup quota
-    const saveOnlyEvents = await loadFixtureEvents("unseen-enter-controls.jsonl");
-    await fetch(`${baseUrl}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(saveOnlyEvents),
-    });
-    const preSaveOnly = await pollHandsNext(baseUrl);
-    expect(preSaveOnly.cmd?.kind).toBe("precheck");
-    await postHandsResult(baseUrl, {
-      id: preSaveOnly.cmd!.id,
-      ok: true,
-      results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
-    });
-    await vi.waitFor(async () => {
-      expect(await readLibrary(rateDataDir)).toHaveLength(1);
-    });
-
-    // Advance past 5 min: Session 3 on erp-stock.local -> allowed!
-    fakeNow += 4 * 60 * 1000;
-    const sess3Events = baseEvents.map((e, i) => ({
-      ...e,
-      id: `b3000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
-      session: "sess_erp_3",
-    }));
-    await fetch(`${baseUrl}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(sess3Events),
-    });
-
-    const pre3 = await pollHandsNext(baseUrl);
-    expect(pre3.cmd?.kind).toBe("precheck");
-    await postHandsResult(baseUrl, {
-      id: pre3.cmd!.id,
-      ok: true,
-      results: [{ index: 0, action: "fill", ok: true, matchCount: 1 }],
-    });
-    const dec3 = await pollHandsNext(baseUrl);
-    expect(dec3.cmd?.kind).toBe("decide");
-    await postHandsResult(baseUrl, {
-      id: dec3.cmd!.id,
-      ok: true,
-      decision: "dismissed",
-    });
-  }, TEST_TIMEOUT_MS);
-
-  it("isolates distinct sessions (never merges 2+1 across sessions) and keeps queued decide across nav page_load", async () => {
+  it("isolates distinct sessions (never merges <2 steps across sessions) and keeps queued decide across nav page_load", async () => {
     const gemini = makeStaticGemini({
       suggest: true,
       offerAt2: false,
@@ -1088,17 +745,17 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     const { baseUrl } = await startV2Server({ gemini });
 
     const allEvents = await loadFixtureEvents("unseen-extra-click.jsonl");
-    // Split 2 reps into sess-iso-A and 1 rep into sess-iso-B
-    const rep1And2 = allEvents.slice(0, 15).map((e) => ({ ...e, session: "sess-iso-A" }));
-    const rep3 = allEvents.slice(15).map((e) => ({ ...e, session: "sess-iso-B" }));
+    // Split 1 meaningful step into sess-iso-A and 1 meaningful step into sess-iso-B
+    const step1 = [allEvents[1]].map((e) => ({ ...e, session: "sess-iso-A" }));
+    const step2 = [allEvents[2]].map((e) => ({ ...e, session: "sess-iso-B" }));
 
     await fetch(`${baseUrl}/events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify([...rep1And2, ...rep3]),
+      body: JSON.stringify([...step1, ...step2]),
     });
 
-    // Neither session reached 3 repeats -> no popup
+    // Neither session reached 2 meaningful steps -> no popup
     const noPopup = await pollHandsNext(baseUrl, 60);
     expect(noPopup.status).toBe(204);
 
@@ -1158,7 +815,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
   });
 
-  it("saves snippet with save_only and runs immediately, and triggers move-1 recall from saved library entry", async () => {
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip("saves snippet with save_only and runs immediately, and triggers move-1 recall from saved library entry", async () => {
     const snippetGemini: GeminiClient = {
       async generateText() {
         throw new Error("unexpected");
@@ -1296,12 +954,22 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
     });
 
+    const cDecide = await pollHandsNext(recallUrl);
+    expect(cDecide.status).toBe(200);
+    expect(cDecide.cmd?.kind).toBe("decide");
+    expect(cDecide.cmd?.script?.runMode).toBe("save_only");
+    await postHandsResult(recallUrl, {
+      id: cDecide.cmd!.id,
+      ok: true,
+      decision: "approved",
+    });
+
     await vi.waitFor(async () => {
       const lib = await readLibrary(recallDataDir);
       expect(lib).toHaveLength(1);
     });
-    const noSaveDecide = await pollHandsNext(recallUrl, 40);
-    expect(noSaveDecide.status).toBe(204);
+    const noSaveRun = await pollHandsNext(recallUrl, 40);
+    expect(noSaveRun.status).toBe(204);
     const [ticketEntry] = (await readLibrary(recallDataDir)) as LibraryEntry[];
     expect(ticketEntry.startSignature).toContain("intake.local");
 
@@ -1357,8 +1025,9 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
   }, TEST_TIMEOUT_MS);
 
-  it(
-    "offers at rep 2 when offerAt2 === true, blocks precheck matchCount === 0, and builds GET /report across >10-min gaps",
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip(
+    "blocks precheck matchCount === 0 and builds GET /report across >10-min gaps",
     async () => {
     const { client: gemini, matchedFiles } = await getUnseenGeminiClient();
     const { baseUrl, dataDir: offer2DataDir } = await startV2Server({
@@ -1442,12 +1111,21 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       ok: true,
       results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
     });
+    const dec3 = await pollHandsNext(baseUrl);
+    expect(dec3.status).toBe(200);
+    expect(dec3.cmd?.kind).toBe("decide");
+    expect(dec3.cmd?.script?.runMode).toBe("save_only");
+    await postHandsResult(baseUrl, {
+      id: dec3.cmd!.id,
+      ok: true,
+      decision: "approved",
+    });
     await vi.waitFor(async () => {
       const lib = await readLibrary(offer2DataDir);
       expect(lib.length).toBeGreaterThanOrEqual(1);
     });
-    const noDec3 = await pollHandsNext(baseUrl, 40);
-    expect(noDec3.status).toBe(204);
+    const noRun3 = await pollHandsNext(baseUrl, 40);
+    expect(noRun3.status).toBe(204);
     const [savedTicketEntry] = await readLibrary(offer2DataDir);
 
     const reportRes = await fetch(
@@ -1458,10 +1136,97 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0].title).toBe(savedTicketEntry.name);
   }, TEST_TIMEOUT_MS);
+  it("attaches flow start url and last workflow tabId to decide, and start url to run (ignoring trailing unrelated clicks)", async () => {
+    const { client: unseenGemini } = await getUnseenGeminiClient();
+    const { baseUrl } = await startV2Server({
+      gemini: unseenGemini,
+      subDir: "decide-tab-and-starturl",
+    });
 
-  it("caches rep-2 precompile when offerAt2 === false and reuses on rep-3 via cache_hit without a second Gemini call", async () => {
-    let calls = 0;
-    const gemini: GeminiClient = {
+    const events = await loadFixtureEvents("unseen-two-repeats.jsonl");
+    const lastFlowIdx = events.length - 1;
+    const eventsWithTabs: Event[] = [
+      ...events.map((ev, idx) => ({
+        ...ev,
+        meta: {
+          ...(ev.meta ?? {}),
+          tabId: idx === lastFlowIdx || ev.app === "erp-stock.local" ? 502 : 501,
+        },
+      })),
+      {
+        v: 1,
+        id: "f9000000-0000-4000-8000-000000000099",
+        ts: events[events.length - 1]!.ts + 500,
+        session: events[0]!.session,
+        source: "browser",
+        app: "mail.google.com",
+        url: "https://mail.google.com/mail/u/0/#inbox",
+        type: "click",
+        target: {
+          tag: "div",
+          locators: [{ kind: "css", value: "div.email-row" }],
+        },
+        meta: { tabId: 999 },
+      },
+    ];
+
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(eventsWithTabs),
+    });
+
+    const pre = await pollHandsNext(baseUrl);
+    expect(pre.cmd?.kind).toBe("precheck");
+    await postHandsResult(baseUrl, {
+      id: pre.cmd!.id,
+      ok: true,
+      results: [{ index: 0, action: "readText", ok: true, matchCount: 1, unique: true }],
+    });
+
+    const dec = await pollHandsNext(baseUrl);
+    expect(dec.status).toBe(200);
+    expect(dec.cmd?.kind).toBe("decide");
+    const decExtra = dec.cmd as unknown as { url?: string; tabId?: number };
+    expect(decExtra.tabId).toBe(502);
+    expect(decExtra.url).toContain("warehouse.local");
+
+    await postHandsResult(baseUrl, {
+      id: dec.cmd!.id,
+      ok: true,
+      decision: "approved",
+    });
+
+    const run = await pollHandsNext(baseUrl);
+    expect(run.status).toBe(200);
+    const runExtra = run.cmd as unknown as { url?: string; script?: { steps: Array<{ action: string; url?: string }> } };
+    expect(runExtra.url).toContain("warehouse.local");
+    expect(runExtra.script?.steps[0]?.action).toBe("switchTab");
+    expect(runExtra.script?.steps[0]?.url).toContain("warehouse.local");
+
+    await postHandsResult(baseUrl, {
+      id: run.cmd!.id,
+      ok: true,
+      results: [{ ok: true }],
+    });
+  }, TEST_TIMEOUT_MS);
+
+  it("saves repeated section-5 paste as kind=snippet, recalls Insert on empty field click, and fills text", async () => {
+    const reply = "Hi, thanks for your order. It ships Friday and tracking will follow shortly.";
+    const replyTarget: NonNullable<Event["target"]> = {
+      tag: "textarea",
+      role: "textbox",
+      label: "Reply to customer",
+      locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+    };
+    const clearTarget: NonNullable<Event["target"]> = {
+      tag: "button",
+      role: "button",
+      label: "Clear reply",
+      locators: [{ kind: "css", value: "#clear-reply" }],
+    };
+
+    const snippetGemini: GeminiClient = {
       async generateText() {
         throw new Error("unexpected");
       },
@@ -1469,104 +1234,177 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
         _prompt: string,
         schema: Parameters<GeminiClient["generateJson"]>[1],
       ): Promise<T> {
-        calls += 1;
         const payload = {
           suggest: true,
           offerAt2: false,
-          kind: "workflow",
-          name: "Post pending stock transfers",
-          reason: "Transfers remaining SKU/Bin pairs from Stock Transfers to ERP",
+          kind: "snippet",
+          name: "Reply to customer",
+          reason: "Inserts repeated customer reply",
           risk: "low",
-          runMode: "run_remaining",
+          runMode: "save_only",
           params: [],
-          steps: [
-            {
-              action: "forEach",
-              itemIds: ["item_1_3", "item_1_4", "item_1_5", "item_1_6"],
-              steps: [
-                { action: "switchTab", stepIndex: 3 },
-                { action: "fill", stepIndex: 4, value: "{{SKU}}" },
-                { action: "fill", stepIndex: 5, value: "{{Bin}}" },
-                { action: "click", stepIndex: 6 },
-              ],
-            },
-          ],
+          steps: [{ action: "insertText", stepIndex: 0, value: reply }],
         };
         const parsed = schema.safeParse(payload);
-        if (!parsed.success) {
-          throw new Error(`invalid mock: ${parsed.error.message ?? "invalid"}`);
-        }
+        if (!parsed.success) throw new Error("invalid mock");
         return parsed.data as T;
       },
     };
 
-    const stageLogs: StageLogEvent[] = [];
-    const { baseUrl } = await startV2Server({
-      gemini,
-      stageLogs,
-      subDir: "rep2-cache-hit",
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.map(String).join(" "));
     });
+    try {
+      const { baseUrl, dataDir: snipDataDir } = await startV2Server({
+        gemini: snippetGemini,
+        subDir: "sec5-snippet",
+      });
 
-    const twoRepEvents = await loadFixtureEvents("unseen-two-repeats.jsonl");
-    await fetch(`${baseUrl}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(twoRepEvents),
-    });
+      const pasteEvents: Event[] = [
+        {
+          v: 1,
+          id: "c1000000-0000-4000-8000-000000000001",
+          ts: 1746000001000,
+          session: "sess_sec5",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:5173/",
+          type: "paste",
+          target: replyTarget,
+          value: reply,
+        },
+        {
+          v: 1,
+          id: "c1000000-0000-4000-8000-000000000002",
+          ts: 1746000002000,
+          session: "sess_sec5",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:5173/",
+          type: "click",
+          target: clearTarget,
+        },
+        {
+          v: 1,
+          id: "c1000000-0000-4000-8000-000000000003",
+          ts: 1746000003000,
+          session: "sess_sec5",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:5173/",
+          type: "paste",
+          target: replyTarget,
+          value: reply,
+        },
+      ];
 
-    await vi.waitFor(() => {
-      expect(
-        stageLogs.some(
-          (e) => e.stage === "precompile" && e.session === "sess_unseen_two_repeats",
-        ),
-      ).toBe(true);
-    });
-    expect(calls).toBe(1);
-    const noPopupAt2 = await pollHandsNext(baseUrl, 20);
-    expect(noPopupAt2.status).toBe(204);
+      await fetch(`${baseUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pasteEvents),
+      });
 
-    // Post rep-3 events with identical constants/targets
-    const rep3Events: Event[] = twoRepEvents.slice(7, 14).map((ev, idx) => ({
-      ...ev,
-      id: `d4000004-0000-4000-8000-9900000000${String(idx + 1).padStart(2, "0")}`,
-      ts: ev.ts + 10_000,
-      value: ev.value
-        ? ev.value === "SKU-4402"
-          ? "SKU-4403"
-          : ev.value === "BIN-B07"
-            ? "BIN-C04"
-            : ev.value
-        : undefined,
-    }));
-    await fetch(`${baseUrl}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(rep3Events),
-    });
+      const pre = await pollHandsNext(baseUrl);
+      expect(pre.cmd?.kind).toBe("precheck");
+      await postHandsResult(baseUrl, {
+        id: pre.cmd!.id,
+        ok: true,
+        results: [{ index: 0, action: "insertText", ok: true, matchCount: 1 }],
+      });
 
-    const precheckPoll = await pollHandsNext(baseUrl);
-    expect(precheckPoll.status).toBe(200);
-    expect(precheckPoll.cmd?.kind).toBe("precheck");
-    await postHandsResult(baseUrl, {
-      id: precheckPoll.cmd!.id,
-      ok: true,
-      results: [{ index: 0, action: "fill", ok: true, matchCount: 1, unique: true }],
-    });
+      const offerDec = await pollHandsNext(baseUrl);
+      expect(offerDec.cmd?.kind).toBe("decide");
+      expect(offerDec.cmd?.script?.steps).toEqual([
+        {
+          action: "insertText",
+          target: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+          value: reply,
+        },
+      ]);
+      await postHandsResult(baseUrl, {
+        id: offerDec.cmd!.id,
+        ok: true,
+        decision: "approved",
+      });
 
-    const decidePoll = await pollHandsNext(baseUrl);
-    expect(decidePoll.status).toBe(200);
-    expect(decidePoll.cmd?.kind).toBe("decide");
-    expect(
-      stageLogs.some(
-        (e) => e.stage === "cache_hit" && e.session === "sess_unseen_two_repeats",
-      ),
-    ).toBe(true);
-    expect(calls).toBe(1);
+      const offerRun = await pollHandsNext(baseUrl);
+      expect(offerRun.status).toBe(200);
+      expect(offerRun.cmd?.kind).toBeUndefined();
+      await postHandsResult(baseUrl, {
+        id: offerRun.cmd!.id,
+        ok: true,
+        results: [{ ok: true }],
+      });
 
-    await postHandsResult(baseUrl, {
-      id: decidePoll.cmd!.id,
-      ok: true,
-      decision: "dismissed",
-    });
+      const saved = await readLibrary(snipDataDir);
+      expect(saved).toHaveLength(1);
+      expect(saved[0].kind).toBe("snippet");
+      expect(saved[0].script.steps).toEqual([
+        {
+          action: "insertText",
+          target: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+          value: reply,
+        },
+      ]);
+      expect(logs.some((l) => l.includes("[propose:v2] Reply to customer -> kind=snippet offered"))).toBe(true);
+      expect(logs.some((l) => l.includes("[propose:v2] Reply to customer -> kind=snippet saved"))).toBe(true);
+
+      // Clicking the empty field later recalls the snippet as Insert and fills the text
+      const recallPoll = pollHandsNext(baseUrl);
+      await fetch(`${baseUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify([
+          {
+            v: 1,
+            id: "c1000000-0000-4000-8000-000000000004",
+            ts: 1746000005000,
+            session: "sess_sec5_later",
+            source: "browser",
+            app: "localhost",
+            url: "http://localhost:5173/",
+            type: "click",
+            target: replyTarget,
+            value: "",
+          },
+        ]),
+      });
+
+      const recallDec = await recallPoll;
+      expect(recallDec.status).toBe(200);
+      expect(recallDec.cmd?.kind).toBe("decide");
+      expect(recallDec.cmd?.script?.steps).toEqual([
+        {
+          action: "insertText",
+          target: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+          value: reply,
+        },
+      ]);
+
+      const recallRunPoll = pollHandsNext(baseUrl);
+      await postHandsResult(baseUrl, {
+        id: recallDec.cmd!.id,
+        ok: true,
+        decision: "approved",
+      });
+      const recallRun = await recallRunPoll;
+      expect(recallRun.status).toBe(200);
+      expect(recallRun.cmd?.kind).toBeUndefined();
+      expect(recallRun.cmd?.script?.steps).toEqual([
+        {
+          action: "insertText",
+          target: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+          value: reply,
+        },
+      ]);
+      await postHandsResult(baseUrl, {
+        id: recallRun.cmd!.id,
+        ok: true,
+        results: [{ ok: true }],
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

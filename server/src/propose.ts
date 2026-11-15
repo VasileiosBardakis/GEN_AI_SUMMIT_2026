@@ -1,6 +1,12 @@
 import crypto from "node:crypto";
 import type { Event, Finding, Verdict } from "@gen/shared";
-import { normalizeText, primaryTargetKey } from "./common/target.ts";
+import {
+  hostnameFromUrl,
+  isPlaceholderHost,
+  normalizeHost as normalizeHostWithOpts,
+  resolveEventHost,
+} from "./common/host.ts";
+import { normalizeText } from "./common/target.ts";
 import {
   buildLibraryEntryFromScript,
   buildStartSignature,
@@ -9,24 +15,21 @@ import {
 } from "./hands/implementor.ts";
 import { canonicalStepCount, findMatchingLibraryEntry } from "./hands/library.ts";
 import { toLocatorList, type ActionScript, type LibraryEntry } from "./hands/types.ts";
+import type { SameTaskIrisJudgment, WorkflowIrisJudgment } from "./llm/iris.ts";
 import {
   compiledWorkflowToActionScript,
   compiledWorkflowToFinding,
-  pickPrimaryCandidate,
 } from "./report.ts";
-import { hasRepeatedInteraction, type FlowTip } from "./tips.ts";
+import type { FlowTip } from "./tips.ts";
 import {
-  detectRepeatedCandidates,
   eventsToSteps,
   normalizeHost,
-  resolveRepeatCount,
+  selectMeaningfulWindow,
   type CompileInput,
   type CompiledWorkflow,
-  type PatternInstance,
-  type V2Action,
 } from "./v2/index.ts";
 
-export type HandsDecision = "approved" | "dismissed";
+export type HandsDecision = "approved" | "dismissed" | "never";
 
 export type HandsOutcome = {
   ok: boolean;
@@ -53,11 +56,7 @@ export type PrecheckOutcome = {
 
 export type StageLogName =
   | "detect"
-  | "precompile"
-  | "cache_hit"
-  | "diff_recompile"
   | "precheck"
-  | "rate_limit"
   | "decide"
   | "save_skill"
   | "run"
@@ -77,22 +76,35 @@ export type ProposerReportResult = {
   scripts: ScriptMap;
 };
 
+export type ProposerDecisionMeta = {
+  startUrl?: string;
+  tabId?: number;
+};
+
 export type ProposerDeps = {
   requestDecision: (
     name: string,
     solution: string,
     script: ActionScript,
     primaryLabel?: string,
+    meta?: ProposerDecisionMeta,
   ) => Promise<HandsOutcome>;
   runScript: (
     script: ActionScript,
     params?: Record<string, string>,
+    meta?: ProposerDecisionMeta,
   ) => Promise<HandsOutcome>;
-  debounceMs?: number;
   log?: (line: string) => void;
   readSessionEvents: (sessionId: string) => Promise<Event[]>;
   readLibrary?: () => Promise<LibraryEntry[]>;
-  compileV2: (input: CompileInput) => Promise<CompiledWorkflow | null>;
+  judgeIris?: (digest: Record<string, unknown>) => Promise<WorkflowIrisJudgment | null>;
+  judgeSameTask?: (
+    comparison: Record<string, unknown>,
+  ) => Promise<SameTaskIrisJudgment | null>;
+  compileV2: (
+    input: CompileInput,
+    opts?: { irisJudgment?: WorkflowIrisJudgment | null },
+  ) => Promise<CompiledWorkflow | null>;
   suggestFlowTip?: (events: Event[], exclude?: string[]) => Promise<FlowTip | null>;
   precheck?: (script: ActionScript, meta: { startUrl?: string }) => Promise<PrecheckOutcome>;
   onCompiled?: (info: {
@@ -107,7 +119,6 @@ export type ProposerDeps = {
     workflow?: CompiledWorkflow;
     finding: Finding;
   }) => Promise<{ shouldRun?: boolean } | void>;
-  siteCooldownMs?: number;
   now?: () => number;
   stageLog?: (event: StageLogEvent) => void;
 };
@@ -116,9 +127,6 @@ export type Proposer = {
   onEvents: (sessionId: string) => void;
   close: () => void;
 };
-
-const DEFAULT_DEBOUNCE_MS = 2500;
-const DEFAULT_SITE_COOLDOWN_MS = 5 * 60 * 1000;
 
 function inferDetector(finding: Finding): string {
   if (finding.workflowId || finding.id.startsWith("wf_")) return "wf";
@@ -172,67 +180,6 @@ export function buildFindingKey(finding: Finding, script: ActionScript): string 
   return `${detector}:${finding.verdict}:${hash}`;
 }
 
-type StepConstant = {
-  value?: string;
-  targetKey?: string;
-};
-
-type Rep2CacheEntry = {
-  signature: string;
-  actions: V2Action[];
-  constants: Map<number, StepConstant>;
-  compiled: CompiledWorkflow | null;
-  stepCount: number;
-};
-
-function extractConstantsFromPair(
-  instances: readonly PatternInstance[],
-  actionCount: number,
-): Map<number, StepConstant> {
-  const constants = new Map<number, StepConstant>();
-  if (instances.length < 2) return constants;
-  const inst0 = instances[0];
-  const inst1 = instances[1];
-  for (let j = 0; j < actionCount; j++) {
-    const s0 = inst0.steps[j];
-    const s1 = inst1.steps[j];
-    if (!s0 || !s1) continue;
-    const entry: StepConstant = {};
-    if (s0.value !== undefined && s0.value === s1.value) {
-      entry.value = s0.value;
-    }
-    const t0 = primaryTargetKey(s0);
-    const t1 = primaryTargetKey(s1);
-    if (t0 !== undefined && t0 === t1) {
-      entry.targetKey = t0;
-    }
-    if (entry.value !== undefined || entry.targetKey !== undefined) {
-      constants.set(j, entry);
-    }
-  }
-  return constants;
-}
-
-function detectConstantDiff(
-  constants: ReadonlyMap<number, StepConstant>,
-  instances: readonly PatternInstance[],
-): string | null {
-  for (let i = 2; i < instances.length; i++) {
-    const inst = instances[i];
-    for (const [stepIdx, expected] of constants.entries()) {
-      const step = inst.steps[stepIdx];
-      if (!step) return "missing_step";
-      if (expected.value !== undefined && step.value !== expected.value) {
-        return `constant_value_changed_at_${stepIdx}`;
-      }
-      if (expected.targetKey !== undefined && primaryTargetKey(step) !== expected.targetKey) {
-        return `constant_target_changed_at_${stepIdx}`;
-      }
-    }
-  }
-  return null;
-}
-
 function isPrecheckPassed(outcome: PrecheckOutcome | HandsOutcome): boolean {
   if (!outcome.ok) return false;
   const results = outcome.results;
@@ -251,6 +198,62 @@ function isPrecheckPassed(outcome: PrecheckOutcome | HandsOutcome): boolean {
     return rec.ok !== false && rec.matchCount === 1;
   }
   return false;
+}
+
+const MEANINGFUL_EVENT_TYPES = new Set<Event["type"]>([
+  "click",
+  "dblclick",
+  "input",
+  "change",
+  "paste",
+  "copy",
+  "cut",
+  "submit",
+  "select",
+  "key",
+  "keydown",
+  "drop",
+  "contextmenu",
+]);
+
+function findLastMeaningfulEventMeta(
+  events: readonly Event[],
+  compiled?: Pick<CompiledWorkflow, "apps" | "startUrl">,
+): { tabId?: number; url?: string } {
+  const flowHosts = new Set<string>();
+  if (compiled) {
+    for (const app of compiled.apps) {
+      const normalized = normalizeHost(app);
+      if (normalized) flowHosts.add(normalized);
+    }
+    const startHost = hostnameFromUrl(compiled.startUrl);
+    if (startHost) flowHosts.add(startHost);
+  }
+
+  let fallback: { tabId?: number; url?: string } | undefined;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i];
+    if (!ev) continue;
+    const isMeaningful =
+      ev.type === "focus" ? Boolean(ev.target) : MEANINGFUL_EVENT_TYPES.has(ev.type);
+    if (!isMeaningful) continue;
+    const tabId = typeof ev.meta?.tabId === "number" ? ev.meta.tabId : undefined;
+    const url = typeof ev.url === "string" ? ev.url : undefined;
+    if (tabId === undefined && !url) continue;
+
+    if (flowHosts.size > 0) {
+      const evHost = resolveEventHost(ev, { preferUrl: true });
+      if (evHost && flowHosts.has(normalizeHost(evHost))) {
+        if (tabId !== undefined) return { tabId, ...(url ? { url } : {}) };
+        if (!fallback) fallback = { ...(url ? { url } : {}) };
+      }
+      continue;
+    }
+
+    if (tabId !== undefined) return { tabId, ...(url ? { url } : {}) };
+    if (!fallback) fallback = { ...(url ? { url } : {}) };
+  }
+  return fallback ?? {};
 }
 
 function extractSiteHost(
@@ -286,19 +289,141 @@ function extractSiteHost(
   return fallbackApp ? normalizeHost(fallbackApp) : "";
 }
 
+function addNormalizedHost(out: Set<string>, raw?: string): void {
+  if (!raw) return;
+  const h = normalizeHostWithOpts(raw, { collapseLoopback: true });
+  if (h && !isPlaceholderHost(h)) {
+    out.add(h);
+  }
+}
+
+function collectWorkflowHosts(
+  site: string,
+  workflow: CompiledWorkflow,
+  script: ActionScript,
+): Set<string> {
+  const hosts = new Set<string>();
+  addNormalizedHost(hosts, site);
+  for (const app of workflow.apps) {
+    addNormalizedHost(hosts, app);
+  }
+  addNormalizedHost(hosts, hostnameFromUrl(workflow.startUrl, { collapseLoopback: true }));
+  for (const step of collectFlatSteps(script.steps)) {
+    if (step.action === "switchTab" && step.host) {
+      addNormalizedHost(hosts, step.host);
+    } else if (step.action === "navigate" && step.url) {
+      addNormalizedHost(hosts, hostnameFromUrl(step.url, { collapseLoopback: true }));
+    }
+  }
+  return hosts;
+}
+
+function collectLibraryEntryHosts(entry: LibraryEntry): Set<string> {
+  const hosts = new Set<string>();
+  for (const app of entry.eyes.scope.apps) {
+    addNormalizedHost(hosts, app);
+  }
+  for (const pat of entry.eyes.scope.urlPatterns) {
+    if (/^https?:\/\//i.test(pat)) {
+      addNormalizedHost(hosts, hostnameFromUrl(pat, { collapseLoopback: true }));
+    }
+  }
+  if (entry.startSignature) {
+    const firstPart = entry.startSignature.split("|")[0]?.trim();
+    if (firstPart && (firstPart.includes(".") || firstPart === "localhost")) {
+      addNormalizedHost(hosts, firstPart);
+    }
+  }
+  for (const step of collectFlatSteps(entry.script.steps)) {
+    if (step.action === "switchTab" && step.host) {
+      addNormalizedHost(hosts, step.host);
+    } else if (step.action === "navigate" && step.url) {
+      addNormalizedHost(hosts, hostnameFromUrl(step.url, { collapseLoopback: true }));
+    }
+  }
+  return hosts;
+}
+
+function hasHostOverlap(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size === 0 || b.size === 0) return false;
+  for (const h of a) {
+    if (b.has(h)) return true;
+  }
+  return false;
+}
+
+function resolveLatestSessionHost(
+  steps: readonly { app?: string; url?: string }[],
+  events: readonly Event[],
+): string {
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const step = steps[i];
+    if (!step) continue;
+    const h = resolveEventHost(step, { preferUrl: true, collapseLoopback: true });
+    if (h && !isPlaceholderHost(h)) return h;
+  }
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i];
+    if (!ev) continue;
+    const h = resolveEventHost(ev, { preferUrl: true, collapseLoopback: true });
+    if (h && !isPlaceholderHost(h)) return h;
+  }
+  return "";
+}
+
+function firstTargetLabel(target: unknown): string {
+  if (!target) return "";
+  const locs = toLocatorList(target as Parameters<typeof toLocatorList>[0]);
+  const preferred =
+    locs.find((l) => l.kind === "aria") ??
+    locs.find((l) => l.kind === "text") ??
+    locs.find((l) => l.kind === "testid") ??
+    locs[0];
+  return preferred?.value ?? "";
+}
+
+function summarizeScriptSteps(steps: readonly ActionScript["steps"][number][]): string[] {
+  const out: string[] = [];
+  for (const step of steps) {
+    if (step.action === "forEach") {
+      out.push(`forEach(${summarizeScriptSteps(step.steps).join(" -> ")})`);
+      continue;
+    }
+    const label = "target" in step ? firstTargetLabel(step.target) : "";
+    switch (step.action) {
+      case "switchTab":
+        out.push(`switchTab(${step.host})`);
+        break;
+      case "navigate":
+        out.push(`navigate(${step.url})`);
+        break;
+      case "readText":
+      case "readValue":
+        out.push(`${step.action}(${label} -> ${step.bind})`);
+        break;
+      case "fill":
+      case "insertText":
+      case "select":
+        out.push(`${step.action}(${label || "focused"}, ${step.value})`);
+        break;
+      case "click":
+        out.push(`click(${label})`);
+        break;
+      case "pressKey":
+        out.push(`pressKey(${step.key})`);
+        break;
+      case "extractList":
+        out.push(`extractList(${label} -> ${step.bind})`);
+        break;
+      default:
+        out.push(step.action);
+        break;
+    }
+  }
+  return out;
+}
+
 export function createProposer(deps: ProposerDeps): Proposer {
-  const debounceMs =
-    typeof deps.debounceMs === "number" &&
-    Number.isFinite(deps.debounceMs) &&
-    deps.debounceMs >= 0
-      ? deps.debounceMs
-      : DEFAULT_DEBOUNCE_MS;
-  const siteCooldownMs =
-    typeof deps.siteCooldownMs === "number" &&
-    Number.isFinite(deps.siteCooldownMs) &&
-    deps.siteCooldownMs >= 0
-      ? deps.siteCooldownMs
-      : DEFAULT_SITE_COOLDOWN_MS;
   const now = deps.now ?? (() => Date.now());
 
   const safeLog = (line: string): void => {
@@ -321,16 +446,14 @@ export function createProposer(deps: ProposerDeps): Proposer {
   };
 
   const proposedKeys = new Set<string>();
-  const proposedSignaturesBySession = new Map<string, Set<string>>();
-  const rep2Cache = new Map<string, Rep2CacheEntry>();
-  const lastSitePopupAt = new Map<string, number>();
-  const timers = new Map<string, ReturnType<typeof setTimeout>>();
-  const queuedSessions = new Set<string>();
-  const shownFlowTips = new Set<string>();
+  const neverFlowTipKeys = new Set<string>();
+  const pendingOfferSessionHosts = new Set<string>();
+  const activeOfferHosts = new Map<string, number>();
+  const inFlightSessions = new Set<string>();
+  const pendingRerunSessions = new Set<string>();
   const shownFlowTipLabels: string[] = [];
   const flowTipCheckedAt = new Map<string, number>();
   let flowTipPending = false;
-  let queue: Promise<void> = Promise.resolve();
   let closed = false;
 
   async function proposeV2Finding(
@@ -339,42 +462,118 @@ export function createProposer(deps: ProposerDeps): Proposer {
     finding: Finding,
     script: ActionScript,
     workflow: CompiledWorkflow,
+    decisionMeta?: ProposerDecisionMeta,
+    existingEntries?: readonly LibraryEntry[],
   ): Promise<void> {
     const name = finding.title.trim() || script.name?.trim() || "Proposed automation";
     const solution = finding.why.trim() || name;
-    let shouldRun =
-      script.runMode === "run_remaining" || workflow.kind === "snippet";
-    let runParams: Record<string, string> | undefined;
-
-    if (shouldRun) {
-      const decideScript: ActionScript =
-        script.runMode === "save_only"
-          ? { ...script, runMode: "run_remaining" }
-          : script;
-      let outcome: HandsOutcome;
-      try {
-        outcome = await deps.requestDecision(name, solution, decideScript);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        safeLog(`[propose:v2] ${name} -> error: ${message}`);
-        emitStageLog({ stage: "decide", session: sessionId, site, decision: "error", error: message, name });
-        return;
+    if (workflow.kind === "workflow" && deps.judgeSameTask) {
+      const libraryEntries =
+        existingEntries ??
+        (deps.readLibrary ? await deps.readLibrary().catch(() => []) : []);
+      const candidateHosts = collectWorkflowHosts(site, workflow, script);
+      const sameHostEntries = libraryEntries.filter(
+        (entry) =>
+          entry.kind === "workflow" &&
+          hasHostOverlap(candidateHosts, collectLibraryEntryHosts(entry)),
+      );
+      if (sameHostEntries.length > 0) {
+        const candidateSummary = {
+          name,
+          reason: solution,
+          host: site,
+          steps: summarizeScriptSteps(script.steps),
+        };
+        const judgments = await Promise.all(
+          sameHostEntries.map((entry) =>
+            deps
+              .judgeSameTask!({
+                host: site,
+                candidate: candidateSummary,
+                existing: {
+                  id: entry.id,
+                  name: entry.name,
+                  description: entry.description,
+                  steps: summarizeScriptSteps(entry.script.steps),
+                },
+              })
+              .catch(() => null),
+          ),
+        );
+        const matchedIdx = judgments.findIndex((j) => j?.sameTask === true);
+        if (matchedIdx >= 0) {
+          const matchedEntry = sameHostEntries[matchedIdx]!;
+          safeLog(`[propose:v2] ${name} -> same as ${matchedEntry.id}, skipped`);
+          return;
+        }
       }
-
-      if (closed) return;
-
-      if (!outcome.ok || outcome.decision !== "approved") {
-        const isTimeout = !outcome.ok && /timed?\s*out/i.test(outcome.error ?? "");
-        const decision = outcome.decision === "dismissed" ? "dismissed" : isTimeout ? "timeout" : "dismissed";
-        safeLog(`[propose:v2] ${name} -> ${decision}`);
-        emitStageLog({ stage: "decide", session: sessionId, site, decision, name });
-        return;
-      }
-
-      safeLog(`[propose:v2] ${name} -> approved`);
-      emitStageLog({ stage: "decide", session: sessionId, site, decision: "approved", name });
-      runParams = outcome.params;
     }
+
+    // No "Save skill" popup: every offered flow is offered as Run.
+    let shouldRun = true;
+    const decideScript: ActionScript =
+      script.runMode === "save_only"
+        ? { ...script, runMode: "run_remaining" }
+        : script;
+
+    const offerHosts =
+      workflow.kind === "workflow"
+        ? Array.from(collectWorkflowHosts(site, workflow, script))
+        : [];
+    for (const h of offerHosts) {
+      pendingOfferSessionHosts.add(`${sessionId}::${h}`);
+      activeOfferHosts.set(h, (activeOfferHosts.get(h) ?? 0) + 1);
+    }
+    // Release on every popup end (answer, timeout or error) so a site never stays locked.
+    const clearOfferPending = (): void => {
+      for (const h of offerHosts) {
+        pendingOfferSessionHosts.delete(`${sessionId}::${h}`);
+      }
+    };
+
+    safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} offered`);
+    let outcome: HandsOutcome;
+    try {
+      outcome = await deps.requestDecision(
+        name,
+        solution,
+        decideScript,
+        undefined,
+        decisionMeta,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      safeLog(`[propose:v2] ${name} -> error: ${message}`);
+      emitStageLog({ stage: "decide", session: sessionId, site, decision: "error", error: message, name });
+      return;
+    } finally {
+      clearOfferPending();
+      for (const h of offerHosts) {
+        const nextCount = (activeOfferHosts.get(h) ?? 0) - 1;
+        if (nextCount > 0) {
+          activeOfferHosts.set(h, nextCount);
+        } else {
+          activeOfferHosts.delete(h);
+        }
+      }
+    }
+
+    if (closed) return;
+
+    if (!outcome.ok || outcome.decision !== "approved") {
+      const isTimeout = !outcome.ok && /timed?\s*out/i.test(outcome.error ?? "");
+      clearOfferPending();
+      const decision = outcome.decision === "dismissed" ? "dismissed" : isTimeout ? "timeout" : "dismissed";
+      safeLog(`[propose:v2] ${name} -> ${decision}`);
+      emitStageLog({ stage: "decide", session: sessionId, site, decision, name });
+      return;
+    }
+
+    clearOfferPending();
+
+    safeLog(`[propose:v2] ${name} -> approved`);
+    emitStageLog({ stage: "decide", session: sessionId, site, decision: "approved", name });
+    const runParams = outcome.params;
 
     if (deps.onApproved) {
       try {
@@ -387,6 +586,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
         if (hookRes && typeof hookRes.shouldRun === "boolean") {
           shouldRun = hookRes.shouldRun;
         }
+        safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} saved`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         safeLog(`[propose:v2] ${name} -> save failed: ${msg}`);
@@ -396,7 +596,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
     if (closed) return;
 
     if (!shouldRun) {
-      safeLog(`[propose:v2] ${name} -> saved (save_only)`);
+      safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} saved (save_only)`);
       emitStageLog({
         stage: "run",
         session: sessionId,
@@ -408,7 +608,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
     }
 
     try {
-      const runOutcome = await deps.runScript(script, runParams);
+      const runOutcome = await deps.runScript(decideScript, runParams, decisionMeta);
       safeLog(`[propose:v2] ${name} -> ${runOutcome.ok ? "run ok" : "run failed"}`);
       emitStageLog({ stage: "run", session: sessionId, ok: runOutcome.ok, name });
     } catch {
@@ -427,10 +627,16 @@ export function createProposer(deps: ProposerDeps): Proposer {
   }
 
   async function maybeFlowTip(sessionId: string, events: Event[]): Promise<void> {
-    if (!deps.suggestFlowTip || flowTipPending) return;
-    if (!hasRepeatedInteraction(events)) return;
-    const lastCheck = flowTipCheckedAt.get(sessionId) ?? 0;
-    if (now() - lastCheck < 60_000) return;
+    if (!deps.suggestFlowTip) return;
+    if (flowTipPending) {
+      safeLog(`[tip] session=${sessionId} skipped reason=pending`);
+      return;
+    }
+    const lastCheck = flowTipCheckedAt.get(sessionId);
+    if (lastCheck !== undefined && now() - lastCheck < 60_000) {
+      safeLog(`[tip] session=${sessionId} skipped reason=cooldown`);
+      return;
+    }
     flowTipCheckedAt.set(sessionId, now());
 
     let suggestion: FlowTip | null;
@@ -439,25 +645,51 @@ export function createProposer(deps: ProposerDeps): Proposer {
         events,
         shownFlowTipLabels.length > 0 ? [...shownFlowTipLabels] : undefined,
       );
-    } catch {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      safeLog(`[tip] session=${sessionId} skipped reason=error:${message}`);
       return;
     }
-    if (closed || !suggestion?.tip?.trim()) return;
+    if (closed) return;
+    if (!suggestion?.tip?.trim()) {
+      safeLog(`[tip] session=${sessionId} skipped reason=empty`);
+      return;
+    }
 
-    const key = flowTipDedupeKey(suggestion);
-    if (shownFlowTips.has(key)) return;
+    const tipKey = flowTipDedupeKey(suggestion);
+    if (neverFlowTipKeys.has(tipKey)) {
+      safeLog(`[tip] session=${sessionId} skipped reason=never`);
+      return;
+    }
+    const key = `${sessionId}::${tipKey}`;
+    if (proposedKeys.has(key)) {
+      safeLog(`[tip] session=${sessionId} skipped reason=duplicate`);
+      return;
+    }
     const name = suggestion.keys?.join(" → ") || suggestion.tip.trim();
-    shownFlowTips.add(key);
+    proposedKeys.add(key);
     shownFlowTipLabels.push(name);
+    safeLog(`[tip] session=${sessionId} shown reason=${name}`);
 
     flowTipPending = true;
     try {
-      await deps.requestDecision(
+      const tipEventMeta = findLastMeaningfulEventMeta(events);
+      const outcome = await deps.requestDecision(
         name,
         suggestion.tip.trim(),
         { name, steps: [{ action: "wait", ms: 0 }] },
         "Got it",
+        tipEventMeta.tabId !== undefined || tipEventMeta.url
+          ? {
+              ...(tipEventMeta.url ? { startUrl: tipEventMeta.url } : {}),
+              ...(tipEventMeta.tabId !== undefined ? { tabId: tipEventMeta.tabId } : {}),
+            }
+          : undefined,
       );
+      if (outcome?.decision === "never") {
+        neverFlowTipKeys.add(tipKey);
+        safeLog(`[tip] session=${sessionId} never key=${tipKey}`);
+      }
     } catch {
       // Never let tip delivery affect workflow proposals
     } finally {
@@ -478,159 +710,92 @@ export function createProposer(deps: ProposerDeps): Proposer {
     }
     if (closed || events.length === 0) return;
 
-    if (deps.suggestFlowTip) void maybeFlowTip(sessionId, events);
-
     const { steps, piiMap } = eventsToSteps(events);
-    const repeatCount = resolveRepeatCount();
-    const precompileAt = Math.max(2, repeatCount - 1);
-    const candidates = detectRepeatedCandidates(steps, { minRepeats: precompileAt });
-    if (candidates.length === 0) return;
+    const {
+      window,
+      steps: windowedSteps,
+      events: windowedEvents,
+    } = selectMeaningfulWindow(steps, events);
+    if (window.meaningfulCount < 2) {
+      safeLog(
+        `[iris] session=${sessionId} meaningful=${window.meaningfulCount} verdict=skip reason=meaningfulCount<2`,
+      );
+      return;
+    }
 
-    const proposedSigs = proposedSignaturesBySession.get(sessionId);
-    const unproposed = proposedSigs
-      ? candidates.filter((c) => !proposedSigs.has(c.signature))
-      : candidates;
-    const candidate = pickPrimaryCandidate(unproposed, repeatCount);
-    if (!candidate) return;
+    const latestHost = resolveLatestSessionHost(windowedSteps, windowedEvents);
+    if (
+      latestHost &&
+      (pendingOfferSessionHosts.has(`${sessionId}::${latestHost}`) ||
+        (activeOfferHosts.get(latestHost) ?? 0) > 0)
+    ) {
+      safeLog(
+        `[propose:v2] skipped compile for ${sessionId} host=${latestHost} (awaiting popup answer)`,
+      );
+      return;
+    }
 
     emitStageLog({
       stage: "detect",
       session: sessionId,
-      signature: candidate.signature,
-      count: candidate.count,
-      apps: candidate.apps,
+      meaningfulCount: window.meaningfulCount,
+      windowSteps: window.steps.length,
     });
 
-    const cacheKey = `${sessionId}::${candidate.signature}`;
-    let compiled: CompiledWorkflow | null = null;
-
-    if (candidate.count < repeatCount) {
-      const existingRep2 = rep2Cache.get(cacheKey);
-      if (existingRep2 && (existingRep2.compiled !== null || steps.length <= existingRep2.stepCount)) {
-        if (!existingRep2.compiled || !existingRep2.compiled.offerAt2) {
-          return;
-        }
-        compiled = {
-          ...existingRep2.compiled,
-          stats: {
-            ...existingRep2.compiled.stats,
-            repetitions: candidate.count,
-          },
-        };
-      } else {
-        try {
-          compiled = await deps.compileV2({
-            events,
-            steps,
-            piiMap,
-            repeatCount: candidate.count,
-          });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          safeLog(`[propose:v2] rep-${candidate.count} precompile failed for ${sessionId}: ${message}`);
-          return;
-        }
-
-        rep2Cache.set(cacheKey, {
-          signature: candidate.signature,
-          actions: candidate.actions,
-          constants: extractConstantsFromPair(
-            candidate.instances,
-            candidate.actions.length,
-          ),
-          compiled,
-          stepCount: steps.length,
-        });
-
-        safeLog(
-          `[propose:v2] rep-${candidate.count} precompile session=${sessionId} sig=${candidate.signature} offerAt2=${Boolean(compiled?.offerAt2)} name=${compiled?.name ?? "none"}`,
-        );
-        emitStageLog({
-          stage: "precompile",
-          session: sessionId,
-          repeatCount: candidate.count,
-          signature: candidate.signature,
-          offerAt2: Boolean(compiled?.offerAt2),
-          compiled: Boolean(compiled),
-          ...(compiled ? { name: compiled.name } : {}),
-        });
-
-        if (!compiled) {
-          return;
-        }
-        if (!compiled.offerAt2) {
-          deps.onCompiled?.({
-            sessionId,
-            finding: compiledWorkflowToFinding(compiled),
-            script: compiledWorkflowToActionScript(compiled),
-            workflow: compiled,
-          });
-          return;
-        }
+    let irisJudgment: WorkflowIrisJudgment | null | undefined;
+    if (deps.judgeIris) {
+      let irisError: string | null = null;
+      try {
+        irisJudgment = await deps.judgeIris(window);
+      } catch (err) {
+        irisJudgment = null;
+        irisError = err instanceof Error ? err.message : String(err);
       }
-    } else {
-      const cached = rep2Cache.get(cacheKey);
-      if (cached && cached.compiled) {
-        const diffReason = detectConstantDiff(cached.constants, candidate.instances);
-        if (diffReason === null) {
-          compiled = {
-            ...cached.compiled,
-            stats: {
-              ...cached.compiled.stats,
-              repetitions: candidate.count,
-            },
-          };
-          safeLog(
-            `[propose:v2] rep-${candidate.count} cache hit session=${sessionId} name=${compiled.name}`,
-          );
-          emitStageLog({
-            stage: "cache_hit",
-            session: sessionId,
-            repeatCount: candidate.count,
-            signature: candidate.signature,
-            name: compiled.name,
-          });
-        } else {
-          safeLog(
-            `[propose:v2] rep-${candidate.count} diff recompile (${diffReason}) session=${sessionId}`,
-          );
-          emitStageLog({
-            stage: "diff_recompile",
-            session: sessionId,
-            repeatCount: candidate.count,
-            signature: candidate.signature,
-            reason: diffReason,
-          });
-          try {
-            compiled = await deps.compileV2({
-              events,
-              steps,
-              piiMap,
-              repeatCount: candidate.count,
-            });
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            safeLog(`[propose:v2] recompile failed for ${sessionId}: ${message}`);
-            return;
-          }
-        }
-      } else {
-        try {
-          compiled = await deps.compileV2({
-            events,
-            steps,
-            piiMap,
-            repeatCount: candidate.count,
-          });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          safeLog(`[propose:v2] compile failed for ${sessionId}: ${message}`);
-          return;
-        }
+      const verdict =
+        irisJudgment == null
+          ? "null"
+          : irisJudgment.worthAutomating
+            ? "yes"
+            : "no";
+      const reason =
+        irisError !== null
+          ? irisError
+          : irisJudgment == null
+            ? "null_response"
+            : `pauseBeforeSubmit=${irisJudgment.pauseBeforeSubmit}`;
+      safeLog(
+        `[iris] session=${sessionId} meaningful=${window.meaningfulCount} verdict=${verdict} reason=${reason}`,
+      );
+      if (closed) return;
+      if (irisJudgment == null || irisJudgment.worthAutomating === false) {
+        return;
       }
     }
 
-    if (closed || !compiled) return;
+    const irisYes = irisJudgment?.worthAutomating === true;
+
+    let compiled: CompiledWorkflow | null = null;
+    try {
+      compiled = await deps.compileV2(
+        { events: windowedEvents, steps: windowedSteps, piiMap },
+        irisJudgment !== undefined ? { irisJudgment } : undefined,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      safeLog(`[propose:v2] compile failed for ${sessionId}: ${message}`);
+      if (!closed && irisYes && deps.suggestFlowTip) {
+        await maybeFlowTip(sessionId, events);
+      }
+      return;
+    }
+
+    if (closed) return;
+    if (!compiled) {
+      if (irisYes && deps.suggestFlowTip) {
+        await maybeFlowTip(sessionId, events);
+      }
+      return;
+    }
 
     const finding = compiledWorkflowToFinding(compiled);
     const script = compiledWorkflowToActionScript(compiled);
@@ -641,8 +806,9 @@ export function createProposer(deps: ProposerDeps): Proposer {
       return;
     }
 
+    let existingEntries: LibraryEntry[] = [];
     if (deps.readLibrary) {
-      const existingEntries = await deps.readLibrary().catch(() => []);
+      existingEntries = await deps.readLibrary().catch(() => []);
       if (existingEntries.length > 0) {
         const context: ImplementContext = {
           ...(compiled.apps[0] ? { app: compiled.apps[0] } : {}),
@@ -665,12 +831,6 @@ export function createProposer(deps: ProposerDeps): Proposer {
         const matched = findMatchingLibraryEntry(existingEntries, candidateWithSig);
         if (matched) {
           proposedKeys.add(sessionScopedKey);
-          let sigSet = proposedSignaturesBySession.get(sessionId);
-          if (!sigSet) {
-            sigSet = new Set<string>();
-            proposedSignaturesBySession.set(sessionId, sigSet);
-          }
-          sigSet.add(candidate.signature);
 
           const isUpgrade =
             canonicalStepCount(script) > canonicalStepCount(matched.script);
@@ -694,29 +854,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       }
     }
 
-    const site = extractSiteHost(compiled, script, events);
-    const willShowPopup =
-      script.runMode === "run_remaining" || compiled.kind === "snippet";
-
-    const nowMs = now();
-    if (willShowPopup && site) {
-      const lastPopup = lastSitePopupAt.get(site);
-      if (lastPopup !== undefined && nowMs - lastPopup < siteCooldownMs) {
-        const remainingMs = siteCooldownMs - (nowMs - lastPopup);
-        safeLog(
-          `[propose:v2] rate-limited popup for site=${site} remainingMs=${remainingMs}`,
-        );
-        emitStageLog({
-          stage: "rate_limit",
-          session: sessionId,
-          site,
-          cooldownMs: siteCooldownMs,
-          remainingMs,
-          name: compiled.name,
-        });
-        return;
-      }
-    }
+    const site = extractSiteHost(compiled, script, windowedEvents);
 
     if (deps.precheck) {
       let precheckOutcome: PrecheckOutcome;
@@ -748,62 +886,69 @@ export function createProposer(deps: ProposerDeps): Proposer {
         safeLog(
           `[propose:v2] precheck blocked popup for ${compiled.name} (${precheckOutcome.error ?? "matchCount !== 1"})`,
         );
+        if (!closed && irisYes && deps.suggestFlowTip) {
+          await maybeFlowTip(sessionId, events);
+        }
         return;
       }
     }
 
     if (closed) return;
 
-    const decidedAt = now();
     proposedKeys.add(sessionScopedKey);
-    let sigSet = proposedSignaturesBySession.get(sessionId);
-    if (!sigSet) {
-      sigSet = new Set<string>();
-      proposedSignaturesBySession.set(sessionId, sigSet);
-    }
-    sigSet.add(candidate.signature);
-    if (willShowPopup && site) {
-      lastSitePopupAt.set(site, decidedAt);
+    if (irisYes && deps.suggestFlowTip) {
+      safeLog(`[tip] session=${sessionId} skipped reason=offer`);
     }
 
-    await proposeV2Finding(sessionId, site, finding, script, compiled);
+    const eventMeta = findLastMeaningfulEventMeta(events, compiled);
+    const startUrl = compiled.startUrl ?? eventMeta.url;
+    const decisionMeta: ProposerDecisionMeta | undefined =
+      startUrl || eventMeta.tabId !== undefined
+        ? {
+            ...(startUrl ? { startUrl } : {}),
+            ...(eventMeta.tabId !== undefined ? { tabId: eventMeta.tabId } : {}),
+          }
+        : undefined;
+
+    await proposeV2Finding(
+      sessionId,
+      site,
+      finding,
+      script,
+      compiled,
+      decisionMeta,
+      existingEntries,
+    );
   }
 
-  async function processSession(sessionId: string): Promise<void> {
+  function runSession(sessionId: string): void {
     if (closed) return;
-    await processSessionV2(sessionId);
+    inFlightSessions.add(sessionId);
+    void processSessionV2(sessionId)
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        safeLog(`[propose] unexpected error: ${message}`);
+      })
+      .finally(() => {
+        inFlightSessions.delete(sessionId);
+        if (!closed && pendingRerunSessions.delete(sessionId)) {
+          runSession(sessionId);
+        }
+      });
   }
 
   function onEvents(sessionId: string): void {
     if (closed || !sessionId) return;
-    const existing = timers.get(sessionId);
-    if (existing !== undefined) {
-      clearTimeout(existing);
+    if (inFlightSessions.has(sessionId)) {
+      pendingRerunSessions.add(sessionId);
+      return;
     }
-    const timer = setTimeout(() => {
-      timers.delete(sessionId);
-      if (closed || queuedSessions.has(sessionId)) return;
-      queuedSessions.add(sessionId);
-      queue = queue
-        .then(() => {
-          queuedSessions.delete(sessionId);
-          return processSession(sessionId);
-        })
-        .catch((err) => {
-          queuedSessions.delete(sessionId);
-          const message = err instanceof Error ? err.message : String(err);
-          safeLog(`[propose] unexpected error: ${message}`);
-        });
-    }, debounceMs);
-    timers.set(sessionId, timer);
+    runSession(sessionId);
   }
 
   function close(): void {
     closed = true;
-    for (const timer of timers.values()) {
-      clearTimeout(timer);
-    }
-    timers.clear();
+    pendingRerunSessions.clear();
   }
 
   return { onEvents, close };

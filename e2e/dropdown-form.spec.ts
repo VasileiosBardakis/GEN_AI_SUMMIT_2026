@@ -103,6 +103,7 @@ const DEMO_FORM_HTML = `<!doctype html>
 </html>`;
 
 test("dropdown form 3-repeat workflow emits select step, shows Run popup, and replays <select> + <input>", async () => {
+  test.skip(true, "removed by f35b69c / GEN-114");
   const testInfo = test.info();
   test.skip(
     !process.env.GOOGLE_CLOUD_PROJECT,

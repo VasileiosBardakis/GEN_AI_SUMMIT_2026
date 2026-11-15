@@ -69,6 +69,7 @@ type V2ActionScript = {
   runMode?: "run_remaining" | "save_only";
   params?: ScriptParam[];
   pageSummary?: unknown;
+  skipRowValues?: string[];
 };
 
 interface ChromeRuntimeMessage {
@@ -85,6 +86,8 @@ interface ChromeRuntimeMessage {
   value?: string;
   scopeKey?: string;
   appHost?: string;
+  url?: string;
+  tabId?: number;
 }
 
 interface ChromeTab {
@@ -160,6 +163,7 @@ interface ChromeApi {
 
 let lastClipboard: ClipboardState | null = null;
 let lastActiveTab: { tabId: number; app: string; url?: string; title?: string } | null = null;
+let lastMeaningfulTab: { tabId: number; app: string; url?: string; ts: number } | null = null;
 let lastApprovedDecideTabId: number | undefined;
 const lastFieldFrameByTab = new Map<number, number>();
 const eventQueue: Event[] = [];
@@ -177,6 +181,27 @@ const COMMIT_EVENT_TYPES = new Set<Event["type"]>([
   "submit",
   "tab_switch",
 ]);
+
+const MEANINGFUL_EVENT_TYPES = new Set<Event["type"]>([
+  "click",
+  "dblclick",
+  "input",
+  "change",
+  "paste",
+  "copy",
+  "cut",
+  "submit",
+  "select",
+  "key",
+  "keydown",
+  "drop",
+  "contextmenu",
+]);
+
+function isMeaningfulEvent(evt: Event): boolean {
+  if (evt.type === "focus") return Boolean(evt.target);
+  return MEANINGFUL_EVENT_TYPES.has(evt.type);
+}
 
 function uuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -211,6 +236,20 @@ export function recordEvent(evt: Event): void {
   totalEvents++;
   totalBytes += serialized.length + 1;
   countsByType[evt.type] = (countsByType[evt.type] || 0) + 1;
+
+  const evtTabId = typeof evt.meta?.tabId === "number" ? evt.meta.tabId : undefined;
+  if (
+    evtTabId !== undefined &&
+    isMeaningfulEvent(evt) &&
+    (!evt.url || isRunnablePageUrl(evt.url))
+  ) {
+    lastMeaningfulTab = {
+      tabId: evtTabId,
+      app: evt.app,
+      url: evt.url,
+      ts: evt.ts,
+    };
+  }
 
   recentEvents.push(evt);
   if (recentEvents.length > 100) recentEvents.shift();
@@ -374,31 +413,52 @@ export async function resolveTargetTabId(
   senderTab?: number | { id?: number; url?: string },
   senderUrl?: string,
 ): Promise<number | undefined> {
+  const api = getChromeApi();
   const tabId = typeof senderTab === "number" ? senderTab : senderTab?.id;
   const tabUrl = typeof senderTab === "number" ? senderUrl : senderTab?.url;
   if (tabId !== undefined) {
     if (typeof senderTab === "number" && tabUrl === undefined) {
-      return tabId;
-    }
-    if (isRunnablePageUrl(tabUrl)) {
+      if (!api?.tabs?.get) return tabId;
+      const tab = await api.tabs.get(tabId).catch(() => undefined);
+      if (tab && (tab.url === undefined || isRunnablePageUrl(tab.url))) {
+        return tabId;
+      }
+    } else if (isRunnablePageUrl(tabUrl)) {
       return tabId;
     }
   }
-  const api = getChromeApi();
   if (api?.tabs?.query) {
     try {
       const currentTabs = await api.tabs.query({ active: true, currentWindow: true });
       const currentMatch = currentTabs.find((t) => t.id !== undefined && isRunnablePageUrl(t.url));
       if (currentMatch?.id !== undefined) return currentMatch.id;
 
-      const anyActive = await api.tabs.query({ active: true });
-      const anyMatch = anyActive.find((t) => t.id !== undefined && isRunnablePageUrl(t.url));
-      if (anyMatch?.id !== undefined) return anyMatch.id;
+      const anyActive = (await api.tabs.query({ active: true }))
+        .filter((t) => t.id !== undefined && isRunnablePageUrl(t.url))
+        .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+      if (anyActive[0]?.id !== undefined) return anyActive[0].id;
     } catch {
       // ignore tab query errors
     }
   }
-  return lastActiveTab?.tabId;
+  if (lastActiveTab?.tabId !== undefined) {
+    if (!api?.tabs?.get) return lastActiveTab.tabId;
+    const lastTab = await api.tabs.get(lastActiveTab.tabId).catch(() => undefined);
+    if (lastTab && (lastTab.url === undefined || isRunnablePageUrl(lastTab.url))) {
+      return lastActiveTab.tabId;
+    }
+  }
+  if (api?.tabs?.query) {
+    try {
+      const runnable = (await api.tabs.query({}))
+        .filter((t) => t.id !== undefined && isRunnablePageUrl(t.url))
+        .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+      if (runnable[0]?.id !== undefined) return runnable[0].id;
+    } catch {
+      // ignore tab query errors
+    }
+  }
+  return undefined;
 }
 
 async function runOptimizationOnTab(
@@ -426,11 +486,12 @@ async function runOptimizationOnTab(
   }
 
   if (item.script) {
-    if (tabId === undefined) {
+    const scriptToRun = withFlowStartSwitch(item.script);
+    if (tabId === undefined && !scriptStartsWithTabOrNav(scriptToRun.steps)) {
       return { ok: false, appliedToPage: false, note: "Open a matching page to run this flow" };
     }
     try {
-      await runActionScript(tabId, item.script);
+      await runActionScript(tabId ?? -1, scriptToRun);
       return { ok: true, appliedToPage: true, note: "Completed on current page" };
     } catch {
       return { ok: false, appliedToPage: false, note: "Open a matching page to run this flow" };
@@ -453,11 +514,12 @@ export function handleRuntimeMessage(
       recordLocalPiiEntries(msg.localPii);
     }
     const tabId = sender.tab?.id;
+    const eventUrl = msg.event.url ?? sender.tab?.url;
     if (tabId !== undefined) {
       lastActiveTab = {
         tabId,
         app: msg.event.app,
-        url: msg.event.url,
+        url: eventUrl,
         title: msg.event.window,
       };
     }
@@ -470,6 +532,7 @@ export function handleRuntimeMessage(
         : undefined;
     const stampedEvent: Event = {
       ...msg.event,
+      ...(eventUrl && !msg.event.url ? { url: eventUrl } : {}),
       session: BROWSER_SESSION_ID,
       ...(stampedMeta ? { meta: stampedMeta } : {}),
     };
@@ -633,12 +696,39 @@ export function handleRuntimeMessage(
     return false;
   }
   if (msg?.kind === "HANDS_RUN_SCRIPT" && msg.script) {
-    const targetScript = msg.script;
-    void resolveActiveTabId(sender.tab)
-      .then((tabId) => {
-        if (tabId === undefined) throw new Error("No active tab");
-        return runActionScript(tabId, targetScript);
-      })
+    const targetScript = withFlowStartSwitch(msg.script, msg.url);
+    void (async () => {
+      let tabId = await resolveActiveTabId(msg.tabId ?? sender.tab);
+      if (!scriptStartsWithTabOrNav(targetScript.steps) && (msg.url || msg.appHost)) {
+        const api = getChromeApi();
+        const activeTab =
+          tabId !== undefined && api?.tabs?.get
+            ? await api.tabs.get(tabId).catch(() => undefined)
+            : undefined;
+        const matchesActive = activeTab?.url
+          ? (msg.url ? scoreTabUrlMatch(activeTab.url, msg.url) > 0 : false) ||
+            (msg.appHost ? tabMatchesHost(activeTab.url, msg.appHost) : false)
+          : false;
+        if (!matchesActive && api?.tabs?.query) {
+          const allTabs = (await api.tabs.query({}).catch(() => [])) ?? [];
+          const matched = findBestTabForTarget(allTabs, {
+            ...(msg.url ? { url: msg.url } : {}),
+            ...(msg.appHost ? { host: msg.appHost } : {}),
+          });
+          if (matched?.id !== undefined) {
+            await api.tabs.update?.(matched.id, { active: true });
+            if (matched.windowId !== undefined) {
+              await api.windows?.update?.(matched.windowId, { focused: true });
+            }
+            tabId = matched.id;
+          }
+        }
+      }
+      if (tabId === undefined && !scriptStartsWithTabOrNav(targetScript.steps)) {
+        throw new Error("No active tab");
+      }
+      return runActionScript(tabId ?? -1, targetScript);
+    })()
       .then((results) => sendResponse({ ok: true, results }))
       .catch((error: unknown) =>
         sendResponse({
@@ -699,6 +789,7 @@ if (chromeApi?.runtime?.onMessage) {
 if (chromeApi?.tabs?.onActivated) {
   const tabsApi = chromeApi.tabs;
   chromeApi.tabs.onActivated.addListener((activeInfo) => {
+    void pollHandsBridge();
     void (async () => {
       try {
         const tab = await tabsApi.get(activeInfo.tabId);
@@ -734,13 +825,21 @@ if (chromeApi?.tabs?.onActivated) {
 
 if (chromeApi?.tabs?.onUpdated) {
   chromeApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === "loading") {
+      lastFieldFrameByTab.delete(tabId);
+      return;
+    }
     if (changeInfo.status === "complete" && tab?.url && isRunnablePageUrl(tab.url)) {
+      void pollHandsBridge();
       const cleanUrl = sanitizeUrl(tab.url).url;
       let host = "local-page";
       try {
         host = new URL(tab.url).hostname || "local-page";
       } catch {
         // ignore
+      }
+      if (tab.active || lastActiveTab?.tabId === tabId) {
+        lastActiveTab = { tabId, app: host, url: cleanUrl, title: tab.title };
       }
       recordEvent({
         v: 1,
@@ -910,21 +1009,74 @@ type PrecheckStepInput = V2Step & {
   within?: Locator | Locator[];
 };
 
+const PRECHECK_MSG_TIMEOUT_MS = 1200;
+const PRECHECK_TOTAL_BUDGET_MS = 7000;
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 type PrecheckTargetItem = {
   index: number;
   action: string;
+  tabId: number;
   locators: Locator[];
   within?: Locator[];
   postInteraction?: boolean;
   step: PrecheckStepInput;
 };
 
+function resolvePrecheckTabForStep(
+  openTabs: ChromeTab[],
+  effectiveUrl?: string,
+  effectiveHost?: string,
+  fallbackTab?: ChromeTab,
+): ChromeTab | undefined {
+  if (effectiveUrl) {
+    const urlMatches = openTabs.filter(
+      (t) =>
+        t.id !== undefined &&
+        t.url &&
+        urlsMatchForPrecheck(effectiveUrl, t.url) &&
+        (!effectiveUrl.startsWith("/") ||
+          !effectiveHost ||
+          tabMatchesHost(t.url, effectiveHost)),
+    );
+    if (urlMatches.length === 0) return undefined;
+    return (
+      findBestTabForTarget(
+        urlMatches,
+        { url: effectiveUrl, ...(effectiveHost ? { host: effectiveHost } : {}) },
+        { allowHostFallback: false },
+      ) ?? urlMatches[0]
+    );
+  }
+  if (effectiveHost) {
+    return findBestTabForTarget(openTabs, { host: effectiveHost });
+  }
+  return fallbackTab?.id !== undefined && isRunnablePageUrl(fallbackTab.url)
+    ? fallbackTab
+    : undefined;
+}
+
 function collectMatchingPrecheckSteps(
   steps: PrecheckStepInput[],
-  openTabUrl: string,
+  openTabs: ChromeTab[],
   initialUrl?: string,
+  fallbackTab?: ChromeTab,
 ): PrecheckTargetItem[] {
   const collected: PrecheckTargetItem[] = [];
+  const seenTabIds = new Set<number>();
   let contextUrl = initialUrl;
   let contextHost = initialUrl ? tryHostFromUrl(initialUrl) : undefined;
   let sawStateChangeOnContext = false;
@@ -967,18 +1119,22 @@ function collectMatchingPrecheckSteps(
       const within = withinLocatorsForPrecheck(step);
 
       const effectiveUrl = step.url ?? contextUrl;
-      const effectiveHost = step.host ?? contextHost;
-      let matches = true;
-      if (effectiveUrl) {
-        matches = urlsMatchForPrecheck(effectiveUrl, openTabUrl);
-      } else if (effectiveHost) {
-        matches = tabMatchesHost(openTabUrl, effectiveHost);
-      }
+      const effectiveHost =
+        step.host ?? (step.url ? tryHostFromUrl(step.url) : undefined) ?? contextHost;
+      const matchedTab = resolvePrecheckTabForStep(
+        openTabs,
+        effectiveUrl,
+        effectiveHost,
+        fallbackTab,
+      );
 
-      if (matches) {
+      if (matchedTab?.id !== undefined) {
+        if (seenTabIds.has(matchedTab.id)) continue;
+        seenTabIds.add(matchedTab.id);
         collected.push({
           index: currentIdx,
           action: step.action,
+          tabId: matchedTab.id,
           locators,
           ...(within.length > 0 ? { within } : {}),
           ...(sawStateChangeOnContext && !step.url ? { postInteraction: true } : {}),
@@ -1006,12 +1162,291 @@ export interface HandsCommand {
   videoUrl?: string;
   steps?: PrecheckStepInput[];
   url?: string;
+  tabId?: number;
   pauseBeforeSubmit?: boolean;
   runMode?: "run" | "run_remaining" | "save_only";
   params?: ScriptParam[] | Record<string, string>;
   paramValues?: Record<string, string>;
+  skipRowValues?: string[];
   primaryLabel?: string;
   pauseNotice?: string;
+}
+
+type FlowTabTarget = { url?: string; host?: string };
+
+function unwrapLeadingTabOrNav(
+  steps: V2Step[],
+): { step?: Extract<V2Step, { action: "switchTab" | "navigate" }>; inForEach: boolean } {
+  for (const step of steps) {
+    if (step.action === "wait") continue;
+    if (step.action === "switchTab" || step.action === "navigate") {
+      return { step, inForEach: false };
+    }
+    if (step.action === "forEach") {
+      const inner = unwrapLeadingTabOrNav(step.steps);
+      if (inner.step) return { step: inner.step, inForEach: true };
+    }
+    return { inForEach: false };
+  }
+  return { inForEach: false };
+}
+
+function scriptStartsWithTabOrNav(steps: V2Step[]): boolean {
+  return Boolean(unwrapLeadingTabOrNav(steps).step);
+}
+
+function collectScriptTabTargets(steps: V2Step[]): FlowTabTarget[] {
+  const targets: FlowTabTarget[] = [];
+  const walk = (list: V2Step[]): void => {
+    for (const step of list) {
+      if (step.action === "switchTab") {
+        const host = (step.url ? tryHostFromUrl(step.url) : undefined) ?? step.host;
+        if (step.url || host) {
+          targets.push({ ...(step.url ? { url: step.url } : {}), ...(host ? { host } : {}) });
+        }
+      } else if (step.action === "navigate") {
+        const host = tryHostFromUrl(step.url);
+        targets.push({ url: step.url, ...(host ? { host } : {}) });
+      } else if (step.action === "forEach") {
+        walk(step.steps);
+      }
+    }
+  };
+  walk(steps);
+  return targets;
+}
+
+function extractFlowStartTarget(cmdUrl?: string, steps: V2Step[] = []): FlowTabTarget {
+  const leading = unwrapLeadingTabOrNav(steps).step;
+  const url =
+    cmdUrl ??
+    (leading?.action === "switchTab"
+      ? leading.url
+      : leading?.action === "navigate"
+        ? leading.url
+        : undefined);
+  const host =
+    tryHostFromUrl(url) ?? (leading?.action === "switchTab" ? leading.host : undefined);
+  return { ...(url ? { url } : {}), ...(host ? { host } : {}) };
+}
+
+function tabMatchesFlowTarget(tabUrl: string | undefined, target: FlowTabTarget): boolean {
+  if (!tabUrl || !isRunnablePageUrl(tabUrl)) return false;
+  if (target.url) {
+    try {
+      const tabParsed = new URL(tabUrl);
+      const targetParsed = new URL(target.url);
+      if (
+        (tabParsed.protocol === "http:" || tabParsed.protocol === "https:") &&
+        (targetParsed.protocol === "http:" || targetParsed.protocol === "https:")
+      ) {
+        return (
+          normalizeLoopbackHost(tabParsed.host) === normalizeLoopbackHost(targetParsed.host)
+        );
+      }
+    } catch {
+      // fall through to scoreTabUrlMatch
+    }
+    return scoreTabUrlMatch(tabUrl, target.url) > 0;
+  }
+  if (target.host) {
+    return tabMatchesHost(tabUrl, target.host);
+  }
+  return false;
+}
+
+function findBestTabForTarget(
+  tabs: ChromeTab[],
+  target: FlowTabTarget,
+  opts?: { allowHostFallback?: boolean },
+): ChromeTab | undefined {
+  const runnable = tabs.filter((t) => t.id !== undefined && isRunnablePageUrl(t.url));
+  if (target.url) {
+    const urlMatches = runnable
+      .map((t) => ({ tab: t, score: scoreTabUrlMatch(t.url, target.url!) }))
+      .filter((entry) => entry.score > 0);
+    urlMatches.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const accessDiff = (b.tab.lastAccessed ?? 0) - (a.tab.lastAccessed ?? 0);
+      if (accessDiff !== 0) return accessDiff;
+      if (Boolean(a.tab.active) !== Boolean(b.tab.active)) return a.tab.active ? -1 : 1;
+      return 0;
+    });
+    if (urlMatches[0]?.tab) return urlMatches[0].tab;
+    if (opts?.allowHostFallback === false) return undefined;
+  }
+  if (target.host) {
+    const hostMatches = runnable.filter((t) => tabMatchesHost(t.url, target.host!));
+    hostMatches.sort((a, b) => {
+      const exactDiff =
+        Number(isExactHostMatch(b.url, target.host!)) -
+        Number(isExactHostMatch(a.url, target.host!));
+      if (exactDiff !== 0) return exactDiff;
+      const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
+      if (accessDiff !== 0) return accessDiff;
+      if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;
+      return 0;
+    });
+    if (hostMatches[0]) return hostMatches[0];
+  }
+  return undefined;
+}
+
+function isTargetlessSingleInsertSnippet(steps: V2Step[]): boolean {
+  if (steps.length !== 1) return false;
+  const only = steps[0];
+  return (
+    only?.action === "insertText" &&
+    !only.target &&
+    !only.targets?.length &&
+    !only.within
+  );
+}
+
+function withFlowStartSwitch(script: V2ActionScript, startUrl?: string): V2ActionScript {
+  if (!startUrl || !isRunnablePageUrl(startUrl)) return script;
+  const steps = script.steps ?? [];
+  if (steps.length === 0 || isTargetlessSingleInsertSnippet(steps)) return script;
+
+  const first = steps[0];
+  if (first?.action === "switchTab") {
+    if (!first.url && (!first.host || tabMatchesHost(startUrl, first.host))) {
+      return {
+        ...script,
+        steps: [{ ...first, url: startUrl }, ...steps.slice(1)],
+      };
+    }
+    return script;
+  }
+  if (first?.action === "navigate") {
+    return script;
+  }
+  if (first?.action === "forEach" && scriptStartsWithTabOrNav(first.steps)) {
+    const innerFirst = first.steps[0];
+    if (
+      innerFirst?.action === "switchTab" &&
+      !innerFirst.url &&
+      (!innerFirst.host || tabMatchesHost(startUrl, innerFirst.host))
+    ) {
+      return {
+        ...script,
+        steps: [
+          {
+            ...first,
+            steps: [{ ...innerFirst, url: startUrl }, ...first.steps.slice(1)],
+          },
+          ...steps.slice(1),
+        ],
+      };
+    }
+    return script;
+  }
+
+  const host = tryHostFromUrl(startUrl);
+  return {
+    ...script,
+    steps: [
+      { action: "switchTab", ...(host ? { host } : {}), url: startUrl },
+      ...steps,
+    ],
+  };
+}
+
+export async function resolveDecideTabId(cmd: HandsCommand): Promise<number | undefined> {
+  const api = getChromeApi();
+  let allTabs: ChromeTab[] = [];
+  if (api?.tabs?.query) {
+    try {
+      allTabs = (await api.tabs.query({})) ?? [];
+    } catch {
+      allTabs = [];
+    }
+  }
+  const runnableTabs = allTabs.filter((t) => t.id !== undefined && isRunnablePageUrl(t.url));
+  const tabById = new Map<number, ChromeTab>();
+  for (const tab of runnableTabs) {
+    if (tab.id !== undefined) tabById.set(tab.id, tab);
+  }
+
+  const lookupRunnableTab = async (tabId: number): Promise<ChromeTab | undefined> => {
+    const fromList = tabById.get(tabId);
+    if (fromList) return fromList;
+    if (runnableTabs.length === 0 && !api?.tabs?.query && api?.tabs?.get) {
+      try {
+        const tab = await api.tabs.get(tabId);
+        if (tab?.id !== undefined && isRunnablePageUrl(tab.url)) return tab;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  };
+
+  const steps = cmd.script?.steps ?? [];
+  const flowStart = extractFlowStartTarget(cmd.url, steps);
+  const scriptTargets = collectScriptTabTargets(steps);
+  const allFlowTargets: FlowTabTarget[] = [
+    ...(cmd.url ? [{ url: cmd.url, host: tryHostFromUrl(cmd.url) }] : []),
+    ...scriptTargets,
+  ];
+  const flowCoversStart = Boolean(cmd.url) || scriptStartsWithTabOrNav(steps);
+
+  const isTabConsistentWithFlow = (tab: ChromeTab, eventUrl?: string): boolean => {
+    if (eventUrl && !tabMatchesFlowTarget(tab.url, { url: eventUrl })) {
+      return false;
+    }
+    if (flowCoversStart && allFlowTargets.length > 0) {
+      return allFlowTargets.some((target) => tabMatchesFlowTarget(tab.url, target));
+    }
+    return true;
+  };
+
+  // 1. Explicit tabId from server (last meaningful event of the session / recall trigger)
+  if (cmd.tabId !== undefined) {
+    const explicitTab = await lookupRunnableTab(cmd.tabId);
+    if (explicitTab?.id !== undefined && isTabConsistentWithFlow(explicitTab)) {
+      return explicitTab.id;
+    }
+  }
+
+  // 2. Last meaningful event tracked in background.ts (matching flow targets when known)
+  for (let i = recentEvents.length - 1; i >= 0; i -= 1) {
+    const evt = recentEvents[i];
+    if (!evt || !isMeaningfulEvent(evt)) continue;
+    const evtTabId = typeof evt.meta?.tabId === "number" ? evt.meta.tabId : undefined;
+    if (evtTabId === undefined) continue;
+    const tab = await lookupRunnableTab(evtTabId);
+    if (!tab || tab.id === undefined) continue;
+    if (isTabConsistentWithFlow(tab, evt.url)) {
+      return tab.id;
+    }
+  }
+
+  if (lastMeaningfulTab) {
+    const tab = await lookupRunnableTab(lastMeaningfulTab.tabId);
+    if (tab?.id !== undefined && isTabConsistentWithFlow(tab, lastMeaningfulTab.url)) {
+      return tab.id;
+    }
+  }
+
+  // 3. Open tab matching the flow start URL / host
+  if (flowStart.url || flowStart.host) {
+    const startMatch = findBestTabForTarget(runnableTabs, flowStart);
+    if (startMatch?.id !== undefined) {
+      return startMatch.id;
+    }
+  }
+
+  // 4. Open tab matching any flow step URL / host
+  for (const target of allFlowTargets) {
+    const match = findBestTabForTarget(runnableTabs, target);
+    if (match?.id !== undefined) {
+      return match.id;
+    }
+  }
+
+  // 5. Fallback to active runnable tab
+  return resolveActiveTabId();
 }
 
 export async function handleHandsCommand(
@@ -1054,8 +1489,10 @@ export async function handleHandsCommand(
         pauseNotice: cmd.pauseNotice,
       });
       const appHost =
-        tryHostFromUrl(lastActiveTab?.url) ??
+        tryHostFromUrl(cmd.url) ??
         decideScript.steps.find((s): s is Extract<typeof s, { action: "switchTab" }> => s.action === "switchTab")?.host ??
+        tryHostFromUrl(lastMeaningfulTab?.url) ??
+        tryHostFromUrl(lastActiveTab?.url) ??
         "Browser";
       const suggestedItem = suggestionToOptimization(suggestion, {
         app: appHost,
@@ -1070,12 +1507,12 @@ export async function handleHandsCommand(
       let payload: {
         id: string;
         ok: boolean;
-        decision?: "approved" | "dismissed";
+        decision?: "approved" | "dismissed" | "never";
         params?: Record<string, string>;
         error?: string;
       };
       try {
-        const tabId = await resolveActiveTabId();
+        const tabId = await resolveDecideTabId(cmd);
         console.log("[eyes-bg] decide target tabId =", tabId);
         if (tabId === undefined) throw new Error("No active web tab open");
         if (!api?.tabs?.sendMessage) {
@@ -1118,7 +1555,7 @@ export async function handleHandsCommand(
         let res:
           | {
               ok?: boolean;
-              decision?: "approved" | "dismissed";
+              decision?: "approved" | "dismissed" | "never";
               params?: Record<string, string>;
               error?: string;
             }
@@ -1127,7 +1564,7 @@ export async function handleHandsCommand(
           res = (await api.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
             | {
                 ok?: boolean;
-                decision?: "approved" | "dismissed";
+                decision?: "approved" | "dismissed" | "never";
                 params?: Record<string, string>;
                 error?: string;
               }
@@ -1142,7 +1579,7 @@ export async function handleHandsCommand(
             res = (await api.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
               | {
                   ok?: boolean;
-                  decision?: "approved" | "dismissed";
+                  decision?: "approved" | "dismissed" | "never";
                   params?: Record<string, string>;
                   error?: string;
                 }
@@ -1152,7 +1589,12 @@ export async function handleHandsCommand(
           }
         }
         console.log("[eyes-bg] decider response from tab:", res);
-        if (!res?.ok || (res.decision !== "approved" && res.decision !== "dismissed")) {
+        if (
+          !res?.ok ||
+          (res.decision !== "approved" &&
+            res.decision !== "dismissed" &&
+            res.decision !== "never")
+        ) {
           throw new Error(res?.error ?? "Decider prompt failed");
         }
         if (res.decision === "approved") {
@@ -1201,51 +1643,91 @@ export async function handleHandsCommand(
       error?: string;
     };
     try {
-      const openTab = await resolveOpenRunnableTab();
-      if (openTab.id === undefined || !openTab.url) {
-        throw new Error("No active web tab open");
+      const precheckStartedAt = Date.now();
+      const allTabs = api?.tabs?.query
+        ? ((await api.tabs.query({}).catch(() => [])) ?? [])
+        : [];
+      const runnableTabs = allTabs.filter((t) => t.id !== undefined && isRunnablePageUrl(t.url));
+      let fallbackTab: ChromeTab | undefined =
+        runnableTabs.find((t) => t.active) ?? runnableTabs[0];
+      if (!fallbackTab) {
+        const openTab = await resolveOpenRunnableTab();
+        if (openTab.id !== undefined && openTab.url && isRunnablePageUrl(openTab.url)) {
+          fallbackTab = { id: openTab.id, url: openTab.url, active: true };
+        }
       }
-      if (!api?.tabs?.sendMessage) {
+      const openTabs = runnableTabs.length > 0 ? runnableTabs : fallbackTab ? [fallbackTab] : [];
+      const steps = (cmd.steps ?? cmd.script?.steps ?? []) as PrecheckStepInput[];
+      const targets = collectMatchingPrecheckSteps(steps, openTabs, cmd.url, fallbackTab);
+      if (targets.length > 0 && !api?.tabs?.sendMessage) {
         throw new Error("chrome.tabs.sendMessage unavailable");
       }
-      const steps = (cmd.steps ?? cmd.script?.steps ?? []) as PrecheckStepInput[];
-      const targets = collectMatchingPrecheckSteps(steps, openTab.url, cmd.url);
       const results: NonNullable<typeof payload.results> = [];
+      const injectedTabIds = new Set<number>();
+      const unreachableTabIds = new Set<number>();
       for (const item of targets) {
+        if (Date.now() - precheckStartedAt >= PRECHECK_TOTAL_BUDGET_MS) {
+          break;
+        }
+        if (unreachableTabIds.has(item.tabId)) {
+          continue;
+        }
         const precheckMsg = {
           kind: "EYES_PRECHECK_STEP",
           locators: item.locators,
           ...(item.within && item.within.length > 0 ? { within: item.within } : {}),
           step: item.step,
         };
-        let res = (await Promise.resolve(
-          api.tabs.sendMessage(
-            openTab.id,
-            precheckMsg,
-            { frameId: 0 },
-          ),
-        ).catch(() => undefined)) as
-          | {
-              ok?: boolean;
-              matchCount?: number;
-              unique?: boolean;
-              matchedLocator?: Locator;
-              error?: string;
-            }
-          | undefined;
+        const sendPrecheckMsg = async () =>
+          withTimeout(
+            Promise.resolve(
+              api!.tabs!.sendMessage!(
+                item.tabId,
+                precheckMsg,
+                { frameId: 0 },
+              ),
+            ).catch(() => undefined),
+            PRECHECK_MSG_TIMEOUT_MS,
+          ) as Promise<
+            | {
+                ok?: boolean;
+                matchCount?: number;
+                unique?: boolean;
+                matchedLocator?: Locator;
+                error?: string;
+              }
+            | undefined
+          >;
 
-        if (!res && api.scripting?.executeScript) {
-          await api.scripting.executeScript({
-            target: { tabId: openTab.id, allFrames: false },
-            files: ["dist/content.js"],
-          } as unknown as Parameters<NonNullable<NonNullable<ChromeApi["scripting"]>["executeScript"]>>[0]);
-          res = (await Promise.resolve(
-            api.tabs.sendMessage(
-              openTab.id,
-              precheckMsg,
-              { frameId: 0 },
-            ),
-          ).catch(() => undefined)) as typeof res;
+        let res = await sendPrecheckMsg();
+
+        if (!res && !injectedTabIds.has(item.tabId) && api?.scripting?.executeScript) {
+          injectedTabIds.add(item.tabId);
+          if (Date.now() - precheckStartedAt < PRECHECK_TOTAL_BUDGET_MS) {
+            try {
+              await withTimeout(
+                Promise.resolve(
+                  api.scripting.executeScript({
+                    target: { tabId: item.tabId, allFrames: false },
+                    files: ["dist/content.js"],
+                  } as unknown as Parameters<
+                    NonNullable<NonNullable<ChromeApi["scripting"]>["executeScript"]>
+                  >[0]),
+                ),
+                PRECHECK_MSG_TIMEOUT_MS,
+              );
+            } catch {
+              // ignore injection failures on closed/restricted tabs
+            }
+            if (Date.now() - precheckStartedAt < PRECHECK_TOTAL_BUDGET_MS) {
+              res = await sendPrecheckMsg();
+            }
+          }
+        }
+
+        if (!res) {
+          unreachableTabIds.add(item.tabId);
+          continue;
         }
 
         if (item.postInteraction && (res?.matchCount ?? 0) === 0) {
@@ -1255,11 +1737,11 @@ export async function handleHandsCommand(
         results.push({
           index: item.index,
           action: item.action,
-          ok: Boolean(res?.ok),
-          matchCount: res?.matchCount ?? 0,
-          unique: Boolean(res?.unique),
-          ...(res?.matchedLocator ? { matchedLocator: res.matchedLocator } : {}),
-          ...(res?.error ? { error: res.error } : {}),
+          ok: Boolean(res.ok),
+          matchCount: res.matchCount ?? 0,
+          unique: Boolean(res.unique),
+          ...(res.matchedLocator ? { matchedLocator: res.matchedLocator } : {}),
+          ...(res.error ? { error: res.error } : {}),
         });
       }
       payload = { id: precheckId, ok: true, results };
@@ -1282,15 +1764,20 @@ export async function handleHandsCommand(
     console.log("[eyes-bg] received run command", cmd.id, "steps=", cmd.script.steps.length);
     let payload: { id: string; ok: boolean; results?: StepResult[]; error?: string };
     try {
-      const preferredTabId = lastApprovedDecideTabId;
+      const scriptToRun = withFlowStartSwitch(cmd.script, cmd.url);
+      const preferredTabId = cmd.tabId ?? lastApprovedDecideTabId;
       lastApprovedDecideTabId = undefined;
       const tabId = await resolveActiveTabId(preferredTabId);
       console.log("[eyes-bg] run target tabId =", tabId);
-      if (tabId === undefined) throw new Error("No active web tab open");
+      if (tabId === undefined && !scriptStartsWithTabOrNav(scriptToRun.steps)) {
+        throw new Error("No active web tab open");
+      }
       const initialParams =
         cmd.paramValues ??
         (cmd.params && !Array.isArray(cmd.params) ? cmd.params : undefined);
-      const results = await runActionScript(tabId, cmd.script, initialParams);
+      const results = await runActionScript(tabId ?? -1, scriptToRun, initialParams, {
+        skipRowValues: cmd.skipRowValues,
+      });
       console.log("[eyes-bg] runActionScript results:", results);
       payload = { id: cmd.id, ok: true, results };
     } catch (err) {
@@ -1370,6 +1857,7 @@ export async function runActionScript(
   tabId: number,
   script: V2ActionScript | ActionScript,
   initialParams?: Record<string, string>,
+  opts?: { skipRowValues?: string[] },
 ): Promise<StepResult[]> {
   const v2Script = script as V2ActionScript;
   const bindings: Record<string, BindingValue> = {};
@@ -1395,6 +1883,9 @@ export async function runActionScript(
       }
     }
   }
+  const skipRowValues =
+    opts?.skipRowValues ??
+    (Array.isArray(v2Script.skipRowValues) ? v2Script.skipRowValues : undefined);
   await ensureLocalPiiLoaded();
   const runControl: RunControl = { aborted: false, waiters: new Set() };
   activeRunControl = runControl;
@@ -1407,6 +1898,7 @@ export async function runActionScript(
       scriptName: v2Script.name,
       pauseBeforeSubmit: Boolean(v2Script.pauseBeforeSubmit),
       pageSummary: v2Script.pageSummary,
+      skipRowValues,
       runControl,
       isTopLevel: true,
     });
@@ -1419,7 +1911,7 @@ export async function runActionScript(
     if (activeRunControl === runControl) {
       activeRunControl = null;
     }
-    if (!paused) {
+    if (!paused && currentTabId >= 0) {
       await sendWatchMessage(currentTabId, {
         kind: "EYES_WATCH_STOP",
         ...(completed ? { completed: true, name: v2Script.name, stepsExecuted } : {}),
@@ -1513,12 +2005,27 @@ type RunContext = {
   scriptName?: string;
   pauseBeforeSubmit: boolean;
   pageSummary?: unknown;
+  skipRowValues?: string[];
   runControl: RunControl;
   isTopLevel: boolean;
   stepOffset?: number;
   totalStepsOverride?: number;
   itemLabel?: string;
 };
+
+function rowMatchesSkipValues(
+  item: Record<string, unknown>,
+  skipSet: ReadonlySet<string>,
+): boolean {
+  for (const [k, v] of Object.entries(item)) {
+    if (k === "cells" || typeof v !== "string") continue;
+    const norm = v.toLowerCase().replace(/\s+/g, " ").trim();
+    if (norm && skipSet.has(norm)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function describeWatchStep(step: V2DomStep, itemLabel?: string): string {
   const prefix = itemLabel ? `${itemLabel} · ` : "";
@@ -1626,6 +2133,30 @@ async function runStepsInternal(
         getChromeApi()?.windows ?? (typeof chrome !== "undefined" ? chrome.windows : undefined);
 
       if (step.action === "navigate") {
+        if (currentTabId < 0) {
+          if (tabsApi?.create) {
+            const created = await tabsApi.create({ url: step.url, active: true });
+            if (created?.id === undefined) {
+              throw new Error(`Failed to open tab for ${step.url}`);
+            }
+            if (created.windowId !== undefined && windowsApi?.update) {
+              await windowsApi.update(created.windowId, { focused: true });
+            }
+            if (created.status !== "complete") {
+              await waitForTabLoad(created.id);
+            }
+            const createdTab = tabsApi.get
+              ? await tabsApi.get(created.id).catch(() => created)
+              : created;
+            if (createdTab?.url?.startsWith("chrome-error://")) {
+              throw new Error(`Navigation failed for ${step.url} (error page)`);
+            }
+            currentTabId = created.id;
+            results.push({ ok: true, url: createdTab?.url ?? step.url });
+            continue;
+          }
+          throw new Error("No active web tab open");
+        }
         lastFieldFrameByTab.delete(currentTabId);
         const currentTab = tabsApi?.get
           ? await tabsApi.get(currentTabId).catch(() => undefined)
@@ -1674,6 +2205,9 @@ async function runStepsInternal(
             await tabsApi?.update?.(match.id, { active: true });
             if (match.windowId !== undefined && windowsApi?.update) {
               await windowsApi.update(match.windowId, { focused: true });
+            }
+            if (match.status === "loading") {
+              await waitForTabLoad(match.id);
             }
             currentTabId = match.id;
             results.push({
@@ -1727,6 +2261,9 @@ async function runStepsInternal(
         if (match.windowId !== undefined && windowsApi?.update) {
           await windowsApi.update(match.windowId, { focused: true });
         }
+        if (match.status === "loading") {
+          await waitForTabLoad(match.id);
+        }
         currentTabId = match.id;
         results.push({ ok: true, tab: targetHost });
         continue;
@@ -1734,11 +2271,27 @@ async function runStepsInternal(
 
       if (step.action === "forEach") {
         const items = resolveForEachItems(step.items, bindings, scope, ctx.pageSummary);
+        const skipSources = [
+          ...(ctx.skipRowValues ?? []),
+          ...(Array.isArray(bindings.skipRowValues) ? bindings.skipRowValues : []),
+          ...(Array.isArray(scope.skipRowValues) ? scope.skipRowValues : []),
+        ];
+        const skipSet =
+          typeof step.items === "string" && skipSources.length > 0
+            ? new Set(
+                skipSources
+                  .map((v) => String(v ?? "").toLowerCase().replace(/\s+/g, " ").trim())
+                  .filter(Boolean),
+              )
+            : null;
         const totalLoopSteps = items.length * step.steps.length;
         for (let itemIdx = 0; itemIdx < items.length; itemIdx += 1) {
           const item = items[itemIdx];
           if (ctx.runControl.aborted) {
             throw new Error("Run stopped by user");
+          }
+          if (skipSet && skipSet.size > 0 && rowMatchesSkipValues(item, skipSet)) {
+            continue;
           }
           const nested = await runStepsInternal(
             currentTabId,
@@ -1766,6 +2319,9 @@ async function runStepsInternal(
         continue;
       }
 
+      if (currentTabId < 0) {
+        throw new Error("No active web tab open");
+      }
       const watchLocators = stepLocatorsForWatch(step);
       const prevStep = stepIndex > 0 ? steps[stepIndex - 1] : undefined;
       if (
@@ -1837,17 +2393,18 @@ async function executeDomStep(tabId: number, step: V2DomStep): Promise<StepResul
       ? { tabId, frameIds: [knownFrameId] }
       : { tabId };
 
-  const invokeExecuteScript = async () => {
+  const invokeExecuteScript = async (allFrames = false) => {
+    const execTarget = allFrames ? { tabId, allFrames: true } : target;
     if (api?.scripting?.executeScript) {
       return api.scripting.executeScript({
-        target,
+        target: execTarget,
         func: executeStep,
         args: [step],
       });
     }
     if (typeof chrome !== "undefined" && chrome.scripting?.executeScript) {
       return chrome.scripting.executeScript({
-        target,
+        target: execTarget,
         func: executeStep,
         args: [step],
       });
@@ -1895,7 +2452,26 @@ async function executeDomStep(tabId: number, step: V2DomStep): Promise<StepResul
 
   const [injection] = injections;
   if (!injection?.result) throw new Error("Executor returned no result");
-  return injection.result;
+  let stepResult = injection.result;
+  if (!stepResult.ok) {
+    const tabsApi = api?.tabs ?? (typeof chrome !== "undefined" ? chrome.tabs : undefined);
+    const tab = tabsApi?.get ? await tabsApi.get(tabId).catch(() => undefined) : undefined;
+    if (tab?.status === "loading" && tabsApi?.onUpdated) {
+      await waitForTabLoad(tabId);
+      const retried = await invokeExecuteScript().catch(() => []);
+      if (retried[0]?.result) {
+        stepResult = retried[0].result;
+      }
+    }
+    if (!stepResult.ok && hasTarget) {
+      const allFrameInjections = await invokeExecuteScript(true).catch(() => []);
+      const subframeSuccess = allFrameInjections.find((r) => r.result?.ok);
+      if (subframeSuccess?.result) {
+        return subframeSuccess.result;
+      }
+    }
+  }
+  return stepResult;
 }
 
 export function substitute<T>(value: T, vars: Record<string, unknown>): T {

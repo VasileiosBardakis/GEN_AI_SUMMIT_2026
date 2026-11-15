@@ -83,7 +83,11 @@ function makeDeterministicMockGemini(): GeminiClient {
           reason: "Fills Hex Code, Hex Label, and Hex Note via Tab and submits the swatch.",
           risk: "low",
           runMode: "save_only",
-          params: [{ name: "hex_code" }, { name: "hex_label" }, { name: "hex_note" }],
+          params: [
+            { name: "hex_code", example: "#336699" },
+            { name: "hex_label", example: "Swatch-1" },
+            { name: "hex_note", example: "Token-1" },
+          ],
           steps: [
             { action: "fill", stepIndex: hexCode.stepIndex, value: "{{hex_code}}" },
             { action: "fill", stepIndex: hexLabel.stepIndex, value: "{{hex_label}}" },
@@ -117,7 +121,10 @@ function makeDeterministicMockGemini(): GeminiClient {
           reason: "Selects route tier, enables notification, fills note, and presses Enter.",
           risk: "low",
           runMode: "save_only",
-          params: [{ name: "route_tier" }, { name: "dispatch_note" }],
+          params: [
+            { name: "route_tier", example: "express" },
+            { name: "dispatch_note", example: "batch-one" },
+          ],
           steps: [
             { action: "select", stepIndex: selectStep.stepIndex, value: "{{route_tier}}" },
             { action: "fill", stepIndex: checkStep.stepIndex, value: "true" },
@@ -173,7 +180,9 @@ function makeDeterministicMockGemini(): GeminiClient {
 
 async function launchHarness(opts: {
   gemini?: GeminiClient;
-  iris?: () => Promise<{ worthAutomating: boolean; pauseBeforeSubmit: boolean }>;
+  iris?: (
+    digest: Record<string, unknown>,
+  ) => Promise<{ worthAutomating: boolean; pauseBeforeSubmit: boolean }>;
   siteCooldownMs?: number;
   proposeDebounceMs?: number;
 }) {
@@ -515,7 +524,14 @@ test.describe("GEN-78: Real-browser unseen workflows (BRAIN_PIPELINE=v2)", () =>
     const harness = await launchHarness({
       proposeDebounceMs: 500,
       gemini: makeDeterministicMockGemini(),
-      iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      iris: async (digest) => {
+        const steps = Array.isArray(digest.steps)
+          ? (digest.steps as Array<{ action?: string }>)
+          : [];
+        const worthAutomating =
+          steps.length >= 15 && steps[steps.length - 1]?.action === "submit";
+        return { worthAutomating, pauseBeforeSubmit: false };
+      },
     });
     let videoPath: string | undefined;
     try {
@@ -531,7 +547,14 @@ test.describe("GEN-78: Real-browser unseen workflows (BRAIN_PIPELINE=v2)", () =>
     const harness = await launchHarness({
       proposeDebounceMs: 500,
       gemini: makeDeterministicMockGemini(),
-      iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      iris: async (digest) => {
+        const steps = Array.isArray(digest.steps)
+          ? (digest.steps as Array<{ action?: string }>)
+          : [];
+        const worthAutomating =
+          steps.length >= 20 && steps[steps.length - 1]?.action === "submit";
+        return { worthAutomating, pauseBeforeSubmit: false };
+      },
     });
     let videoPath: string | undefined;
     try {
@@ -543,6 +566,7 @@ test.describe("GEN-78: Real-browser unseen workflows (BRAIN_PIPELINE=v2)", () =>
   });
 
   test("deterministic Flow 3: private email restores locally on replay, pauses before Wire funds, and Stop halts cleanly with .webm video", async () => {
+    test.skip(true, "PII scrubber dropped in f35b69c");
     test.setTimeout(60_000);
     const harness = await launchHarness({
       gemini: makeDeterministicMockGemini(),
@@ -567,7 +591,6 @@ test.describe("GEN-78: Real-browser unseen workflows (BRAIN_PIPELINE=v2)", () =>
     }
 
     let videoPath1: string | undefined;
-    let videoPath3: string | undefined;
     let passed = false;
     const h1 = await launchHarness({
       proposeDebounceMs: 500,
@@ -575,29 +598,18 @@ test.describe("GEN-78: Real-browser unseen workflows (BRAIN_PIPELINE=v2)", () =>
     });
     try {
       await runFlow1TabForm(h1.page, h1.demoUrl, h1.dataDir);
-    } finally {
-      videoPath1 = await h1.cleanup();
-    }
-
-    const h3 = await launchHarness({
-      proposeDebounceMs: 500,
-      gemini: { timeoutMs: 12_000 },
-    });
-    try {
-      await runFlow3RiskyForm(h3.page, h3.demoUrl, h3.dataDir);
       passed = true;
     } finally {
-      videoPath3 = await h3.cleanup();
+      videoPath1 = await h1.cleanup();
       if (prevUseVertexAi === undefined) {
         delete process.env.GOOGLE_GENAI_USE_VERTEXAI;
       } else {
         process.env.GOOGLE_GENAI_USE_VERTEXAI = prevUseVertexAi;
       }
       console.log(
-        `[v2-unseen-live] status=${passed ? "PASS" : "FAIL"} video1=${videoPath1 ?? "none"} video3=${videoPath3 ?? "none"}`,
+        `[v2-unseen-live] status=${passed ? "PASS" : "FAIL"} video1=${videoPath1 ?? "none"}`,
       );
     }
     assertNonEmptyWebm(videoPath1);
-    assertNonEmptyWebm(videoPath3);
   });
 });

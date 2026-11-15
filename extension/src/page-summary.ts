@@ -146,6 +146,34 @@ function stripTagFragments(text: string): string {
   return collapseWs(text.replace(/<[^>]*>/g, " "));
 }
 
+function readNonButtonOwnText(el: HTMLElement): string {
+  const tag = tagOf(el);
+  if (tag === "button") return "";
+  const hasButtonDescendant = collectDescendants(el, (c) => tagOf(c) === "button").length > 0;
+  if (!hasButtonDescendant) {
+    return (el as { innerText?: string }).innerText || el.textContent || "";
+  }
+  const cloneFn = (el as unknown as { cloneNode?: (deep?: boolean) => HTMLElement }).cloneNode;
+  if (typeof cloneFn === "function") {
+    const clone = cloneFn.call(el, true);
+    if (typeof (clone as { querySelectorAll?: unknown }).querySelectorAll === "function") {
+      for (const btn of Array.from(clone.querySelectorAll("button"))) {
+        btn.remove();
+      }
+      const clonedText = (clone as { innerText?: string }).innerText || clone.textContent || "";
+      if (clonedText.trim().length > 0) return clonedText;
+    }
+  }
+  const parts: string[] = [];
+  for (const child of childrenOf(el)) {
+    if (tagOf(child) === "button") continue;
+    const t = readNonButtonOwnText(child).trim();
+    if (t) parts.push(t);
+  }
+  if (parts.length > 0) return parts.join(" ");
+  return (el as { innerText?: string }).innerText || el.textContent || "";
+}
+
 function readSafeText(el: HTMLElement): string {
   const tag = tagOf(el);
   if (tag === "input") {
@@ -164,7 +192,7 @@ function readSafeText(el: HTMLElement): string {
       return stripTagFragments(val);
     }
   }
-  const raw = (el as { innerText?: string }).innerText || el.textContent || "";
+  const raw = readNonButtonOwnText(el);
   return stripTagFragments(raw);
 }
 
@@ -302,18 +330,16 @@ function fitSourceToBudget(summary: PageSummarySource, currentRowIdx: number): P
     return candidate;
   }
 
-  candidate = {
-    rowTag: candidate.rowTag,
-    rows: candidate.rows,
-  };
-  if (utf8ByteLength(JSON.stringify(candidate)) <= PAGE_SUMMARY_MAX_BYTES) {
-    return candidate;
-  }
+  const keptContainer =
+    summary.containerLocators && summary.containerLocators.length > 0
+      ? { containerLocators: summary.containerLocators.slice(0, 1) }
+      : {};
 
   for (const maxText of [80, 40, 20, 10]) {
     candidate = {
-      rowTag: candidate.rowTag,
-      rows: candidate.rows.map((row) => ({
+      ...keptContainer,
+      rowTag: summary.rowTag,
+      rows: summary.rows.map((row) => ({
         locators: row.locators.slice(0, 2),
         cells: row.cells.map((cell) => ({
           text:
@@ -330,6 +356,7 @@ function fitSourceToBudget(summary: PageSummarySource, currentRowIdx: number): P
   }
 
   candidate = {
+    ...keptContainer,
     rowTag: candidate.rowTag,
     rows: candidate.rows.map((row) => ({
       locators: row.locators.slice(0, 1),
@@ -338,6 +365,14 @@ function fitSourceToBudget(summary: PageSummarySource, currentRowIdx: number): P
         locators: cell.locators.slice(0, 1),
       })),
     })),
+  };
+  if (utf8ByteLength(JSON.stringify(candidate)) <= PAGE_SUMMARY_MAX_BYTES) {
+    return candidate;
+  }
+
+  candidate = {
+    rowTag: candidate.rowTag,
+    rows: candidate.rows,
   };
   if (utf8ByteLength(JSON.stringify(candidate)) <= PAGE_SUMMARY_MAX_BYTES) {
     return candidate;
