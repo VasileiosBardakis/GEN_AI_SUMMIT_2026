@@ -122,6 +122,8 @@ export type EventMeta = {
     summary: string;
   };
 
+  pageSummary?: Record<string, unknown>;
+
   [key: string]: unknown;
 };
 

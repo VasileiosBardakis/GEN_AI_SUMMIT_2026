@@ -44,7 +44,12 @@ export const EventSchema = z.object({
       timeSinceCopyMs: z.number().optional(),
     })
     .optional(),
-  meta: z.record(z.string(), z.unknown()).optional(),
+  meta: z
+    .object({
+      pageSummary: z.record(z.string(), z.unknown()).optional(),
+    })
+    .catchall(z.unknown())
+    .optional(),
 });
 
 export const EventsSchema = z.array(EventSchema);
@@ -102,6 +107,18 @@ export const ScriptLocatorSchema = z.object({
 export type ScriptLocatorKind = z.infer<typeof ScriptLocatorKindSchema>;
 export type ScriptLocator = z.infer<typeof ScriptLocatorSchema>;
 
+export const ScriptTargetSchema = z.union([
+  ScriptLocatorSchema,
+  z.array(ScriptLocatorSchema).min(1),
+]);
+
+export type ScriptTarget = z.infer<typeof ScriptTargetSchema>;
+
+export function toLocatorList(target?: ScriptLocator | ScriptLocator[]): ScriptLocator[] {
+  if (!target) return [];
+  return Array.isArray(target) ? target : [target];
+}
+
 const ExtractFieldsSchema = z.union([
   z
     .array(
@@ -129,53 +146,73 @@ const ForEachItemsSchema = z.union([
   ),
 ]);
 
-const nonEmptyBind = z.string().refine((s) => s.trim().length > 0, "expected non-empty string");
+const nonEmptyBind = z
+  .string()
+  .refine(
+    (s) => s.trim().length > 0 && !s.includes("{") && !s.includes("}"),
+    "expected non-empty binding name without braces",
+  );
 
 export const ScriptDomStepSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("click"),
-    target: ScriptLocatorSchema,
+    target: ScriptTargetSchema,
+    within: ScriptTargetSchema.optional(),
     optional: z.boolean().optional(),
   }),
   z.object({
     action: z.literal("fill"),
-    target: ScriptLocatorSchema,
+    target: ScriptTargetSchema,
+    within: ScriptTargetSchema.optional(),
     value: z.string(),
     optional: z.boolean().optional(),
   }),
   z.object({
     action: z.literal("insertText"),
-    target: ScriptLocatorSchema.optional(),
+    target: ScriptTargetSchema.optional(),
+    within: ScriptTargetSchema.optional(),
     value: z.string(),
     optional: z.boolean().optional(),
   }),
   z.object({
     action: z.literal("select"),
-    target: ScriptLocatorSchema,
+    target: ScriptTargetSchema,
+    within: ScriptTargetSchema.optional(),
     value: z.string(),
     optional: z.boolean().optional(),
   }),
   z.object({
+    action: z.literal("pressKey"),
+    key: z.enum(["Enter", "Tab", "Escape"]),
+    target: ScriptTargetSchema.optional(),
+    within: ScriptTargetSchema.optional(),
+    optional: z.boolean().optional(),
+  }),
+  z.object({
     action: z.literal("waitFor"),
-    target: ScriptLocatorSchema,
+    target: ScriptTargetSchema,
+    within: ScriptTargetSchema.optional(),
     timeoutMs: z.number().positive().optional(),
     optional: z.boolean().optional(),
   }),
   z.object({
     action: z.literal("readText"),
-    target: ScriptLocatorSchema,
+    target: ScriptTargetSchema,
+    within: ScriptTargetSchema.optional(),
     bind: nonEmptyBind,
     optional: z.boolean().optional(),
   }),
   z.object({
     action: z.literal("readValue"),
-    target: ScriptLocatorSchema,
+    target: ScriptTargetSchema,
+    within: ScriptTargetSchema.optional(),
     bind: nonEmptyBind,
     optional: z.boolean().optional(),
   }),
   z.object({
     action: z.literal("extractList"),
-    target: ScriptLocatorSchema,
+    target: ScriptTargetSchema,
+    within: ScriptTargetSchema.optional(),
     bind: nonEmptyBind,
     fields: ExtractFieldsSchema.optional(),
     optional: z.boolean().optional(),
@@ -188,7 +225,7 @@ export type ScriptStep =
   | ScriptDomStep
   | { action: "navigate"; url: string; optional?: boolean }
   | { action: "wait"; ms: number; optional?: boolean }
-  | { action: "switchTab"; host: string; optional?: boolean }
+  | { action: "switchTab"; host: string; url?: string; optional?: boolean }
   | {
       action: "forEach";
       items: Record<string, string>[] | string;
@@ -212,6 +249,10 @@ export const ScriptStepSchema: z.ZodType<ScriptStep, z.ZodTypeDef, unknown> = z.
     z.object({
       action: z.literal("switchTab"),
       host: z.string().refine((s) => s.trim().length > 0, "expected non-empty host"),
+      url: z
+        .string()
+        .refine((s) => s.trim().length > 0, "expected non-empty url")
+        .optional(),
       optional: z.boolean().optional(),
     }),
     z.object({
@@ -227,10 +268,14 @@ export const ActionScriptSchema = z
   .object({
     name: z.string().optional(),
     steps: z.array(ScriptStepSchema).min(1),
+    pauseBeforeSubmit: z.boolean().optional(),
+    runMode: z.enum(["run_remaining", "save_only"]).optional(),
   })
-  .transform(({ name, steps }) => ({
+  .transform(({ name, steps, pauseBeforeSubmit, runMode }) => ({
     ...(name ? { name } : {}),
     steps,
+    ...(pauseBeforeSubmit !== undefined ? { pauseBeforeSubmit } : {}),
+    ...(runMode !== undefined ? { runMode } : {}),
   }));
 
 export type ActionScript = z.infer<typeof ActionScriptSchema>;
@@ -267,6 +312,16 @@ export const LibraryEntryStatusSchema = z.enum(["suggested", "active", "paused"]
 export type LibraryEntryKind = z.infer<typeof LibraryEntryKindSchema>;
 export type LibraryEntryStatus = z.infer<typeof LibraryEntryStatusSchema>;
 
+export const LibraryEntryStatsSchema = z.object({
+  repetitions: z.number().int().nonnegative(),
+  stepCount: z.number().int().nonnegative(),
+  manualSeconds: z.number().nonnegative(),
+  replaySeconds: z.number().nonnegative(),
+  timeSavedSeconds: z.number().nonnegative(),
+});
+
+export type LibraryEntryStats = z.infer<typeof LibraryEntryStatsSchema>;
+
 export const LibraryEntrySchema = z.object({
   id: z.string().refine((s) => /^[A-Za-z0-9_-]+$/.test(s), "expected safe id"),
   name: z.string().refine((s) => s.trim().length > 0, "expected non-empty name"),
@@ -276,6 +331,8 @@ export const LibraryEntrySchema = z.object({
   solution: z.string().refine((s) => s.trim().length > 0, "expected non-empty solution"),
   script: ActionScriptSchema,
   eyes: EyesDetectionSpecSchema,
+  stats: LibraryEntryStatsSchema.optional(),
+  startSignature: z.string().min(1).optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
   runCount: z.number().int().nonnegative().default(0),
