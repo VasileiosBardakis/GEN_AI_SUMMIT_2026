@@ -787,16 +787,13 @@ describe("GEN-69: M2 Hands v2", () => {
     const handled = await pollHandsBridgeOnce(baseUrl);
     expect(handled).toBe(true);
 
-    // Only step 0 (.order-id on portal.html) and step 3 (explicit portal.html url) should be checked,
-    // NOT step 2 (#erp-order after switchTab to erp.html).
-    expect(sendMessage).toHaveBeenCalledTimes(2);
+    // Only step 0 (entry step on portal.html) should be checked;
+    // step 2 (#erp-order after switchTab to erp.html) has no open tab,
+    // and step 3 (later step on already-checked portal.html) is skipped by entry-step precheck.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage.mock.calls[0]?.[1]).toMatchObject({
       kind: "EYES_PRECHECK_STEP",
       locators: [{ kind: "css", value: ".order-id" }],
-    });
-    expect(sendMessage.mock.calls[1]?.[1]).toMatchObject({
-      kind: "EYES_PRECHECK_STEP",
-      locators: [{ kind: "testid", value: "portal-refresh" }],
     });
 
     expect(receivedResults).toHaveLength(1);
@@ -805,7 +802,6 @@ describe("GEN-69: M2 Hands v2", () => {
       ok: true,
       results: [
         { index: 0, action: "readText", ok: true, matchCount: 1, unique: true },
-        { index: 3, action: "click", ok: true, matchCount: 1, unique: true },
       ],
     });
   });
@@ -2193,7 +2189,7 @@ describe("GEN-95: offer popup tab targeting and Run flow-start tab switch", () =
     expect(executedOnTabs).toEqual([101]);
   });
 
-  it("GEN-123: precheck checks each step in its matching open tab (through forEach switchTab/navigate) and skips missing tabs", async () => {
+  it("GEN-123 / GEN-126: precheck checks only the first step with a locator per matching open tab (skipping revealed/later steps on already-checked tabs and missing tabs)", async () => {
     const postedResults: unknown[] = [];
     const baseUrl = await startResultServer(postedResults);
 
@@ -2240,6 +2236,7 @@ describe("GEN-95: offer popup tab targeting and Run flow-start tab switch", () =
                 { action: "readText", target: { kind: "testid", value: "portal-invoice-id" }, bind: "inv" },
                 { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:5173/erp.html" },
                 { action: "fill", target: { kind: "testid", value: "erp-invoice-id" }, value: "{{inv}}" },
+                { action: "click", target: { kind: "css", value: ".select2-results__option" } },
                 { action: "navigate", url: "https://missing.local/step" },
                 { action: "click", target: { kind: "testid", value: "missing-btn" } },
                 { action: "switchTab", host: "reports.local" },
@@ -2254,19 +2251,17 @@ describe("GEN-95: offer popup tab targeting and Run flow-start tab switch", () =
       baseUrl,
     );
 
-    expect(sendMessage).toHaveBeenCalledTimes(4);
+    expect(sendMessage).toHaveBeenCalledTimes(3);
     expect(sendMessage.mock.calls[0]?.[0]).toBe(101);
     expect(sendMessage.mock.calls[1]?.[0]).toBe(202);
     expect(sendMessage.mock.calls[2]?.[0]).toBe(404);
-    expect(sendMessage.mock.calls[3]?.[0]).toBe(202);
     expect(postedResults[0]).toEqual({
       id: "pre-gen123-1",
       ok: true,
       results: [
         { index: 2, action: "readText", ok: true, matchCount: 1, unique: true },
         { index: 4, action: "fill", ok: true, matchCount: 1, unique: true },
-        { index: 8, action: "click", ok: true, matchCount: 1, unique: true },
-        { index: 10, action: "click", ok: true, matchCount: 1, unique: true },
+        { index: 9, action: "click", ok: true, matchCount: 1, unique: true },
       ],
     });
   });

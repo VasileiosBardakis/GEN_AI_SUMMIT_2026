@@ -114,7 +114,7 @@ describe("proposer Iris-gated pipeline (GEN-114)", () => {
     }),
   ];
 
-  it("skips Iris on < 2 meaningful steps, compiles when worthAutomating=true, skips when false, lets Gemini suggest decide on null, and preserves steps before > 60s gap", async () => {
+  it("skips Iris on < 2 meaningful steps, compiles when worthAutomating=true, skips when false or null, and preserves steps before > 60s gap", async () => {
     // 1. < 2 meaningful steps skips Iris
     const judgeSkipped = vi.fn(async () => ({ worthAutomating: true, pauseBeforeSubmit: false }));
     const compileSkipped = vi.fn(async () => makeCompiledStub());
@@ -175,67 +175,37 @@ describe("proposer Iris-gated pipeline (GEN-114)", () => {
     expect(compileFalse).not.toHaveBeenCalled();
     p3.close();
 
-    // 4. Iris null lets compileV2 (Gemini suggest) decide
-    const makeGeminiSuggest = (suggest: boolean): GeminiClient => ({
-      async generateText() {
-        throw new Error("unexpected");
-      },
-      async generateJson<T>(
-        _prompt: string,
-        schema: Parameters<GeminiClient["generateJson"]>[1],
-      ): Promise<T> {
-        const payload = {
-          suggest,
-          offerAt2: false,
-          kind: "workflow",
-          name: "Save invoice",
-          reason: "Copies and saves invoice",
-          risk: "low",
-          runMode: "save_only",
-          params: [],
-          steps: [{ action: "click", stepIndex: 1 }],
-        };
-        const parsed = schema.safeParse(payload);
-        if (!parsed.success) throw new Error(parsed.error.message);
-        return parsed.data as T;
-      },
-    });
-
-    const onCompiledSuggestFalse = vi.fn();
+    // 4. Iris null (no verdict / null_response or error) stops and does not call compileV2
+    const compileOnNull = vi.fn(async () => makeCompiledStub());
+    const onCompiledOnNull = vi.fn();
     const p4a = createProposer({
       readSessionEvents: async () => twoStepEvents,
       judgeIris: async () => null,
-      compileV2: (input, opts) =>
-        compileWorkflow(input, {
-          gemini: makeGeminiSuggest(false),
-          ...opts,
-        }),
-      onCompiled: onCompiledSuggestFalse,
+      compileV2: compileOnNull,
+      onCompiled: onCompiledOnNull,
       requestDecision: async () => ({ ok: true, decision: "dismissed" }),
       runScript: async () => ({ ok: true }),
     });
     p4a.onEvents("sess_propose_iris");
     await new Promise((r) => setTimeout(r, 30));
-    expect(onCompiledSuggestFalse).not.toHaveBeenCalled();
+    expect(compileOnNull).not.toHaveBeenCalled();
+    expect(onCompiledOnNull).not.toHaveBeenCalled();
     p4a.close();
 
-    const onCompiledSuggestTrue = vi.fn();
     const p4b = createProposer({
       readSessionEvents: async () => twoStepEvents,
-      judgeIris: async () => null,
-      compileV2: (input, opts) =>
-        compileWorkflow(input, {
-          gemini: makeGeminiSuggest(true),
-          ...opts,
-        }),
-      onCompiled: onCompiledSuggestTrue,
+      judgeIris: async () => {
+        throw new Error("iris unreachable");
+      },
+      compileV2: compileOnNull,
+      onCompiled: onCompiledOnNull,
       requestDecision: async () => ({ ok: true, decision: "dismissed" }),
       runScript: async () => ({ ok: true }),
     });
     p4b.onEvents("sess_propose_iris");
-    await vi.waitFor(() => {
-      expect(onCompiledSuggestTrue).toHaveBeenCalledTimes(1);
-    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(compileOnNull).not.toHaveBeenCalled();
+    expect(onCompiledOnNull).not.toHaveBeenCalled();
     p4b.close();
 
     // 5. > 60 s gap elsewhere still includes prior steps in the window
@@ -395,5 +365,70 @@ describe("proposer Iris-gated pipeline (GEN-114)", () => {
       ),
     ).toBe(true);
     pWin.close();
+  });
+
+  it("GEN-126: save_only workflow still calls requestDecision (save only, no runScript), while run_remaining and snippet still run", async () => {
+    // 1. save_only workflow -> requestDecision called with runMode: save_only; approved -> onApproved called, runScript NOT called
+    const decideSaveCalls: Array<{ name: string; runMode?: string }> = [];
+    const onApprovedSave = vi.fn(async () => ({ shouldRun: false }));
+    const runScriptSave = vi.fn(async () => ({ ok: true }));
+    const pSave = createProposer({
+      readSessionEvents: async () => twoStepEvents,
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: async () => makeCompiledStub(),
+      requestDecision: async (name, _sol, script) => {
+        decideSaveCalls.push({ name, runMode: script.runMode });
+        return { ok: true, decision: "approved" };
+      },
+      onApproved: onApprovedSave,
+      runScript: runScriptSave,
+    });
+    pSave.onEvents("sess_save_only_approve");
+    await vi.waitFor(() => {
+      expect(onApprovedSave).toHaveBeenCalledTimes(1);
+    });
+    expect(decideSaveCalls).toEqual([{ name: "Copy invoice to ERP", runMode: "save_only" }]);
+    expect(runScriptSave).not.toHaveBeenCalled();
+    pSave.close();
+
+    // 2. save_only workflow dismissed -> onApproved NOT called
+    const onApprovedDismissed = vi.fn(async () => ({ shouldRun: false }));
+    const pDismiss = createProposer({
+      readSessionEvents: async () => twoStepEvents,
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: async () => makeCompiledStub(),
+      requestDecision: async () => ({ ok: true, decision: "dismissed" }),
+      onApproved: onApprovedDismissed,
+      runScript: async () => ({ ok: true }),
+    });
+    pDismiss.onEvents("sess_save_only_dismiss");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(onApprovedDismissed).not.toHaveBeenCalled();
+    pDismiss.close();
+
+    // 3. snippet with save_only still runs on approve with decideScript.runMode = run_remaining
+    const decideSnipCalls: Array<{ runMode?: string }> = [];
+    const runScriptSnip = vi.fn(async () => ({ ok: true }));
+    const pSnip = createProposer({
+      readSessionEvents: async () => twoStepEvents,
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: async () => ({
+        ...makeCompiledStub(),
+        kind: "snippet",
+        steps: [{ action: "insertText", value: "Hello" }],
+      }),
+      requestDecision: async (_name, _sol, script) => {
+        decideSnipCalls.push({ runMode: script.runMode });
+        return { ok: true, decision: "approved" };
+      },
+      onApproved: async () => ({ shouldRun: true }),
+      runScript: runScriptSnip,
+    });
+    pSnip.onEvents("sess_snip_run");
+    await vi.waitFor(() => {
+      expect(runScriptSnip).toHaveBeenCalledTimes(1);
+    });
+    expect(decideSnipCalls).toEqual([{ runMode: "run_remaining" }]);
+    pSnip.close();
   });
 });

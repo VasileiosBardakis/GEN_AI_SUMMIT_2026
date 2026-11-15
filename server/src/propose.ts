@@ -324,45 +324,41 @@ export function createProposer(deps: ProposerDeps): Proposer {
     const solution = finding.why.trim() || name;
     let shouldRun =
       script.runMode === "run_remaining" || workflow.kind === "snippet";
-    let runParams: Record<string, string> | undefined;
+    const decideScript: ActionScript =
+      shouldRun && script.runMode === "save_only"
+        ? { ...script, runMode: "run_remaining" }
+        : script;
 
-    const wasOffered = shouldRun;
-    if (shouldRun) {
-      const decideScript: ActionScript =
-        script.runMode === "save_only"
-          ? { ...script, runMode: "run_remaining" }
-          : script;
-      safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} offered`);
-      let outcome: HandsOutcome;
-      try {
-        outcome = await deps.requestDecision(
-          name,
-          solution,
-          decideScript,
-          undefined,
-          decisionMeta,
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        safeLog(`[propose:v2] ${name} -> error: ${message}`);
-        emitStageLog({ stage: "decide", session: sessionId, site, decision: "error", error: message, name });
-        return;
-      }
-
-      if (closed) return;
-
-      if (!outcome.ok || outcome.decision !== "approved") {
-        const isTimeout = !outcome.ok && /timed?\s*out/i.test(outcome.error ?? "");
-        const decision = outcome.decision === "dismissed" ? "dismissed" : isTimeout ? "timeout" : "dismissed";
-        safeLog(`[propose:v2] ${name} -> ${decision}`);
-        emitStageLog({ stage: "decide", session: sessionId, site, decision, name });
-        return;
-      }
-
-      safeLog(`[propose:v2] ${name} -> approved`);
-      emitStageLog({ stage: "decide", session: sessionId, site, decision: "approved", name });
-      runParams = outcome.params;
+    safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} offered`);
+    let outcome: HandsOutcome;
+    try {
+      outcome = await deps.requestDecision(
+        name,
+        solution,
+        decideScript,
+        undefined,
+        decisionMeta,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      safeLog(`[propose:v2] ${name} -> error: ${message}`);
+      emitStageLog({ stage: "decide", session: sessionId, site, decision: "error", error: message, name });
+      return;
     }
+
+    if (closed) return;
+
+    if (!outcome.ok || outcome.decision !== "approved") {
+      const isTimeout = !outcome.ok && /timed?\s*out/i.test(outcome.error ?? "");
+      const decision = outcome.decision === "dismissed" ? "dismissed" : isTimeout ? "timeout" : "dismissed";
+      safeLog(`[propose:v2] ${name} -> ${decision}`);
+      emitStageLog({ stage: "decide", session: sessionId, site, decision, name });
+      return;
+    }
+
+    safeLog(`[propose:v2] ${name} -> approved`);
+    emitStageLog({ stage: "decide", session: sessionId, site, decision: "approved", name });
+    const runParams = outcome.params;
 
     if (deps.onApproved) {
       try {
@@ -375,9 +371,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
         if (hookRes && typeof hookRes.shouldRun === "boolean") {
           shouldRun = hookRes.shouldRun;
         }
-        if (wasOffered) {
-          safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} saved`);
-        }
+        safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} saved`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         safeLog(`[propose:v2] ${name} -> save failed: ${msg}`);
@@ -546,7 +540,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
         `[iris] session=${sessionId} meaningful=${window.meaningfulCount} verdict=${verdict} reason=${reason}`,
       );
       if (closed) return;
-      if (irisJudgment?.worthAutomating === false) {
+      if (irisJudgment == null || irisJudgment.worthAutomating === false) {
         return;
       }
     }

@@ -1018,6 +1018,7 @@ function collectMatchingPrecheckSteps(
   fallbackTab?: ChromeTab,
 ): PrecheckTargetItem[] {
   const collected: PrecheckTargetItem[] = [];
+  const seenTabIds = new Set<number>();
   let contextUrl = initialUrl;
   let contextHost = initialUrl ? tryHostFromUrl(initialUrl) : undefined;
   let seqIndex = 0;
@@ -1064,6 +1065,8 @@ function collectMatchingPrecheckSteps(
       );
 
       if (matchedTab?.id !== undefined) {
+        if (seenTabIds.has(matchedTab.id)) continue;
+        seenTabIds.add(matchedTab.id);
         collected.push({
           index: currentIdx,
           action: step.action,

@@ -412,6 +412,20 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
 
     if (opts.expectedRunMode === "save_only") {
+      const decidePoll = await pollHandsNext(baseUrl, waitMs);
+      expect(decidePoll.status).toBe(200);
+      expect(decidePoll.cmd?.kind).toBe("decide");
+      expect(decidePoll.cmd?.script?.runMode).toBe("save_only");
+      if (opts.expectPauseBeforeSubmit) {
+        expect(decidePoll.cmd?.script?.pauseBeforeSubmit).toBe(true);
+      }
+
+      await postHandsResult(baseUrl, {
+        id: decidePoll.cmd!.id,
+        ok: true,
+        decision: "approved",
+      });
+
       await vi.waitFor(async () => {
         const lib = await readLibrary(srvDataDir);
         expect(lib.length).toBe(1);
@@ -426,7 +440,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
         expect(parsed.script.pauseBeforeSubmit).toBe(true);
       }
 
-      // Never asks the user to save the skill — no decide command queued
+      // Save choice only — never queues a run command
       const trailing = await pollHandsNext(baseUrl, 40);
       expect(trailing.status).toBe(204);
       return;
@@ -687,12 +701,22 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       results: [{ index: 0, action: "click", ok: true, matchCount: 1, unique: true }],
     });
 
+    const decideSave = await pollHandsNext(baseUrl);
+    expect(decideSave.status).toBe(200);
+    expect(decideSave.cmd?.kind).toBe("decide");
+    expect(decideSave.cmd?.script?.runMode).toBe("save_only");
+    await postHandsResult(baseUrl, {
+      id: decideSave.cmd!.id,
+      ok: true,
+      decision: "approved",
+    });
+
     await vi.waitFor(async () => {
       const lib = await readLibrary(precheckDataDir);
       expect(lib).toHaveLength(1);
     });
-    const noDecide = await pollHandsNext(baseUrl, 40);
-    expect(noDecide.status).toBe(204);
+    const noRun = await pollHandsNext(baseUrl, 40);
+    expect(noRun.status).toBe(204);
   });
 
   it("isolates distinct sessions (never merges <2 steps across sessions) and keeps queued decide across nav page_load", async () => {
@@ -925,12 +949,22 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
     });
 
+    const cDecide = await pollHandsNext(recallUrl);
+    expect(cDecide.status).toBe(200);
+    expect(cDecide.cmd?.kind).toBe("decide");
+    expect(cDecide.cmd?.script?.runMode).toBe("save_only");
+    await postHandsResult(recallUrl, {
+      id: cDecide.cmd!.id,
+      ok: true,
+      decision: "approved",
+    });
+
     await vi.waitFor(async () => {
       const lib = await readLibrary(recallDataDir);
       expect(lib).toHaveLength(1);
     });
-    const noSaveDecide = await pollHandsNext(recallUrl, 40);
-    expect(noSaveDecide.status).toBe(204);
+    const noSaveRun = await pollHandsNext(recallUrl, 40);
+    expect(noSaveRun.status).toBe(204);
     const [ticketEntry] = (await readLibrary(recallDataDir)) as LibraryEntry[];
     expect(ticketEntry.startSignature).toContain("intake.local");
 
@@ -1071,12 +1105,21 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       ok: true,
       results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
     });
+    const dec3 = await pollHandsNext(baseUrl);
+    expect(dec3.status).toBe(200);
+    expect(dec3.cmd?.kind).toBe("decide");
+    expect(dec3.cmd?.script?.runMode).toBe("save_only");
+    await postHandsResult(baseUrl, {
+      id: dec3.cmd!.id,
+      ok: true,
+      decision: "approved",
+    });
     await vi.waitFor(async () => {
       const lib = await readLibrary(offer2DataDir);
       expect(lib.length).toBeGreaterThanOrEqual(1);
     });
-    const noDec3 = await pollHandsNext(baseUrl, 40);
-    expect(noDec3.status).toBe(204);
+    const noRun3 = await pollHandsNext(baseUrl, 40);
+    expect(noRun3.status).toBe(204);
     const [savedTicketEntry] = await readLibrary(offer2DataDir);
 
     const reportRes = await fetch(

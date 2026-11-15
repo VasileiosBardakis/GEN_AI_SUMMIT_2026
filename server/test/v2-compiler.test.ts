@@ -1098,7 +1098,8 @@ describe("Brain v2 compiler and validator", () => {
       await vi.waitFor(() => {
         expect(saved).toHaveLength(1);
       });
-      expect(decided).toHaveLength(0);
+      expect(decided).toHaveLength(1);
+      expect(decided[0].script.runMode).toBe("save_only");
       expect(saved[0].script.steps).toEqual(script.steps);
     } finally {
       proposer.close();
