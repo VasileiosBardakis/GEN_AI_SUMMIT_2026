@@ -2444,3 +2444,27 @@ describe("v2 compiler model and timeout configuration", () => {
     expect(COMPILER_RESPONSE_SCHEMA.properties.kind.description).toContain("snippet");
   });
 });
+
+describe("GEN-131: invented param examples", () => {
+  it("drops examples the user never typed and the fill steps that use them", async () => {
+    const events = await loadFixture("unseen-multifield-tab.jsonl");
+    const answer = JSON.parse(
+      await readFile(path.join(__dirname, "fixtures", "unseen-multifield-tab.answer.json"), "utf-8"),
+    ) as { response: { params: Array<{ name: string; example?: string }>; steps: Array<Record<string, unknown>> } };
+    const resp = answer.response;
+    resp.params.push({ name: "portalPassword", example: "password123" });
+    const loop = resp.steps[0] as { steps: Array<Record<string, unknown>> };
+    const flat = { ...resp, steps: [...resp.steps] };
+    flat.steps.unshift({ action: "fill", stepIndex: 4, value: "{{portalPassword}}" });
+    const { client } = makeMockGemini(flat);
+    void loop;
+    const wf = await compileWorkflow(
+      { events },
+      { gemini: client, iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }) },
+    );
+    expect(wf).not.toBeNull();
+    expect(wf!.params.map((p) => p.name)).not.toContain("portalPassword");
+    expect(JSON.stringify(wf!.steps)).not.toContain("portalPassword");
+    expect(wf!.params.find((p) => p.name === "phValue")?.example).toBe("7.12");
+  });
+});
