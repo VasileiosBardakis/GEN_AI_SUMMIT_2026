@@ -51,8 +51,17 @@ export type CompileOptions = {
   model?: string;
 };
 
-const DEFAULT_COMPILE_TIMEOUT_MS = 12_000;
-const DEFAULT_V2_COMPILE_MODEL = "gemini-3.1-flash-lite";
+export const DEFAULT_V2_COMPILE_MODEL = "gemini-3.1-flash-lite";
+export const DEFAULT_COMPILE_TIMEOUT_MS = 5000;
+
+export function resolveCompileTimeoutMs(): number {
+  const n = Number(process.env.V2_COMPILE_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_COMPILE_TIMEOUT_MS;
+}
+
+export function resolveCompileModel(): string {
+  return process.env.V2_COMPILE_MODEL?.trim() || DEFAULT_V2_COMPILE_MODEL;
+}
 const MAX_PROMPT_STEPS = 60;
 const MAX_SUMMARY_CHARS = 4096;
 
@@ -307,6 +316,44 @@ function normalizeUrlHost(rawUrl: string): string {
   }
 }
 
+function mergeCapturedNavigateUrl(
+  rawUrl: string,
+  fallbackUrl: string | undefined,
+): string {
+  if (!fallbackUrl) return rawUrl;
+  let parsedRaw: URL;
+  let parsedFallback: URL;
+  try {
+    parsedRaw = new URL(rawUrl);
+    parsedFallback = new URL(fallbackUrl);
+  } catch {
+    return rawUrl;
+  }
+  if (
+    normalizeHost(parsedRaw.hostname) !==
+    normalizeHost(parsedFallback.hostname)
+  ) {
+    return rawUrl;
+  }
+  if (!parsedRaw.port && parsedFallback.port) {
+    parsedRaw.port = parsedFallback.port;
+  }
+  const isOriginOnly =
+    parsedRaw.pathname === "/" &&
+    parsedRaw.search === "" &&
+    parsedRaw.hash === "";
+  const fallbackHasPathOrQuery =
+    parsedFallback.pathname !== "/" || parsedFallback.search !== "";
+  if (
+    isOriginOnly &&
+    fallbackHasPathOrQuery &&
+    (!parsedRaw.port || parsedRaw.port === parsedFallback.port)
+  ) {
+    return fallbackUrl;
+  }
+  return parsedRaw.toString();
+}
+
 function stripParamBraces(name: string): string {
   const trimmed = name.trim();
   if (trimmed.startsWith("{{") && trimmed.endsWith("}}")) {
@@ -336,8 +383,10 @@ function luhnCheck(digitsOnly: string): boolean {
 function createPromptScrubber(piiMap: PiiMap): {
   scrubText: (raw: string) => string;
   restoreMap: Map<string, string>;
+  unmappedHashByToken: Map<string, string>;
 } {
   const restoreMap = new Map<string, string>();
+  const unmappedHashByToken = new Map<string, string>();
   const rawToToken = new Map<string, string>();
   const redactedToToken = new Map<string, string>();
   const typeCounters = new Map<string, number>();
@@ -363,7 +412,7 @@ function createPromptScrubber(piiMap: PiiMap): {
   }
 
   function scrubText(raw: string): string {
-    let out = raw.replace(REDACTED_MARKER_RE, (full, kind: string) => {
+    let out = raw.replace(REDACTED_MARKER_RE, (full, kind: string, hash?: string) => {
       const existing = redactedToToken.get(full);
       if (existing) return existing;
       const token = nextToken(kind || "REDACTED");
@@ -371,6 +420,8 @@ function createPromptScrubber(piiMap: PiiMap): {
       const localReal = piiMap.get(full);
       if (localReal !== undefined) {
         restoreMap.set(token, localReal);
+      } else if (hash && hash.trim()) {
+        unmappedHashByToken.set(token, hash.trim());
       }
       return token;
     });
@@ -409,7 +460,7 @@ function createPromptScrubber(piiMap: PiiMap): {
     return out;
   }
 
-  return { scrubText, restoreMap };
+  return { scrubText, restoreMap, unmappedHashByToken };
 }
 
 function scrubUnknown(value: unknown, scrubText: (s: string) => string): unknown {
@@ -1214,12 +1265,12 @@ function buildCompilePrompt(
     "Compile the repeated browser steps into ONE concise parameterized workflow JSON.",
     "",
     "RULES:",
-    "1. Never write selectors. EVERY click/fill/select/readText/key/submit MUST set `stepIndex` to the matching `hasTarget: true` step from Steps (or a `targetId` from PageSummary Targets). Never omit `stepIndex` on a `click` or `fill`, and NEVER put a `withinId` into `targetId`.",
-    "2. Pick ONE clean repetition and drop one-off stray clicks.",
+    "1. Never write selectors. EVERY click/fill/select/readText/key/submit MUST set `stepIndex` to the matching `hasTarget: true` step from Steps (matching the action, e.g. `fill` stepIndex for `fill`, `key` stepIndex for `key`), OR an exact `targetId` from PageSummary Targets. Never omit `stepIndex` on a `click` or `fill`, never put a `withinId` into `targetId`, and never emit empty \"\".",
+    "2. Pick ONE clean repetition and drop stray, decorative, or non-essential clicks and side excursions (e.g. help/info/tooltip links) even if repeated in every repetition. Never emit `navigate` to an informational/excursion URL or reload a form page the user is already on.",
     "3. Keep all distinct form fields (multi-field Tab forms keep every `fill` via its own `stepIndex`). Always preserve Enter-key submissions (`action: \"key\", key: \"Enter\"` with the `key` step's `stepIndex`) rather than dropping them.",
     "4. Copied values use `readText` with `bind` (REQUIRED on every `readText`, e.g. `\"bind\":\"<varName>\"`, NEVER omit `bind`) and `fill` with `\"{{<varName>}}\"`.",
     "5. User-supplied variables go in `params[]` and `\"{{paramName}}\"`. Never invent placeholder/masked literals; preserve `__PII_*__` tokens if typed literally.",
-    "6. Do NOT emit `navigate` for the initial page load (a leading `switchTab` is added automatically). `switchTab` uses `stepIndex` or `host` (hostname only), never `url`.",
+    "6. Tab switching is automatic; do NOT emit `navigate` for the start page load. `switchTab` uses `stepIndex` or `host` (hostname only), never `url`. Any `navigate` MUST reuse `stepIndex` or keep the full URL including port and path (never strip to bare host/origin).",
     "7. Use `forEach` ONLY when PageSummary Lists is printed below AND has remaining unprocessed items (`runMode: \"run_remaining\"`). A `forEach` step MUST put ALL steps of one full repeated cycle (starting from the first repeated click/action, e.g. opening the row and switching tabs, NEVER skipping early cycle clicks and NEVER emitting `navigate` inside or before `forEach` to reload the current page) inside its own `steps: [...]` array (never as top-level sibling steps after `forEach`) and MUST set `itemIds: [\"item_...\"]` to ONLY remaining unprocessed `itemId`s (never include already-processed items such as item_1_1/item_1_2, and NEVER set `items` when `itemIds` is set). Inside `forEach.steps`, keep `stepIndex` on every `click`/`fill` in order, and set `withinId` + `withinTextParam` ONLY on row-scoped steps (matching each step's own table container, with `withinTextParam` set to the row's unique name/identifier key such as `col1` or `clientName`, NOT status/button columns like `col2`/`col3` or an unmapped `params[]` name). Otherwise set `runMode: \"save_only\"` and emit flat steps.",
     "8. `offerAt2: true` when clearly generalizable at 2 repeats; `risk: \"high\"` for irreversible external actions (payments/wires/deletes/external sends); `suggest: false` only if one-off.",
     "",
@@ -1563,15 +1614,34 @@ function resolveLeafStep(
       };
     }
     case "navigate": {
-      const hostLookupUrl =
-        !raw.url && !captured?.url && raw.host?.trim()
-          ? ctx.indexedSteps.find(
-              (s) =>
-                normalizeHost(s.app) === normalizeHost(raw.host!) && s.url,
-            )?.url
-          : undefined;
-      const rawUrl = raw.url ?? captured?.url ?? hostLookupUrl;
-      if (!rawUrl) {
+      let targetHost: string | undefined;
+      if (raw.url) {
+        try {
+          targetHost = normalizeHost(new URL(raw.url).hostname);
+        } catch {
+          // ignore invalid URL when inferring host
+        }
+      }
+      if (!targetHost && raw.host?.trim()) {
+        targetHost = normalizeHost(raw.host);
+      }
+      if (!targetHost && captured?.app) {
+        targetHost = normalizeHost(captured.app);
+      }
+      const matchingHostUrl = targetHost
+        ? ctx.indexedSteps.find((s) => {
+            if (!s.url) return false;
+            if (normalizeHost(s.app) === targetHost) return true;
+            try {
+              return normalizeHost(new URL(s.url).hostname) === targetHost;
+            } catch {
+              return false;
+            }
+          })?.url
+        : undefined;
+      const fallbackUrl = captured?.url ?? matchingHostUrl;
+      const candidateUrl = raw.url ?? fallbackUrl;
+      if (!candidateUrl) {
         if (raw.host?.trim()) {
           const host = normalizeHost(raw.host);
           return {
@@ -1582,7 +1652,10 @@ function resolveLeafStep(
         }
         return null;
       }
-      const normalized = normalizeUrlHost(restoreText(rawUrl, restoreMap));
+      const mergedUrl = raw.url
+        ? mergeCapturedNavigateUrl(raw.url, fallbackUrl)
+        : candidateUrl;
+      const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
       let navHost = stepHost;
       try {
         navHost = normalizeHost(new URL(normalized).hostname);
@@ -1859,18 +1932,13 @@ function createCompileGeminiClient(
     return opts.gemini;
   }
   const baseOpts: GeminiClientOptions = opts?.gemini ?? {};
-  const model =
-    opts?.model ??
-    baseOpts.model ??
-    process.env.GEMINI_MODEL ??
-    DEFAULT_V2_COMPILE_MODEL;
   return createGeminiClient({
     ...baseOpts,
-    model,
+    model: opts?.model ?? baseOpts.model ?? resolveCompileModel(),
     thinkingBudget: baseOpts.thinkingBudget ?? 0,
     responseSchema:
       baseOpts.responseSchema ?? buildCompilerResponseSchema(ctx),
-    timeoutMs: baseOpts.timeoutMs ?? opts?.timeoutMs ?? DEFAULT_COMPILE_TIMEOUT_MS,
+    timeoutMs: baseOpts.timeoutMs ?? opts?.timeoutMs ?? resolveCompileTimeoutMs(),
   });
 }
 
@@ -1902,7 +1970,7 @@ export async function compileWorkflow(
     Math.trunc(input.repeatCount ?? inferredRepeats),
   );
 
-  const { scrubText, restoreMap } = createPromptScrubber(piiMap);
+  const { scrubText, restoreMap, unmappedHashByToken } = createPromptScrubber(piiMap);
   const summaryData = extractPageSummaryData(enrichedAll, scrubText);
 
   const ctx: PromptContext = {
@@ -2000,6 +2068,13 @@ export async function compileWorkflow(
       p.example !== undefined
         ? restoreText(p.example, restoreMap)
         : undefined;
+    const exampleTokenMatch =
+      restoredExample !== undefined
+        ? /(__PII_[A-Z0-9_]+__)/.exec(restoredExample)
+        : null;
+    const piiHash = exampleTokenMatch
+      ? unmappedHashByToken.get(exampleTokenMatch[1])
+      : undefined;
     return {
       name: stripParamBraces(p.name),
       ...(restoredDesc && !hasAnyPiiMarker(restoredDesc)
@@ -2008,8 +2083,98 @@ export async function compileWorkflow(
       ...(restoredExample && !hasAnyPiiMarker(restoredExample)
         ? { example: restoredExample }
         : {}),
+      ...(piiHash ? { piiHash } : {}),
     };
   });
+
+  // Backfill missing param examples or piiHash from referenced captured steps, and bind any unmapped __PII_*__ tokens
+  const paramByName = new Map<string, CompiledParam>();
+  for (const param of params) {
+    paramByName.set(param.name, param);
+  }
+
+  const rawLeafPairs: Array<{ stepIndex?: number; value?: string }> = [];
+  for (const rawStep of modelOut.steps) {
+    if (rawStep.action === "forEach" && Array.isArray(rawStep.steps)) {
+      for (const nested of rawStep.steps) {
+        rawLeafPairs.push({ stepIndex: nested.stepIndex, value: nested.value });
+      }
+    } else {
+      rawLeafPairs.push({ stepIndex: rawStep.stepIndex, value: rawStep.value });
+    }
+  }
+  for (const rawRef of rawLeafPairs) {
+    if (
+      rawRef.stepIndex === undefined ||
+      rawRef.stepIndex < 0 ||
+      rawRef.stepIndex >= ctx.indexedSteps.length ||
+      typeof rawRef.value !== "string"
+    ) {
+      continue;
+    }
+    const tmplMatch = /^\{\{\s*([^}]+?)\s*\}\}$/.exec(rawRef.value.trim());
+    if (!tmplMatch) continue;
+    const param = paramByName.get(tmplMatch[1]);
+    if (!param || param.example !== undefined || param.piiHash !== undefined) continue;
+    const capturedVal = ctx.indexedSteps[rawRef.stepIndex]?.value;
+    if (typeof capturedVal !== "string" || capturedVal.length === 0) continue;
+    const restoredCaptured = restoreText(scrubText(capturedVal), restoreMap);
+    const piiTokMatch = /(__PII_[A-Z0-9_]+__)/.exec(restoredCaptured);
+    if (piiTokMatch) {
+      const hash = unmappedHashByToken.get(piiTokMatch[1]);
+      if (hash) param.piiHash = hash;
+    } else if (!hasAnyPiiMarker(restoredCaptured)) {
+      param.example = restoredCaptured;
+    }
+  }
+
+  const ensureParamForUnmappedToken = (token: string, hash: string): string => {
+    for (const existing of params) {
+      if (existing.piiHash === hash) return existing.name;
+    }
+    const baseName = token
+      .replace(/^__/, "")
+      .replace(/__$/, "")
+      .toLowerCase();
+    let candidateName = baseName;
+    let suffix = 1;
+    while (paramByName.has(candidateName)) {
+      suffix += 1;
+      candidateName = `${baseName}_${suffix}`;
+    }
+    const created: CompiledParam = { name: candidateName, piiHash: hash };
+    params.push(created);
+    paramByName.set(candidateName, created);
+    return candidateName;
+  };
+
+  const bindUnmappedInSteps = (stepList: CompiledStep[]): void => {
+    for (const s of stepList) {
+      if (s.action === "forEach") {
+        bindUnmappedInSteps(s.steps);
+        continue;
+      }
+      if ("value" in s && typeof s.value === "string" && unmappedHashByToken.size > 0) {
+        s.value = s.value.replace(/(__PII_[A-Z0-9_]+__)/g, (tok) => {
+          const hash = unmappedHashByToken.get(tok);
+          if (!hash) return tok;
+          const pName = ensureParamForUnmappedToken(tok, hash);
+          return `{{${pName}}}`;
+        });
+      }
+    }
+  };
+  bindUnmappedInSteps(steps);
+
+  const sanitizeDisplayText = (raw: string): string => {
+    let out = restoreText(raw, restoreMap).trim();
+    for (const tok of unmappedHashByToken.keys()) {
+      if (out.includes(tok)) {
+        out = out.split(tok).join("private value");
+      }
+    }
+    return out;
+  };
 
   const pauseBeforeSubmit =
     irisResult?.pauseBeforeSubmit === true || modelOut.risk === "high";
@@ -2018,8 +2183,8 @@ export async function compileWorkflow(
 
   const candidate: CompiledWorkflow = {
     kind: modelOut.kind,
-    name: restoreText(modelOut.name, restoreMap).trim(),
-    reason: restoreText(modelOut.reason, restoreMap).trim(),
+    name: sanitizeDisplayText(modelOut.name),
+    reason: sanitizeDisplayText(modelOut.reason),
     risk: modelOut.risk,
     offerAt2: modelOut.offerAt2,
     runMode: modelOut.runMode,

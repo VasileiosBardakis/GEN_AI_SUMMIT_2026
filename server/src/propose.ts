@@ -24,6 +24,7 @@ export type HandsOutcome = {
   ok: boolean;
   results?: unknown;
   decision?: HandsDecision;
+  params?: Record<string, string>;
   error?: string;
 };
 
@@ -76,7 +77,10 @@ export type ProposerDeps = {
     solution: string,
     script: ActionScript,
   ) => Promise<HandsOutcome>;
-  runScript: (script: ActionScript) => Promise<HandsOutcome>;
+  runScript: (
+    script: ActionScript,
+    params?: Record<string, string>,
+  ) => Promise<HandsOutcome>;
   debounceMs?: number;
   log?: (line: string) => void;
   readSessionEvents?: (sessionId: string) => Promise<Event[]>;
@@ -590,7 +594,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       }
 
       try {
-        const runOutcome = await deps.runScript(script);
+        const runOutcome = await deps.runScript(script, outcome.params);
         safeLog(`[propose:v2] ${name} -> ${runOutcome.ok ? "run ok" : "run failed"}`);
         emitStageLog({ stage: "run", session: sessionId, ok: runOutcome.ok, name });
       } catch {

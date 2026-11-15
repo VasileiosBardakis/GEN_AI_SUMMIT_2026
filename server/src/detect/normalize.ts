@@ -31,6 +31,8 @@ const INCLUDED_TYPES = new Set<Event["type"]>([
   "copy",
   "nav",
   "submit",
+  "key",
+  "keydown",
 ]);
 
 /**
@@ -161,17 +163,46 @@ export function normalize(events: Event[]): Step[] {
         break;
       }
 
-      case "click":
-      case "submit": {
+      case "key":
+      case "keydown": {
+        if (ev.meta?.key !== "Enter") break;
         const target = formatTarget(ev.target);
         steps.push({
-          action: ev.type,
+          action: "submit",
+          ...(target ? { target } : {}),
+          value: "Enter",
+        });
+        lastFillByTarget.clear();
+        lastTargetKey = targetKey(ev.target);
+        break;
+      }
+
+      case "click": {
+        const target = formatTarget(ev.target);
+        steps.push({
+          action: "click",
           ...(target ? { target } : {}),
         });
         lastTargetKey = targetKey(ev.target);
-        if (ev.type === "submit") {
-          lastFillByTarget.clear();
+        break;
+      }
+
+      case "submit": {
+        const target = formatTarget(ev.target);
+        const prev = steps.at(-1);
+        if (prev?.action === "submit" && prev.value === "Enter") {
+          if (target && (!prev.target || prev.target.length === 0)) {
+            prev.target = target;
+          }
+          delete prev.value;
+        } else {
+          steps.push({
+            action: "submit",
+            ...(target ? { target } : {}),
+          });
         }
+        lastTargetKey = targetKey(ev.target);
+        lastFillByTarget.clear();
         break;
       }
 
