@@ -53,9 +53,9 @@ function getReadableLabel(el: HTMLElement): string | undefined {
   }
 
   if (
-    el instanceof HTMLInputElement ||
-    el instanceof HTMLTextAreaElement ||
-    el instanceof HTMLSelectElement
+    (typeof HTMLInputElement !== "undefined" && el instanceof HTMLInputElement) ||
+    (typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement) ||
+    (typeof HTMLSelectElement !== "undefined" && el instanceof HTMLSelectElement)
   ) {
     if (el.labels && el.labels.length > 0) {
       const text = Array.from(el.labels)
@@ -65,6 +65,7 @@ function getReadableLabel(el: HTMLElement): string | undefined {
       if (text) return text;
     }
     if (
+      typeof HTMLInputElement !== "undefined" &&
       el instanceof HTMLInputElement &&
       /^(submit|button|reset)$/i.test(el.getAttribute("type") || "") &&
       el.value.trim()
@@ -78,7 +79,7 @@ function getReadableLabel(el: HTMLElement): string | undefined {
   const title = el.getAttribute("title")?.trim();
   if (title) return title;
 
-  if (!(el instanceof HTMLSelectElement)) {
+  if (typeof HTMLSelectElement === "undefined" || !(el instanceof HTMLSelectElement)) {
     const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
     if (text && text.length <= 80) return text;
   }
@@ -146,14 +147,20 @@ export function extractTarget(rawEl: EventTarget | null): {
     role?: string;
   };
 } {
-  if (!rawEl || !(rawEl instanceof HTMLElement)) {
+  const el =
+    typeof HTMLElement !== "undefined" && rawEl instanceof HTMLElement
+      ? rawEl
+      : typeof Node !== "undefined" && rawEl instanceof Node
+        ? rawEl.parentElement
+        : null;
+  if (!el || (typeof HTMLElement !== "undefined" && !(el instanceof HTMLElement))) {
     return { element: null, target: undefined };
   }
 
   const interactive =
-    rawEl.closest<HTMLElement>(
+    el.closest<HTMLElement>(
       'button, a, input, select, textarea, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [role="gridcell"], [role="textbox"], [role="searchbox"], [role="combobox"], [data-testid], [data-cell], td, th, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
-    ) || rawEl;
+    ) || el;
 
   const locators: Locator[] = [];
   const tag = interactive.tagName.toLowerCase();
