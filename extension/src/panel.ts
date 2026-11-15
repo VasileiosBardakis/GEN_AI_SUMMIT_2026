@@ -668,6 +668,15 @@ async function init(): Promise<void> {
   latestLocalItems = effectiveLocal;
   allItems = mergeServerAndLocalOptimizations(serverEntries, effectiveLocal);
   render();
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    void loadServerEntries().then((entries) => {
+      lastServerEntries = entries;
+      allItems = mergeServerAndLocalOptimizations(entries, latestLocalItems ?? []);
+      render();
+    });
+  });
 }
 
 document.querySelectorAll<HTMLButtonElement>(".filter-tab").forEach((tab) => {

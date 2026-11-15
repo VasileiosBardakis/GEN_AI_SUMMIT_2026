@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Event, Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
+import { STEP_TRIGGER_TYPES } from "./common/target.ts";
 import {
   buildLibraryEntryFromScript,
   buildStartSignature,
@@ -101,7 +102,15 @@ export type CreateServerOptions = {
 
 type HandsCommand =
   | { id: string; kind?: "run"; script: ActionScript; paramValues?: Record<string, string> }
-  | { id: string; kind: "decide"; name: string; solution: string; script: ActionScript; primaryLabel?: string }
+  | {
+      id: string;
+      kind: "decide";
+      name: string;
+      solution: string;
+      script: ActionScript;
+      primaryLabel?: string;
+      isRecall?: boolean;
+    }
   | {
       id: string;
       kind: "precheck";
@@ -109,6 +118,14 @@ type HandsCommand =
       steps: ActionScript["steps"];
       url?: string;
     };
+
+function isProposeTriggerEvent(ev: Event): boolean {
+  if (STEP_TRIGGER_TYPES.has(ev.type)) return true;
+  if (ev.type === "keydown" || ev.type === "key") {
+    return ev.meta?.key === "Enter";
+  }
+  return false;
+}
 
 function formatStartSignature(sig: StartSignature): string {
   const host = sig.host ?? "*";
@@ -284,6 +301,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
     solution: string;
     script: ActionScript;
     primaryLabel?: string;
+    isRecall?: boolean;
     timeoutMs?: number;
   }): Promise<{ id: string; outcome: HandsOutcome }> {
     const id = input.id ?? crypto.randomUUID();
@@ -299,6 +317,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         solution: input.solution,
         script: input.script,
         ...(input.primaryLabel ? { primaryLabel: input.primaryLabel } : {}),
+        ...(input.isRecall ? { isRecall: true } : {}),
       },
       timeoutMs,
       "Timed out waiting for user decision",
@@ -323,6 +342,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         name: entry.name,
         solution: entry.solution,
         script: recallDecideScript,
+        isRecall: true,
       });
       if (
         !outcome.ok &&
@@ -649,7 +669,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
             .catch(() => {});
         }
         sendJson(res, 200, { ok: true, n: events.length, scrubbed });
-        const sessionIds = new Set(events.map((e) => e.session));
+        const sessionIds = new Set(
+          events.filter(isProposeTriggerEvent).map((e) => e.session),
+        );
         if (proposer) {
           for (const sessionId of sessionIds) {
             proposer.onEvents(sessionId);

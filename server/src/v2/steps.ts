@@ -1,5 +1,5 @@
 import type { Event, Locator, Step } from "@gen/shared";
-import { formatTarget, targetKey } from "../common/target.ts";
+import { formatTarget, targetKey, V2_STEP_EVENT_TYPES } from "../common/target.ts";
 
 export type V2Action = Step["action"] | "tab_switch" | "key";
 
@@ -16,19 +16,6 @@ export type V2Step = {
 };
 
 export type PiiMap = Map<string, string>;
-
-const INCLUDED_TYPES = new Set<Event["type"]>([
-  "click",
-  "input",
-  "change",
-  "paste",
-  "copy",
-  "nav",
-  "submit",
-  "tab_switch",
-  "keydown",
-  "key",
-]);
 
 export function eventsToSteps(
   events: Event[],
@@ -51,7 +38,7 @@ export function eventsToSteps(
   }
 
   for (const ev of events) {
-    if (!INCLUDED_TYPES.has(ev.type)) continue;
+    if (!V2_STEP_EVENT_TYPES.has(ev.type)) continue;
 
     const url = typeof ev.url === "string" ? scrubPii(ev.url) : undefined;
     const pageSummary =

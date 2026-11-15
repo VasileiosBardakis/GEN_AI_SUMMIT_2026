@@ -15,6 +15,16 @@ function makeEvent(id: string, ts: number, type: Event["type"]): Event {
   };
 }
 
+function repeatedCutEvents(): Event[] {
+  const events: Event[] = [];
+  let ts = 1_000;
+  for (let i = 0; i < 3; i++) {
+    events.push(makeEvent(`cm${i}`, (ts += 1_000), "contextmenu"));
+    events.push(makeEvent(`cut${i}`, (ts += 1_000), "cut"));
+  }
+  return events;
+}
+
 describe("propose flow tips", () => {
   it("shows a show-only Got it card without compiling or running anything", async () => {
     const decisions: Array<{
@@ -24,10 +34,7 @@ describe("propose flow tips", () => {
       primaryLabel?: string;
     }> = [];
     const proposer = createProposer({
-      readSessionEvents: async () => [
-        makeEvent("e1", 1, "click"),
-        makeEvent("e2", 2, "paste"),
-      ],
+      readSessionEvents: async () => repeatedCutEvents(),
       compileV2: async () => {
         throw new Error("workflow compile should not run");
       },
@@ -67,10 +74,7 @@ describe("propose flow tips", () => {
     let suggestions = 0;
     let decisions = 0;
     const proposer = createProposer({
-      readSessionEvents: async () => [
-        makeEvent("e1", 1, "click"),
-        makeEvent("e2", 2, "paste"),
-      ],
+      readSessionEvents: async () => repeatedCutEvents(),
       compileV2: async () => null,
       suggestFlowTip: async () => {
         suggestions += 1;
@@ -92,5 +96,30 @@ describe("propose flow tips", () => {
 
     expect(suggestions).toBe(1);
     expect(decisions).toBe(1);
+  });
+
+  it("does not call the model before a pattern actually repeats", async () => {
+    let suggestions = 0;
+    const proposer = createProposer({
+      readSessionEvents: async () => [
+        makeEvent("n1", 1, "nav"),
+        makeEvent("c1", 2, "contextmenu"),
+        makeEvent("x1", 3, "cut"),
+      ],
+      compileV2: async () => null,
+      suggestFlowTip: async () => {
+        suggestions += 1;
+        return { tip: "Use Ctrl+X.", keys: ["Ctrl+X"], why: "Cut repeated." };
+      },
+      requestDecision: async () => ({ ok: true, decision: "dismissed" }),
+      runScript: async () => ({ ok: true }),
+      debounceMs: 0,
+    });
+
+    proposer.onEvents("s1");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    proposer.close();
+
+    expect(suggestions).toBe(0);
   });
 });

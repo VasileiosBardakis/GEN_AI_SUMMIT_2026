@@ -126,7 +126,9 @@ async function main() {
   const libraryPath = path.join(dataDir, "library.json");
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(libraryPath, "[]\n", "utf8");
-  console.log("[dev] cleared data/library.json");
+  const extStorageDir = path.join(rootDir, ".dev", "chrome-profile", "Default", "Local Extension Settings");
+  fs.rmSync(extStorageDir, { recursive: true, force: true });
+  console.log("[dev] cleared data/library.json and extension storage");
 
   console.log("[dev] building extension...");
   await buildExtension();

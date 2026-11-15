@@ -7,7 +7,7 @@ import {
   compiledWorkflowToFinding,
   pickPrimaryCandidate,
 } from "./report.ts";
-import type { FlowTip } from "./tips.ts";
+import { hasRepeatedInteraction, type FlowTip } from "./tips.ts";
 import {
   detectRepeatedCandidates,
   eventsToSteps,
@@ -410,6 +410,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
   async function maybeFlowTip(sessionId: string, events: Event[]): Promise<void> {
     if (!deps.suggestFlowTip || flowTipPending) return;
+    if (!hasRepeatedInteraction(events)) return;
     const lastCheck = flowTipCheckedAt.get(sessionId) ?? 0;
     if (now() - lastCheck < 60_000) return;
     flowTipCheckedAt.set(sessionId, now());

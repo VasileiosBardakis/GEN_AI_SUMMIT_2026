@@ -120,7 +120,7 @@ export function exactStepKey(step: Step): string {
   return `${step.action}:${step.target?.[0]?.kind ?? ""}:${step.target?.[0]?.value ?? ""}`;
 }
 
-const STEP_META_EVENT_TYPES = new Set<Event["type"]>([
+const CORE_STEP_EVENT_TYPES: readonly Event["type"][] = [
   "click",
   "input",
   "change",
@@ -128,6 +128,21 @@ const STEP_META_EVENT_TYPES = new Set<Event["type"]>([
   "copy",
   "nav",
   "submit",
+];
+
+export const STEP_TRIGGER_TYPES = new Set<Event["type"]>([
+  ...CORE_STEP_EVENT_TYPES,
+  "tab_switch",
+]);
+
+const STEP_META_EVENT_TYPES = new Set<Event["type"]>([
+  ...CORE_STEP_EVENT_TYPES,
+  "key",
+  "keydown",
+]);
+
+export const V2_STEP_EVENT_TYPES = new Set<Event["type"]>([
+  ...STEP_TRIGGER_TYPES,
   "key",
   "keydown",
 ]);

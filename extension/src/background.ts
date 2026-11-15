@@ -10,9 +10,11 @@ import {
   libraryEntryToOptimization,
   mergeServerAndLocalOptimizations,
   recordOptimizationRun,
+  suggestionToOptimization,
   upsertOptimizationItem,
   type OptimizationItem,
 } from "./library.ts";
+import { buildDeciderSuggestion } from "./suggestion.ts";
 import {
   DEFAULT_SERVER_URL,
   isExactHostMatch,
@@ -983,6 +985,7 @@ function collectMatchingPrecheckSteps(
 export interface HandsCommand {
   id?: string;
   kind?: "run" | "decide" | "precheck";
+  isRecall?: boolean;
   name?: string;
   solution?: string;
   script?: V2ActionScript;
@@ -1024,6 +1027,30 @@ export async function handleHandsCommand(
         ? decideScript.params
         : undefined;
     console.log("[eyes-bg] received decide command", decideId, decideName);
+    if (!cmd.isRecall) {
+      const suggestion = buildDeciderSuggestion({
+        name: decideName ?? "",
+        solution: decideSolution,
+        script: decideScript as unknown as Parameters<typeof buildDeciderSuggestion>[0]["script"],
+        pauseBeforeSubmit,
+        runMode,
+        params: Array.isArray(rawParams) ? rawParams : undefined,
+        primaryLabel: cmd.primaryLabel,
+        pauseNotice: cmd.pauseNotice,
+      });
+      const appHost =
+        tryHostFromUrl(lastActiveTab?.url) ??
+        decideScript.steps.find((s): s is Extract<typeof s, { action: "switchTab" }> => s.action === "switchTab")?.host ??
+        "Browser";
+      const suggestedItem = suggestionToOptimization(suggestion, {
+        app: appHost,
+        status: "suggested",
+      });
+      suggestedItem.script = decideScript as unknown as ActionScript;
+      void loadLibrary()
+        .then((items) => saveLibrary(upsertOptimizationItem(items, suggestedItem)))
+        .catch(() => {});
+    }
     void (async () => {
       let payload: {
         id: string;

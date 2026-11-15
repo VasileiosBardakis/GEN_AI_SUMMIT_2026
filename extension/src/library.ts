@@ -289,9 +289,20 @@ export function mergeServerAndLocalOptimizations(
     }
   }
 
+  const serverSignatures = new Set(
+    serverEntries.map((entry) => `${entry.name}\0${entry.solution}`)
+  );
+
   for (const item of localItems) {
     if (serverIds.has(item.id)) continue;
     if (DEFAULT_MOCK_IDS.has(item.id)) continue;
+    if (
+      item.id.startsWith("decider_") &&
+      item.solution &&
+      serverSignatures.has(`${item.title}\0${item.solution}`)
+    ) {
+      continue;
+    }
     merged.push(item);
   }
 
