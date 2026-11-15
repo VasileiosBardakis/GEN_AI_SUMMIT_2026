@@ -59,7 +59,9 @@ export type GeminiSdk = {
       contents: string;
       config?: {
         responseMimeType?: string;
+        responseSchema?: unknown;
         thinkingConfig?: { thinkingBudget?: number };
+        abortSignal?: AbortSignal;
       };
     }): Promise<{ text?: string }>;
   };
@@ -72,6 +74,8 @@ export type GeminiClientOptions = {
   sdk?: GeminiSdk;
   apiKey?: string;
   thinkingBudget?: number;
+  responseSchema?: unknown;
+  timeoutMs?: number;
 };
 
 export type GeminiClient = {
@@ -83,6 +87,34 @@ function stripJsonCodeFences(text: string): string {
   const trimmed = text.trim();
   const fenced = /^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```$/i.exec(trimmed);
   return fenced ? fenced[1].trim() : trimmed;
+}
+
+function raceWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(
+      new Error(`Gemini request timed out after ${timeoutMs} ms`),
+    );
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(new Error(`Gemini request timed out after ${timeoutMs} ms`));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 export function createGeminiClient(options?: GeminiClientOptions): GeminiClient {
@@ -128,16 +160,32 @@ export function createGeminiClient(options?: GeminiClientOptions): GeminiClient 
       try {
         const config: {
           responseMimeType?: string;
+          responseSchema?: unknown;
           thinkingConfig?: { thinkingBudget?: number };
+          abortSignal?: AbortSignal;
         } = { responseMimeType: "application/json" };
         if (options?.thinkingBudget !== undefined) {
           config.thinkingConfig = { thinkingBudget: options.thinkingBudget };
         }
-        const response = await sdk.models.generateContent({
+        if (options?.responseSchema !== undefined) {
+          config.responseSchema = options.responseSchema;
+        }
+        let signal: AbortSignal | undefined;
+        if (options?.timeoutMs !== undefined) {
+          if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+            throw new Error(`Gemini request timed out after ${options.timeoutMs} ms`);
+          }
+          signal = AbortSignal.timeout(options.timeoutMs);
+          config.abortSignal = signal;
+        }
+        const generatePromise = sdk.models.generateContent({
           model,
           contents: prompt,
           config,
         });
+        const response = signal
+          ? await raceWithAbort(generatePromise, signal, options!.timeoutMs!)
+          : await generatePromise;
         if (!response.text || response.text.trim().length === 0) {
           throw new Error("Gemini returned an empty JSON response.");
         }

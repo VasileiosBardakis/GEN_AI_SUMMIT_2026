@@ -6,9 +6,11 @@ import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import {
   buildLibraryEntryFromScript,
+  buildStartSignature,
   implementForLibrary,
   implementSolution,
   type ImplementContext,
+  type StartSignature,
 } from "./hands/implementor.ts";
 import {
   deleteLibraryEntry,
@@ -24,12 +26,23 @@ import {
   type LibraryEntry,
   type Locator,
 } from "./hands/types.ts";
-import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
-import { createProposer, type HandsDecision, type HandsOutcome } from "./propose.ts";
-import { buildCombinedReport, buildReport } from "./report.ts";
+import {
+  DEFAULT_GEMINI_MODEL,
+  type GeminiClient,
+  type GeminiClientOptions,
+} from "./llm/gemini.ts";
+import type { IrisJudgeOptions } from "./llm/iris.ts";
+import {
+  createProposer,
+  type HandsDecision,
+  type HandsOutcome,
+  type StageLogEvent,
+} from "./propose.ts";
+import { buildCombinedReport, buildReport, resolvePipeline } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
 import { appendEvents, listSessions, readEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
+import { compileWorkflow, type IrisWorkflowJudge } from "./v2/index.ts";
 
 const RECENT_SESSION_WINDOW_MS = 30 * 60 * 1000;
 
@@ -70,22 +83,73 @@ function hasAllCachedScripts(
 export type CreateServerOptions = {
   tracesDir: string;
   dataDir?: string;
+  pipeline?: "v1" | "v2";
   implement?: (solution: string, opts?: { name?: string }) => Promise<ActionScript>;
   gemini?: GeminiClient | GeminiClientOptions;
+  iris?: IrisJudgeOptions | IrisWorkflowJudge;
   implementLibrary?: (
     solution: string,
     opts?: { name?: string; context?: ImplementContext },
   ) => Promise<LibraryEntry>;
   autoPropose?: boolean;
   proposeDebounceMs?: number;
+  siteCooldownMs?: number;
+  precheckTimeoutMs?: number;
+  now?: () => number;
+  stageLog?: (event: StageLogEvent) => void;
 };
 
 type HandsCommand =
   | { id: string; kind?: "run"; script: ActionScript }
-  | { id: string; kind: "decide"; name: string; solution: string; script: ActionScript };
+  | { id: string; kind: "decide"; name: string; solution: string; script: ActionScript }
+  | {
+      id: string;
+      kind: "precheck";
+      script: ActionScript;
+      steps: ActionScript["steps"];
+      url?: string;
+    };
+
+function formatStartSignature(sig: StartSignature): string {
+  const host = sig.host ?? "*";
+  const urlPattern = sig.urlPattern ?? "/*";
+  const firstLoc = sig.locators[0];
+  const targetPart = firstLoc
+    ? `${firstLoc.kind}:${firstLoc.value}`
+    : sig.roles[0]
+      ? `${sig.roles[0]}:${sig.labelContains[0] ?? ""}`
+      : sig.labelContains[0] ?? "";
+  return `${host}|${urlPattern}|${sig.action}${targetPart ? `:${targetPart}` : ""}`;
+}
+
+function countFlatScriptSteps(steps: ActionScript["steps"]): number {
+  let count = 0;
+  for (const step of steps) {
+    if (step.action === "forEach") {
+      count += countFlatScriptSteps(step.steps);
+    } else {
+      count += 1;
+    }
+  }
+  return count;
+}
 
 export function createServer(opts: CreateServerOptions): http.Server {
+  const pipeline = resolvePipeline(opts.pipeline);
   const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
+  const modelName = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+  const stageLogEnvEnabled =
+    process.env.BRAIN_STAGE_LOG === "1" || process.env.BRAIN_STAGE_LOG === "true";
+  const emitStageLog =
+    opts.stageLog || stageLogEnvEnabled
+      ? (ev: StageLogEvent) => {
+          opts.stageLog?.(ev);
+          if (stageLogEnvEnabled) {
+            console.log(`[v2:stage] ${JSON.stringify(ev)}`);
+          }
+        }
+      : undefined;
+  const precheckTimeoutMs = opts.precheckTimeoutMs ?? 5000;
   let latestScript: ActionScript | null = null;
   const scriptsByFindingId = new Map<string, ActionScript>();
   const reportCache = new Map<string, Report>();
@@ -340,11 +404,14 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const autoPropose = opts.autoPropose ?? process.env.BRAIN_AUTO_PROPOSE !== "0";
   const proposer = autoPropose
     ? createProposer({
+        pipeline,
         runReport: async (sessionId) => {
           const reportOpts = {
+            pipeline,
             dataDir,
             llm: true,
             gemini: opts.gemini,
+            iris: opts.iris,
             implement,
             scriptStore: scriptsByFindingId,
           };
@@ -368,6 +435,83 @@ export function createServer(opts: CreateServerOptions): http.Server {
             scripts: scriptsByFindingId,
           };
         },
+        readSessionEvents: (sessionId) => readEvents(opts.tracesDir, sessionId),
+        compileV2: (input) =>
+          compileWorkflow(input, { gemini: opts.gemini, iris: opts.iris }),
+        precheck: (script, meta) =>
+          awaitHands(
+            {
+              id: crypto.randomUUID(),
+              kind: "precheck",
+              script,
+              steps: script.steps,
+              ...(meta.startUrl ? { url: meta.startUrl } : {}),
+            },
+            precheckTimeoutMs,
+            "Timed out waiting for extension precheck",
+          ),
+        onCompiled: ({ finding, script }) => {
+          scriptsByFindingId.set(finding.id, script);
+          latestScript = script;
+        },
+        onApproved: async ({ sessionId, script, workflow, finding }) => {
+          const context: ImplementContext = {
+            ...(workflow?.apps[0] ? { app: workflow.apps[0] } : {}),
+            ...(workflow?.startUrl ? { url: workflow.startUrl } : {}),
+          };
+          const built = buildLibraryEntryFromScript({
+            name: workflow?.name ?? script.name ?? finding.title,
+            description: workflow?.reason ?? finding.why,
+            kind:
+              workflow?.kind ??
+              (finding.verdict === "rung1" ? "snippet" : "workflow"),
+            solution: finding.why || script.name || finding.title,
+            script,
+            context,
+            status: "active",
+          });
+          const sigObj = buildStartSignature(script, context);
+          const startSignature = formatStartSignature(sigObj);
+          const stats = workflow
+            ? {
+                repetitions: workflow.stats.repetitions,
+                stepCount: countFlatScriptSteps(script.steps),
+                manualSeconds: workflow.stats.manualSeconds,
+                replaySeconds: workflow.stats.replaySeconds,
+                timeSavedSeconds: Math.max(
+                  0,
+                  Number(
+                    (
+                      workflow.stats.manualSeconds - workflow.stats.replaySeconds
+                    ).toFixed(2),
+                  ),
+                ),
+              }
+            : undefined;
+          const entryWithMeta: LibraryEntry = {
+            ...built,
+            startSignature,
+            ...(stats ? { stats } : {}),
+          };
+          const { entry } = await upsertLibraryEntry(dataDir, entryWithMeta);
+          latestScript = entry.script;
+          scriptsByFindingId.set(finding.id, entry.script);
+          reportCache.clear();
+          emitStageLog?.({
+            stage: "save_skill",
+            session: sessionId,
+            ts: opts.now ? opts.now() : Date.now(),
+            entryId: entry.id,
+            kind: entry.kind,
+            runMode: script.runMode ?? "save_only",
+            startSignature: entry.startSignature,
+            name: entry.name,
+          });
+          return {
+            shouldRun:
+              script.runMode === "run_remaining" || entry.kind === "snippet",
+          };
+        },
         requestDecision: (name, solution, script) =>
           awaitHands(
             { id: crypto.randomUUID(), kind: "decide", name, solution, script },
@@ -375,6 +519,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
           ),
         runScript: (script) => awaitHands({ id: crypto.randomUUID(), script }, 30000),
         debounceMs: opts.proposeDebounceMs,
+        siteCooldownMs: opts.siteCooldownMs,
+        now: opts.now,
+        stageLog: emitStageLog,
         log: (line) => console.log(line),
       })
     : null;
@@ -417,7 +564,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
       }
 
       if (req.method === "GET" && url.pathname === "/health") {
-        sendJson(res, 200, { ok: true });
+        sendJson(res, 200, { ok: true, pipeline, autoPropose, model: modelName });
         return;
       }
 
@@ -426,9 +573,11 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const llmParam = url.searchParams.get("llm");
         const llm = llmParam !== "0" && llmParam !== "false";
         const reportOpts = {
+          pipeline,
           dataDir,
           llm,
           gemini: opts.gemini,
+          iris: opts.iris,
           implement,
           scriptStore: scriptsByFindingId,
         };
@@ -436,7 +585,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         let cacheSig: string;
         if (sessionParam && sessionParam.length > 0) {
           const events = await readEvents(opts.tracesDir, sessionParam);
-          cacheSig = `${sessionParam}|${llm ? 1 : 0}|${sessionParam}:${events.length}:${events.at(-1)?.ts ?? 0}`;
+          cacheSig = `${pipeline}|${sessionParam}|${llm ? 1 : 0}|${sessionParam}:${events.length}:${events.at(-1)?.ts ?? 0}`;
           const cached = reportCache.get(cacheSig);
           if (cached && hasAllCachedScripts(cached, scriptsByFindingId)) {
             sendJson(res, 200, cached);
@@ -444,19 +593,21 @@ export function createServer(opts: CreateServerOptions): http.Server {
           }
           report = await buildReport(sessionParam, events, reportOpts);
         } else {
-          const cutoffMs = Date.now() - RECENT_SESSION_WINDOW_MS;
           const sessions = await listSessions(opts.tracesDir);
-          const recentSessions = sessions.filter((s) => s.mtimeMs >= cutoffMs);
+          const targetSessions =
+            pipeline === "v2"
+              ? sessions
+              : sessions.filter((s) => s.mtimeMs >= Date.now() - RECENT_SESSION_WINDOW_MS);
           const sessionEvents = await Promise.all(
-            recentSessions.map((s) => readEvents(opts.tracesDir, s.session)),
+            targetSessions.map((s) => readEvents(opts.tracesDir, s.session)),
           );
-          const perSessionSig = recentSessions
+          const perSessionSig = targetSessions
             .map((s, idx) => {
               const evs = sessionEvents[idx] ?? [];
               return `${s.session}:${evs.length}:${evs.at(-1)?.ts ?? 0}`;
             })
             .join(",");
-          cacheSig = `all|${llm ? 1 : 0}|${perSessionSig}`;
+          cacheSig = `${pipeline}|all|${llm ? 1 : 0}|${perSessionSig}`;
           const cached = reportCache.get(cacheSig);
           if (cached && hasAllCachedScripts(cached, scriptsByFindingId)) {
             sendJson(res, 200, cached);
@@ -495,7 +646,10 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const scrubbed = validation.events.length - events.filter((e) => original.has(e)).length;
 
         await appendEvents(opts.tracesDir, events);
-        if (events.some((e) => e.type === "nav" && e.meta?.subType === "page_load")) {
+        if (
+          pipeline !== "v2" &&
+          events.some((e) => e.type === "nav" && e.meta?.subType === "page_load")
+        ) {
           for (let i = commandQueue.length - 1; i >= 0; i--) {
             if (commandQueue[i]?.kind === "decide") {
               const stale = commandQueue.splice(i, 1)[0];
@@ -517,26 +671,63 @@ export function createServer(opts: CreateServerOptions): http.Server {
         }
         const entries = await readLibrary(dataDir).catch(() => []);
         if (entries.length > 0) {
-          const matched = recallMatcher.matchEventsWithEvent(events, entries);
-          if (matched) {
-            if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
-              if (commandQueue.some((c) => c.id === activeLibraryDecide!.commandId)) {
-                cancelCommand(activeLibraryDecide.commandId, "Superseded");
+          if (pipeline === "v2") {
+            const irisOpts: IrisJudgeOptions | undefined =
+              opts.iris && typeof opts.iris === "object"
+                ? opts.iris
+                : typeof opts.iris === "function"
+                  ? { apiKey: "", envPath: "/nonexistent/oumi/env" }
+                  : undefined;
+            void recallMatcher
+              .matchEventsWithIris(events, entries, { irisOpts })
+              .then((matched) => {
+                if (!matched) return;
+                if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
+                  if (commandQueue.some((c) => c.id === activeLibraryDecide!.commandId)) {
+                    cancelCommand(activeLibraryDecide.commandId, "Superseded");
+                  }
+                  activeLibraryDecide = null;
+                }
+                if (!activeLibraryDecide) {
+                  console.log(
+                    `[server] half-detected library match id=${matched.entry.id} name="${matched.entry.name}" -> /decide`,
+                  );
+                  emitStageLog?.({
+                    stage: "recall_match",
+                    session: matched.event.session,
+                    ts: opts.now ? opts.now() : Date.now(),
+                    entryId: matched.entry.id,
+                    name: matched.entry.name,
+                    borderline: matched.borderline,
+                  });
+                  void triggerLibraryRecall(matched.entry, matched.event);
+                }
+              })
+              .catch(() => {});
+          } else {
+            const matched = recallMatcher.matchEventsWithEvent(events, entries);
+            if (matched) {
+              if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
+                if (commandQueue.some((c) => c.id === activeLibraryDecide!.commandId)) {
+                  cancelCommand(activeLibraryDecide.commandId, "Superseded");
+                }
+                activeLibraryDecide = null;
               }
-              activeLibraryDecide = null;
-            }
-            if (!activeLibraryDecide) {
-              console.log(
-                `[server] half-detected library match id=${matched.entry.id} name="${matched.entry.name}" -> /decide`,
-              );
-              void triggerLibraryRecall(matched.entry, matched.event);
+              if (!activeLibraryDecide) {
+                console.log(
+                  `[server] half-detected library match id=${matched.entry.id} name="${matched.entry.name}" -> /decide`,
+                );
+                void triggerLibraryRecall(matched.entry, matched.event);
+              }
             }
           }
         }
         sendJson(res, 200, { ok: true, n: events.length, scrubbed });
         const sessionIds = new Set(events.map((e) => e.session));
-        for (const sessionId of sessionIds) {
-          liveSessions.add(sessionId);
+        if (pipeline !== "v2") {
+          for (const sessionId of sessionIds) {
+            liveSessions.add(sessionId);
+          }
         }
         if (proposer) {
           for (const sessionId of sessionIds) {
