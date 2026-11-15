@@ -99,24 +99,17 @@ export function suggestionToOptimization(
   const status = opts.status ?? "suggested";
   const isText = suggestion.kind === "text";
   const text = suggestion.snippetText ?? suggestion.preview;
-  const timeSavedPerRunSec = isText ? Math.max(8, Math.round(text.length / 4)) : 15;
-  const shortTitle =
-    suggestion.preview.length > 34
-      ? `${suggestion.preview.slice(0, 34).trim()}...`
-      : suggestion.preview;
 
   return {
     id: suggestion.id,
-    title: isText ? `Snippet: "${shortTitle}"` : `Automate "${shortTitle}"`,
-    description: isText
-      ? `Learned from ${suggestion.count} similar entries. Insert in one click.`
-      : `Shortcut replacing ${suggestion.count} repeated clicks on "${shortTitle}".`,
+    title: suggestion.headline,
+    description: suggestion.detail,
     kind: isText ? "snippet" : "workflow",
     status,
     app: opts.app || "Browser",
     preview: suggestion.preview,
     snippetText: isText ? text : undefined,
-    timeSavedPerRunSec,
+    timeSavedPerRunSec: 0,
     runCount: 0,
     totalTimeSavedSec: 0,
     detectedCount: suggestion.count,
@@ -233,13 +226,10 @@ export function libraryEntryToOptimization(entry: LibraryEntryWithStats): Optimi
     firstStep?.action === "insertText" &&
     typeof firstStep.value === "string";
   const snippetText = isSnippet && typeof firstStep.value === "string" ? firstStep.value : undefined;
-  const fallbackTimeSavedPerRunSec = isSnippet && snippetText
-    ? Math.max(8, Math.round(snippetText.length / 4))
-    : Math.max(10, entry.script.steps.length * 6);
   const timeSavedPerRunSec =
     typeof entry.stats?.timeSavedSeconds === "number"
       ? entry.stats.timeSavedSeconds
-      : fallbackTimeSavedPerRunSec;
+      : 0;
   const app = entry.eyes.scope.apps[0] || "Browser";
   const preview = snippetText
     ? snippetText.length > 64
