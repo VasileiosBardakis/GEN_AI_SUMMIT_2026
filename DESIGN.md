@@ -67,8 +67,8 @@ This document defines the visual language, color tokens, typography, and compone
 - **Target / Snippet Preview**:
   - Clickable actions render as a tactile **keycap chip** (`1px solid --line-strong`, subtle `1px` bottom lip).
   - Text snippets render inside a compact `--shell` recessed snippet box.
-- **Automation Replay**: Shown only for non-text automations when an `.mp4` is available. Housed in a `--surface-cinema` (`#171614`) frame with a clean `Automation replay` caption underneath — no technical jargon or status badges.
-- **DAG Flow Canvas**: Always shown (`Your flow` above `Eyes flow`) inside a single recessed `--surface-graph` dot-grid canvas:
+- **Automation Replay**: Shown only for non-text automations when a `.webm` is available. Housed in a `--surface-cinema` (`#171614`) frame with a clean `Automation replay` caption underneath — no technical jargon or status badges. When present, it replaces the duplicate keycap preview and the DAG flow canvas so the card stays minimal.
+- **DAG Flow Canvas**: Shown when no Automation Replay is available (`Your flow` above `Eyes flow`) inside a single recessed `--surface-graph` dot-grid canvas:
   - Connected horizontal mini-cards with micro-icons and SVG directional arrows.
   - `Your flow` includes a curved dashed SVG **loop-back arc** illustrating the repeated manual cycle.
   - `Eyes flow` highlights the collapsed automated step in warm sandstone (`--surface-eyes` / `--brown-border`) and ends cleanly at `Done`.

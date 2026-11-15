@@ -88,6 +88,9 @@ class FakeShadowRoot {
     if (value.includes("data-eyes-primary")) {
       this.bySelector.set("[data-eyes-primary]", [new FakeElement("button")]);
     }
+    if (value.includes("data-eyes-never")) {
+      this.bySelector.set("[data-eyes-never]", [new FakeElement("button")]);
+    }
     if (value.includes("data-eyes-content")) {
       this.bySelector.set("[data-eyes-content]", [new FakeElement("div")]);
     }
@@ -241,6 +244,30 @@ describe("EYES_SHOW_DECIDER popup replacement", () => {
     expect(fakeDocument.documentElement.children).toEqual([hostB]);
   });
 
+  it("keeps the popup minimal when a replay video is available", () => {
+    (globalThis as Record<string, unknown>).chrome = {
+      runtime: {
+        id: "test-extension",
+        getURL: (path: string) => `chrome-extension://test-extension/${path}`,
+      },
+    };
+
+    try {
+      const onMessage = fakeWindow.__HANDS_ON_MESSAGE__;
+      onMessage?.(makeDeciderPayload("Workflow A", "Run workflow A"), null, vi.fn());
+
+      const host = fakeDocument.getElementById("__eyes_suggestion_host__");
+      const html = host?.shadowRoot?.innerHTML ?? "";
+      const body = html.split("</style>")[1] ?? "";
+      expect(body).toContain("chrome-extension://test-extension/dist/replay-demo.webm");
+      expect(body).toContain("data-eyes-replay");
+      expect(body).not.toContain("dag-canvas");
+      expect(body).not.toContain('class="preview keycap"');
+    } finally {
+      delete (globalThis as Record<string, unknown>).chrome;
+    }
+  });
+
   it("resolves popup B on primary click without double-resolving popup A", () => {
     const onMessage = fakeWindow.__HANDS_ON_MESSAGE__;
     expect(onMessage).toBeTypeOf("function");
@@ -293,6 +320,40 @@ describe("EYES_SHOW_DECIDER popup replacement", () => {
     expect(sendResponseB).toHaveBeenCalledTimes(1);
     expect(sendResponseB).toHaveBeenCalledWith({ ok: true, decision: "dismissed" });
     expect(sendResponseA).toHaveBeenCalledTimes(1);
+    expect(fakeDocument.getElementById("__eyes_suggestion_host__")).toBeNull();
+  });
+
+  it("resolves flow tip popup with never when Don't show again is clicked", () => {
+    const onMessage = fakeWindow.__HANDS_ON_MESSAGE__;
+    expect(onMessage).toBeTypeOf("function");
+
+    const sendResponse = vi.fn();
+    const handled = onMessage?.(
+      {
+        kind: "EYES_SHOW_DECIDER",
+        name: "Ctrl+C",
+        solution: "Use Ctrl+C instead of right-click Copy.",
+        primaryLabel: "Got it",
+        script: {
+          name: "Ctrl+C",
+          steps: [{ action: "wait", ms: 0 }],
+        },
+      },
+      null,
+      sendResponse,
+    );
+    expect(handled).toBe(true);
+
+    const host = fakeDocument.getElementById("__eyes_suggestion_host__");
+    const html = host?.shadowRoot?.innerHTML ?? "";
+    expect(html).toContain("Don't show again");
+
+    const neverBtn = host?.shadowRoot?.querySelector("[data-eyes-never]");
+    expect(neverBtn).not.toBeNull();
+    neverBtn?.click();
+
+    expect(sendResponse).toHaveBeenCalledTimes(1);
+    expect(sendResponse).toHaveBeenCalledWith({ ok: true, decision: "never" });
     expect(fakeDocument.getElementById("__eyes_suggestion_host__")).toBeNull();
   });
 });

@@ -731,6 +731,7 @@ export function buildGroundedEyesSpec(input: {
     ? startSig.roles
     : dedupeStrings(
         [
+          ...(context?.targetRole ? [context.targetRole.toLowerCase().trim()] : []),
           ...(rawEyes?.targetHints?.roles ?? []).map((r) => r.toLowerCase().trim()),
           ...startSig.roles,
           ...signals.roles,
@@ -742,6 +743,7 @@ export function buildGroundedEyesSpec(input: {
     ? startSig.locators
     : dedupeLocators(
         [
+          ...(context?.locators ?? []),
           ...startSig.locators,
           ...signals.locators,
           ...(rawEyes?.targetHints?.locators ?? []),
@@ -751,7 +753,14 @@ export function buildGroundedEyesSpec(input: {
 
   const groundedLabels = isSourceRead
     ? startSig.labelContains
-    : cleanHintTokens([...startSig.labelContains, ...signals.labelHints], 8);
+    : cleanHintTokens(
+        [
+          ...(context?.targetLabel ? [context.targetLabel] : []),
+          ...startSig.labelContains,
+          ...signals.labelHints,
+        ],
+        8,
+      );
   const labelContains =
     groundedLabels.length > 0 || locators.length === 0
       ? groundedLabels

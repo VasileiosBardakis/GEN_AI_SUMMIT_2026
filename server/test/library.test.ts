@@ -11,8 +11,16 @@ import {
   signature,
   type LibraryEntry,
 } from "../src/library.ts";
-import { buildLibraryEntryFromScript, buildStartSignature, formatStartSignature } from "../src/hands/implementor.ts";
-import { dedupeLibraryEntries, readLibrary, upsertLibraryEntry } from "../src/hands/library.ts";
+import {
+  buildLibraryEntryFromScript,
+  buildStartSignature,
+  formatStartSignature,
+} from "../src/hands/implementor.ts";
+import {
+  dedupeLibraryEntries,
+  readLibrary,
+  upsertLibraryEntry,
+} from "../src/hands/library.ts";
 
 function makeSteps(count: number, overrides?: Partial<Record<number, Step>>): Step[] {
   const steps: Step[] = [];
@@ -342,6 +350,81 @@ describe("loadLibrary & matchLibrary", () => {
     expect(res.kind).toBe("match");
     expect(res.distance).toBe(0);
     expect(res.entry?.id).toBe("lib_hands_wf");
+  });
+
+  it("upsertLibraryEntry deduplicates snippets by normalized insertText and preserves/merges field locators and labels", async () => {
+    const dataDir = await makeTempDir();
+
+    const firstSnippet = buildLibraryEntryFromScript({
+      name: "Shipping reply v1",
+      solution: "Insert shipping reply into customer reply box.",
+      kind: "snippet",
+      script: {
+        name: "Shipping reply v1",
+        steps: [
+          {
+            action: "insertText",
+            value: "Hi,   thanks for your order.  It ships Friday.",
+          },
+        ],
+      },
+      context: {
+        app: "support.local",
+        url: "http://support.local/tickets/12",
+        targetLabel: "Reply to customer",
+        targetRole: "textbox",
+        locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+      },
+      status: "active",
+      now: 1_000,
+    });
+
+    const savedFirst = await upsertLibraryEntry(dataDir, firstSnippet);
+    expect(savedFirst.items).toHaveLength(1);
+
+    const secondSnippet = buildLibraryEntryFromScript({
+      name: "Shipping reply v2",
+      solution: "Insert the same reply into backup notes field.",
+      kind: "snippet",
+      script: {
+        name: "Shipping reply v2",
+        steps: [
+          {
+            action: "insertText",
+            value: "  hi, thanks for your order. it ships friday. ",
+          },
+        ],
+      },
+      context: {
+        app: "crm.local",
+        url: "http://crm.local/cases/99",
+        targetLabel: "Agent Notes",
+        targetRole: "textbox",
+        locators: [{ kind: "testid", value: "agent-notes-input" }],
+      },
+      status: "active",
+      now: 2_000,
+    });
+
+    expect(secondSnippet.id).not.toBe(firstSnippet.id);
+
+    const savedSecond = await upsertLibraryEntry(dataDir, secondSnippet);
+    expect(savedSecond.items).toHaveLength(1);
+    expect(savedSecond.entry.id).toBe(firstSnippet.id);
+    expect(savedSecond.entry.createdAt).toBe(1_000);
+    expect(savedSecond.entry.updatedAt).toBe(2_000);
+    expect(savedSecond.entry.eyes.scope.apps).toEqual(["support.local", "crm.local"]);
+    expect(savedSecond.entry.eyes.scope.urlPatterns).toEqual(["/tickets/*", "/cases/*"]);
+    expect(savedSecond.entry.eyes.targetHints.locators).toEqual([
+      { kind: "css", value: 'textarea[name="customer_reply"]' },
+      { kind: "testid", value: "agent-notes-input" },
+    ]);
+    expect(savedSecond.entry.eyes.targetHints.labelContains).toContain("reply to customer");
+    expect(savedSecond.entry.eyes.targetHints.labelContains).toContain("agent notes");
+
+    const reloaded = await readLibrary(dataDir);
+    expect(reloaded).toHaveLength(1);
+    expect(reloaded[0].id).toBe(firstSnippet.id);
   });
 
   it("upsertLibraryEntry reuses existing entry across rephrased solution, omitted pre-fill click, and added trailing save step", async () => {

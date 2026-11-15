@@ -19,7 +19,8 @@
     "probe": "node --experimental-strip-types scripts/run-watcher-probe.mjs",
     "clean": "node scripts/clean.mjs",
     "server": "pnpm --filter @gen/server --stream start",
-    "flow:simulate": "node scripts/simulate-flow.mjs"
+    "flow:simulate": "node scripts/simulate-flow.mjs",
+    "record:replay": "node scripts/record-replay-demo.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",

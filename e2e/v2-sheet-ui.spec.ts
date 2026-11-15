@@ -484,6 +484,7 @@ test("BRAIN_PIPELINE=v2 sheet.html client loop runs remaining clients via within
 });
 
 test("BRAIN_PIPELINE=v2 sheet.html client loop against live Gemini + Iris completes remaining clients", async () => {
+  test.skip(true, "removed by f35b69c / GEN-114");
   test.skip(
     !process.env.GOOGLE_CLOUD_PROJECT,
     "GOOGLE_CLOUD_PROJECT must be set for live Gemini + Iris E2E test",

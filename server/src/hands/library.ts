@@ -1,7 +1,14 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { normalizeHost } from "../common/host.ts";
-import { LibraryEntrySchema, toLocatorList, type ActionScript, type LibraryEntry, type Step } from "./types.ts";
+import {
+  LibraryEntrySchema,
+  toLocatorList,
+  type ActionScript,
+  type LibraryEntry,
+  type Locator,
+  type Step,
+} from "./types.ts";
 
 const LIBRARY_FILENAME = "library.json";
 
@@ -110,6 +117,15 @@ function canonicalStepsMatch(a: CanonicalStep, b: CanonicalStep): boolean {
 export function isEquivalentLibraryEntry(a: LibraryEntry, b: LibraryEntry): boolean {
   if (a.id === b.id) return true;
   if (a.kind !== b.kind) return false;
+
+  if (a.kind === "snippet" && b.kind === "snippet") {
+    const textA = getSnippetInsertText(a);
+    const textB = getSnippetInsertText(b);
+    if (textA !== null && textB !== null) {
+      return textA === textB;
+    }
+  }
+
   if (!appsCompatible(a, b)) return false;
 
   const sameStartSig =
@@ -190,10 +206,50 @@ function mergeDuplicateEntries(
       ? existing.status
       : incoming.status;
 
+  const base = preferIncomingContent ? incoming : existing;
+
   return {
-    ...(preferIncomingContent ? incoming : existing),
+    ...base,
     id: existing.id,
     status,
+    eyes: {
+      ...base.eyes,
+      scope: {
+        apps: dedupeStrings([
+          ...existing.eyes.scope.apps,
+          ...incoming.eyes.scope.apps,
+        ]),
+        urlPatterns: dedupeStrings([
+          ...existing.eyes.scope.urlPatterns,
+          ...incoming.eyes.scope.urlPatterns,
+        ]),
+        pageHints: dedupeStrings([
+          ...existing.eyes.scope.pageHints,
+          ...incoming.eyes.scope.pageHints,
+        ]),
+      },
+      targetHints: {
+        roles: dedupeStrings([
+          ...existing.eyes.targetHints.roles,
+          ...incoming.eyes.targetHints.roles,
+        ]),
+        labelContains: dedupeStrings([
+          ...existing.eyes.targetHints.labelContains,
+          ...incoming.eyes.targetHints.labelContains,
+        ]),
+        locators: dedupeLocators([
+          ...existing.eyes.targetHints.locators,
+          ...incoming.eyes.targetHints.locators,
+        ]),
+      },
+      textHints: {
+        ...base.eyes.textHints,
+        prefixHints: dedupeStrings([
+          ...existing.eyes.textHints.prefixHints,
+          ...incoming.eyes.textHints.prefixHints,
+        ]),
+      },
+    },
     createdAt: Math.min(existing.createdAt, incoming.createdAt),
     updatedAt: Math.max(existing.updatedAt, incoming.updatedAt),
     runCount,
@@ -263,17 +319,68 @@ export async function writeLibrary(
   );
 }
 
+function normalizeSnippetText(raw: string): string {
+  return raw.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function getSnippetInsertText(entry: LibraryEntry): string | null {
+  if (entry.kind !== "snippet") return null;
+  const insertStep = entry.script.steps.find(
+    (s): s is Extract<LibraryEntry["script"]["steps"][number], { action: "insertText" }> =>
+      s.action === "insertText",
+  );
+  if (!insertStep || typeof insertStep.value !== "string") return null;
+  const normalized = normalizeSnippetText(insertStep.value);
+  return normalized.length > 0 ? normalized : null;
+}
+
+function dedupeStrings(values: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const val of values) {
+    const clean = val.trim();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+
+function dedupeLocators(locators: readonly Locator[]): Locator[] {
+  const out: Locator[] = [];
+  const seen = new Set<string>();
+  for (const loc of locators) {
+    const value = loc.value.trim();
+    if (!value) continue;
+    const key = `${loc.kind}:${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ kind: loc.kind, value });
+  }
+  return out;
+}
+
 export async function upsertLibraryEntry(
   dataDir: string,
   incoming: LibraryEntry,
 ): Promise<{ entry: LibraryEntry; items: LibraryEntry[] }> {
   const validIncoming = LibraryEntrySchema.parse(incoming);
   const existingItems = dedupeLibraryEntries(await readLibrary(dataDir));
-  const exactIdx = existingItems.findIndex((item) => item.id === validIncoming.id);
-  const idx =
-    exactIdx !== -1
-      ? exactIdx
-      : existingItems.findIndex((item) => isEquivalentLibraryEntry(item, validIncoming));
+  let idx = existingItems.findIndex((item) => item.id === validIncoming.id);
+
+  if (idx === -1 && validIncoming.kind === "snippet") {
+    const incomingText = getSnippetInsertText(validIncoming);
+    if (incomingText !== null) {
+      idx = existingItems.findIndex(
+        (item) => getSnippetInsertText(item) === incomingText,
+      );
+    }
+  }
+  if (idx === -1) {
+    idx = existingItems.findIndex((item) =>
+      isEquivalentLibraryEntry(item, validIncoming),
+    );
+  }
 
   if (idx === -1) {
     const next = [validIncoming, ...existingItems];
@@ -283,7 +390,6 @@ export async function upsertLibraryEntry(
 
   const existing = existingItems[idx];
   const merged = mergeDuplicateEntries(existing, validIncoming);
-  merged.status = existing.status;
   merged.updatedAt = validIncoming.updatedAt;
   const next = existingItems.slice();
   next[idx] = merged;

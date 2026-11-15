@@ -4,6 +4,11 @@ import path from "node:path";
 import type { Event, Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
+import {
+  readFallbackDemoVideo,
+  recordScriptReplay,
+  warmReplayBrowser,
+} from "./replay-video.ts";
 import { STEP_TRIGGER_TYPES } from "./common/target.ts";
 import {
   buildLibraryEntryFromScript,
@@ -19,10 +24,15 @@ import {
   recordLibraryRun,
   upsertLibraryEntry,
 } from "./hands/library.ts";
-import { createLibraryRecallMatcher } from "./hands/recall.ts";
+import {
+  computeMatchedPrefix,
+  createLibraryRecallMatcher,
+  extractMatchedPrefixBindings,
+} from "./hands/recall.ts";
 import {
   LibraryEntrySchema,
   parseActionScript,
+  toLocatorList,
   type ActionScript,
   type LibraryEntry,
   type Locator,
@@ -32,7 +42,7 @@ import {
   type GeminiClient,
   type GeminiClientOptions,
 } from "./llm/gemini.ts";
-import type { IrisJudgeOptions } from "./llm/iris.ts";
+import { judgeWorkflowIris, type IrisJudgeOptions } from "./llm/iris.ts";
 import {
   collectFlatSteps,
   createProposer,
@@ -102,16 +112,27 @@ export type CreateServerOptions = {
 };
 
 type HandsCommand =
-  | { id: string; kind?: "run"; script: ActionScript; paramValues?: Record<string, string> }
+  | {
+      id: string;
+      kind?: "run";
+      script: ActionScript;
+      paramValues?: Record<string, string>;
+      url?: string;
+      tabId?: number;
+      skipRowValues?: string[];
+    }
   | {
       id: string;
       kind: "decide";
       name: string;
       solution: string;
       script: ActionScript;
+      videoUrl?: string;
       primaryLabel?: string;
       isRecall?: boolean;
       entryId?: string;
+      url?: string;
+      tabId?: number;
     }
   | {
       id: string;
@@ -151,6 +172,55 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const precheckTimeoutMs = opts.precheckTimeoutMs ?? 10000;
   let latestScript: ActionScript | null = null;
   const scriptsByFindingId = new Map<string, ActionScript>();
+  const lastUrlByHost = new Map<string, string>();
+  let lastActiveUrl: string | undefined;
+  let browserWarmed = false;
+  const replayVideosByEntryId = new Map<string, Promise<Buffer | null>>();
+  const replayVideosByScriptKey = new Map<string, Promise<Buffer | null>>();
+  const decideMetaById = new Map<
+    string,
+    {
+      script: ActionScript;
+      entryId?: string;
+      fallbackUrl?: string;
+      videoPromise?: Promise<Buffer | null>;
+    }
+  >();
+
+  function scriptCacheKey(script: ActionScript): string {
+    return JSON.stringify(script.steps ?? []);
+  }
+
+  function startOrGetScriptReplay(
+    script: ActionScript,
+    fallbackUrl?: string,
+  ): Promise<Buffer | null> {
+    const key = scriptCacheKey(script);
+    const existing = replayVideosByScriptKey.get(key);
+    if (existing) return existing;
+    const promise = recordScriptReplay(script, {
+      hostUrls: lastUrlByHost,
+      fallbackUrl: fallbackUrl ?? lastActiveUrl,
+    });
+    replayVideosByScriptKey.set(key, promise);
+    return promise;
+  }
+
+  function getOrStartReplayVideo(id: string): Promise<Buffer | null> | undefined {
+    const meta = decideMetaById.get(id);
+    if (!meta) return undefined;
+    if (meta.entryId && replayVideosByEntryId.has(meta.entryId)) {
+      return replayVideosByEntryId.get(meta.entryId);
+    }
+    if (!meta.videoPromise) {
+      const promise = startOrGetScriptReplay(meta.script, meta.fallbackUrl);
+      meta.videoPromise = promise;
+      if (meta.entryId) {
+        replayVideosByEntryId.set(meta.entryId, promise);
+      }
+    }
+    return meta.videoPromise;
+  }
   const reportCache = new Map<string, Report>();
   const compileLibraryEntry = async (
     solution: string,
@@ -261,6 +331,26 @@ export function createServer(opts: CreateServerOptions): http.Server {
     timeoutMs: number,
     timeoutError?: string,
   ): Promise<HandsOutcome> {
+    if (cmd.kind === "decide") {
+      const steps = cmd.script.steps ?? [];
+      const firstStep = steps[0];
+      const isSingleInsert =
+        steps.length === 1 &&
+        firstStep?.action === "insertText" &&
+        !("target" in firstStep && firstStep.target);
+      const isFlowTip = cmd.primaryLabel?.trim() === "Got it";
+      if (!isSingleInsert && !isFlowTip && steps.length > 0) {
+        cmd.videoUrl = `/replay/${cmd.id}.webm`;
+        decideMetaById.set(cmd.id, {
+          script: cmd.script,
+          entryId: cmd.entryId,
+          fallbackUrl: lastActiveUrl,
+        });
+        if (!process.env.VITEST) {
+          void getOrStartReplayVideo(cmd.id);
+        }
+      }
+    }
     return new Promise<HandsOutcome>((resolve) => {
       const timer = setTimeout(() => {
         waiters.delete(cmd.id);
@@ -293,6 +383,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
     primaryLabel?: string;
     isRecall?: boolean;
     entryId?: string;
+    url?: string;
+    tabId?: number;
     timeoutMs?: number;
   }): Promise<{ id: string; outcome: HandsOutcome }> {
     const id = input.id ?? crypto.randomUUID();
@@ -310,12 +402,129 @@ export function createServer(opts: CreateServerOptions): http.Server {
         ...(input.primaryLabel ? { primaryLabel: input.primaryLabel } : {}),
         ...(input.isRecall ? { isRecall: true } : {}),
         ...(input.entryId ? { entryId: input.entryId } : {}),
+        ...(input.url ? { url: input.url } : {}),
+        ...(input.tabId !== undefined ? { tabId: input.tabId } : {}),
       },
       timeoutMs,
       "Timed out waiting for user decision",
     );
     console.log(`[server] decide id=${id} resolved:`, outcome.decision ?? outcome.error);
     return { id, outcome };
+  }
+
+  function sliceRecallSteps(
+    steps: ActionScript["steps"],
+    startStepIndex: number,
+  ): ActionScript["steps"] {
+    if (startStepIndex <= 0 || startStepIndex >= steps.length) {
+      return steps;
+    }
+    const prefix = steps.slice(0, startStepIndex);
+    const remaining = steps.slice(startStepIndex);
+    const neededLoopBinds = new Set<string>();
+    for (const s of remaining) {
+      if (s.action === "forEach" && typeof s.items === "string" && s.items.trim()) {
+        neededLoopBinds.add(s.items.trim());
+      }
+    }
+    if (neededLoopBinds.size > 0) {
+      const hasExtractInRemaining = new Set(
+        remaining
+          .filter(
+            (s): s is Extract<ActionScript["steps"][number], { action: "extractList" }> =>
+              s.action === "extractList",
+          )
+          .map((s) => s.bind),
+      );
+      const preservedExtracts = prefix.filter(
+        (s): s is Extract<ActionScript["steps"][number], { action: "extractList" }> =>
+          s.action === "extractList" &&
+          neededLoopBinds.has(s.bind) &&
+          !hasExtractInRemaining.has(s.bind),
+      );
+      if (preservedExtracts.length > 0) {
+        return [...preservedExtracts, ...remaining];
+      }
+    }
+    return remaining;
+  }
+
+  function mergeBoundParams(
+    params: ActionScript["params"],
+    boundValues: Record<string, string>,
+  ): ActionScript["params"] {
+    const entries = Object.entries(boundValues).filter(([, v]) => v.length > 0);
+    if (entries.length === 0) return params;
+    const out = params ? params.map((p) => ({ ...p })) : [];
+    for (const [name, value] of entries) {
+      const idx = out.findIndex((p) => p.name === name);
+      if (idx >= 0) {
+        if (!out[idx].example) out[idx].example = value;
+      } else {
+        out.push({ name, example: value });
+      }
+    }
+    return out.length > 0 ? out : undefined;
+  }
+
+  function findTypedFieldEvent(
+    sessionEvents: readonly Event[],
+    typedStep: ActionScript["steps"][number] | undefined,
+    stepLocators: readonly Locator[],
+  ): Event | undefined {
+    const candidates = sessionEvents.filter(
+      (ev) =>
+        (ev.type === "input" ||
+          ev.type === "change" ||
+          ev.type === "paste" ||
+          ev.type === "focus") &&
+        Boolean(ev.target?.locators?.length),
+    );
+    if (candidates.length === 0) return undefined;
+
+    if (stepLocators.length > 0) {
+      for (let i = candidates.length - 1; i >= 0; i -= 1) {
+        const ev = candidates[i];
+        const hit = ev.target?.locators?.some((el) =>
+          stepLocators.some(
+            (sl) =>
+              sl.kind === el.kind &&
+              sl.value.trim().toLowerCase() === el.value.trim().toLowerCase(),
+          ),
+        );
+        if (hit) return ev;
+      }
+    }
+
+    if (
+      typedStep &&
+      "value" in typedStep &&
+      typeof typedStep.value === "string" &&
+      typedStep.value.trim().length > 0
+    ) {
+      const needle = typedStep.value.trim().toLowerCase();
+      for (let i = candidates.length - 1; i >= 0; i -= 1) {
+        const ev = candidates[i];
+        const val = (ev.value ?? ev.clipboard?.text ?? "").trim().toLowerCase();
+        if (val && (val === needle || val.includes(needle))) {
+          return ev;
+        }
+      }
+    }
+
+    for (let i = candidates.length - 1; i >= 0; i -= 1) {
+      if (candidates[i].type !== "focus") return candidates[i];
+    }
+    return candidates[candidates.length - 1];
+  }
+
+  function inferRoleFromTag(tag?: string): string | undefined {
+    const clean = tag?.trim().toLowerCase();
+    if (!clean) return undefined;
+    if (clean === "input" || clean === "textarea") return "textbox";
+    if (clean === "select") return "combobox";
+    if (clean === "button") return "button";
+    return undefined;
   }
 
   async function triggerLibraryRecall(entry: LibraryEntry, matchedEvent?: Event): Promise<void> {
@@ -325,10 +534,25 @@ export function createServer(opts: CreateServerOptions): http.Server {
     const targetKey = targetLocator ? `${targetLocator.kind}:${targetLocator.value}` : null;
     activeLibraryDecide = { entryId: entry.id, commandId, targetKey };
     try {
-      const recallDecideScript: ActionScript =
-        entry.script.runMode === "save_only"
-          ? { ...entry.script, runMode: "run_remaining" }
-          : entry.script;
+      const sessionEvents = matchedEvent?.session
+        ? await readEvents(opts.tracesDir, matchedEvent.session).catch(() => [])
+        : [];
+      const { startStepIndex, completedValues } = computeMatchedPrefix(
+        sessionEvents,
+        entry,
+      );
+      const boundValues =
+        startStepIndex > 0 ? extractMatchedPrefixBindings(sessionEvents, entry) : {};
+      const adjustedSteps = sliceRecallSteps(entry.script.steps, startStepIndex);
+
+      const recallDecideScript: ActionScript = {
+        ...entry.script,
+        steps: adjustedSteps,
+        ...(entry.script.runMode === "save_only" ? { runMode: "run_remaining" as const } : {}),
+      };
+      const matchedTabId =
+        typeof matchedEvent?.meta?.tabId === "number" ? matchedEvent.meta.tabId : undefined;
+      const matchedUrl = typeof matchedEvent?.url === "string" ? matchedEvent.url : undefined;
       const { outcome } = await requestDecision({
         id: commandId,
         name: entry.name,
@@ -336,6 +560,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
         script: recallDecideScript,
         isRecall: true,
         entryId: entry.id,
+        ...(matchedUrl ? { url: matchedUrl } : {}),
+        ...(matchedTabId !== undefined ? { tabId: matchedTabId } : {}),
       });
       if (
         !outcome.ok &&
@@ -350,26 +576,32 @@ export function createServer(opts: CreateServerOptions): http.Server {
         }
         await recordLibraryRun(dataDir, entry.id).catch(() => {});
         const runId = crypto.randomUUID();
-        const firstStep = entry.script.steps[0];
-        const scriptToRun: ActionScript =
+        const firstAdjusted = adjustedSteps[0];
+        const runSteps: ActionScript["steps"] =
           entry.kind === "snippet" &&
-          entry.script.steps.length === 1 &&
-          firstStep?.action === "insertText" &&
-          !firstStep.target &&
+          adjustedSteps.length === 1 &&
+          firstAdjusted?.action === "insertText" &&
+          !firstAdjusted.target &&
           targetLocator
-            ? {
-                ...entry.script,
-                steps: [{ ...firstStep, target: targetLocator }],
-              }
-            : entry.script;
+            ? [{ ...firstAdjusted, target: targetLocator }]
+            : adjustedSteps;
+        const mergedParams = mergeBoundParams(entry.script.params, boundValues);
+        const scriptToRun: ActionScript = {
+          ...entry.script,
+          steps: runSteps,
+          ...(mergedParams ? { params: mergedParams } : {}),
+        };
         console.log(
-          `[server] library recall approved id=${entry.id} -> running script runId=${runId} target=${targetLocator?.value ?? "focused"}`,
+          `[server] library recall approved id=${entry.id} -> running script runId=${runId} startStepIndex=${startStepIndex} target=${targetLocator?.value ?? "focused"}`,
         );
         void awaitHands(
           {
             id: runId,
             script: scriptToRun,
             ...(outcome.params ? { paramValues: outcome.params } : {}),
+            ...(entry.kind === "workflow" && matchedUrl ? { url: matchedUrl } : {}),
+            ...(matchedTabId !== undefined ? { tabId: matchedTabId } : {}),
+            ...(completedValues.length > 0 ? { skipRowValues: completedValues } : {}),
           },
           30000,
           "Timed out waiting for extension to execute script",
@@ -393,8 +625,19 @@ export function createServer(opts: CreateServerOptions): http.Server {
     ? createProposer({
         readSessionEvents: (sessionId) => readEvents(opts.tracesDir, sessionId),
         readLibrary: () => readLibrary(dataDir),
-        compileV2: (input) =>
-          compileWorkflow(input, { gemini: opts.gemini, iris: opts.iris }),
+        judgeIris: (digest) =>
+          typeof opts.iris === "function"
+            ? opts.iris(digest)
+            : judgeWorkflowIris(
+                digest,
+                typeof opts.iris === "object" ? opts.iris : undefined,
+              ),
+        compileV2: (input, compileOpts) =>
+          compileWorkflow(input, {
+            gemini: opts.gemini,
+            iris: opts.iris,
+            ...compileOpts,
+          }),
         precheck: (script, meta) =>
           awaitHands(
             {
@@ -407,14 +650,56 @@ export function createServer(opts: CreateServerOptions): http.Server {
             precheckTimeoutMs,
             "Timed out waiting for extension precheck",
           ),
-        onCompiled: ({ finding, script }) => {
+        onCompiled: ({ finding, script, workflow }) => {
           scriptsByFindingId.set(finding.id, script);
           latestScript = script;
+          if (!process.env.VITEST && workflow?.kind !== "snippet") {
+            void startOrGetScriptReplay(script, workflow?.startUrl ?? lastActiveUrl);
+          }
         },
         onApproved: async ({ sessionId, script, workflow, finding }) => {
+          const flatSteps = collectFlatSteps(script.steps);
+          const typedStep =
+            flatSteps.find(
+              (s) => s.action === "insertText" || s.action === "fill",
+            ) ?? flatSteps.find((s) => "target" in s && Boolean(s.target));
+          const stepLocators =
+            typedStep && "target" in typedStep
+              ? toLocatorList(typedStep.target)
+              : [];
+          const sessionEvents = await readEvents(opts.tracesDir, sessionId).catch(
+            () => [],
+          );
+          const typedEvent = findTypedFieldEvent(
+            sessionEvents,
+            typedStep,
+            stepLocators,
+          );
+          const eventLocators = typedEvent?.target?.locators
+            ? typedEvent.target.locators
+                .map(toHandsLocator)
+                .filter((l): l is Locator => Boolean(l))
+            : [];
+          const mergedLocators: Locator[] = [];
+          const seenLocKeys = new Set<string>();
+          for (const loc of [...stepLocators, ...eventLocators]) {
+            const key = `${loc.kind}:${loc.value}`;
+            if (!seenLocKeys.has(key)) {
+              seenLocKeys.add(key);
+              mergedLocators.push(loc);
+            }
+          }
+          const targetLabel = typedEvent?.target?.label?.trim() || undefined;
+          const targetRole =
+            typedEvent?.target?.role?.trim() ||
+            inferRoleFromTag(typedEvent?.target?.tag);
+
           const context: ImplementContext = {
             ...(workflow?.apps[0] ? { app: workflow.apps[0] } : {}),
             ...(workflow?.startUrl ? { url: workflow.startUrl } : {}),
+            ...(mergedLocators.length > 0 ? { locators: mergedLocators } : {}),
+            ...(targetLabel ? { targetLabel } : {}),
+            ...(targetRole ? { targetRole } : {}),
           };
           const built = buildLibraryEntryFromScript({
             name: workflow?.name ?? script.name ?? finding.title,
@@ -454,6 +739,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
           latestScript = entry.script;
           scriptsByFindingId.set(finding.id, entry.script);
           reportCache.clear();
+          if (!process.env.VITEST && entry.kind === "workflow") {
+            replayVideosByEntryId.set(
+              entry.id,
+              recordScriptReplay(entry.script, {
+                hostUrls: lastUrlByHost,
+                fallbackUrl: context.url ?? lastActiveUrl,
+              }),
+            );
+          }
           emitStageLog?.({
             stage: "save_skill",
             session: sessionId,
@@ -469,7 +763,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
               script.runMode === "run_remaining" || entry.kind === "snippet",
           };
         },
-        requestDecision: (name, solution, script, primaryLabel) =>
+        requestDecision: (name, solution, script, primaryLabel, meta) =>
           awaitHands(
             {
               id: crypto.randomUUID(),
@@ -478,6 +772,8 @@ export function createServer(opts: CreateServerOptions): http.Server {
               solution,
               script,
               ...(primaryLabel ? { primaryLabel } : {}),
+              ...(meta?.startUrl ? { url: meta.startUrl } : {}),
+              ...(meta?.tabId !== undefined ? { tabId: meta.tabId } : {}),
             },
             60000,
           ),
@@ -490,17 +786,17 @@ export function createServer(opts: CreateServerOptions): http.Server {
                   : { gemini: opts.tipGemini, exclude },
               )
           : undefined,
-        runScript: (script, paramValues) =>
+        runScript: (script, paramValues, meta) =>
           awaitHands(
             {
               id: crypto.randomUUID(),
               script,
               ...(paramValues ? { paramValues } : {}),
+              ...(meta?.startUrl ? { url: meta.startUrl } : {}),
+              ...(meta?.tabId !== undefined ? { tabId: meta.tabId } : {}),
             },
             30000,
           ),
-        debounceMs: opts.proposeDebounceMs,
-        siteCooldownMs: opts.siteCooldownMs,
         now: opts.now,
         stageLog: emitStageLog,
         log: (line) => console.log(line),
@@ -520,6 +816,31 @@ export function createServer(opts: CreateServerOptions): http.Server {
     const url = new URL(req.url ?? "/", "http://localhost");
 
     try {
+      if (req.method === "GET" && rawPath.startsWith("/replay/")) {
+        let rawName: string;
+        try {
+          rawName = decodeURIComponent(rawPath.slice("/replay/".length));
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid replay id" });
+          return;
+        }
+        const id = rawName.replace(/\.webm$/i, "");
+        const videoPromise = getOrStartReplayVideo(id);
+        const buf = (await videoPromise) ?? (await readFallbackDemoVideo());
+        if (!buf) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Not found");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "video/webm",
+          "Content-Length": String(buf.length),
+          "Cache-Control": "no-store",
+        });
+        res.end(buf);
+        return;
+      }
+
       if (req.method === "GET" && rawPath.startsWith("/artifact/")) {
         let id: string;
         try {
@@ -621,7 +942,22 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const scrubbed = validation.events.length - events.filter((e) => original.has(e)).length;
 
         await appendEvents(opts.tracesDir, events);
+        if (!browserWarmed && !process.env.VITEST) {
+          browserWarmed = true;
+          warmReplayBrowser();
+        }
         for (const evt of events) {
+          if (typeof evt.url === "string" && /^https?:\/\//i.test(evt.url)) {
+            lastActiveUrl = evt.url;
+            if (typeof evt.app === "string" && evt.app.trim().length > 0) {
+              lastUrlByHost.set(evt.app.trim().toLowerCase(), evt.url);
+            }
+            try {
+              lastUrlByHost.set(new URL(evt.url).hostname.toLowerCase(), evt.url);
+            } catch {
+              // ignore malformed URL
+            }
+          }
           if (evt.type === "focus" || evt.type === "click") {
             const visitedKey = extractEditableTargetKey(evt);
             if (visitedKey) recallMatcher.notifyTargetVisited(visitedKey);
@@ -927,7 +1263,12 @@ export function createServer(opts: CreateServerOptions): http.Server {
           script,
           timeoutMs,
         });
-        if (outcome.ok && outcome.decision !== "approved" && outcome.decision !== "dismissed") {
+        if (
+          outcome.ok &&
+          outcome.decision !== "approved" &&
+          outcome.decision !== "dismissed" &&
+          outcome.decision !== "never"
+        ) {
           console.error(`[server] POST /decide id=${id} missing decision in outcome:`, outcome);
           sendJson(res, 502, {
             id,
@@ -1041,7 +1382,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
           return;
         }
         const decision: HandsDecision | undefined =
-          body.decision === "approved" || body.decision === "dismissed"
+          body.decision === "approved" ||
+          body.decision === "dismissed" ||
+          body.decision === "never"
             ? body.decision
             : undefined;
         let params: Record<string, string> | undefined;
