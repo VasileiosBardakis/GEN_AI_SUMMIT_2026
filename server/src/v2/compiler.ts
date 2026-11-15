@@ -295,6 +295,44 @@ function normalizeUrlHost(rawUrl: string): string {
   }
 }
 
+function mergeCapturedNavigateUrl(
+  rawUrl: string,
+  fallbackUrl: string | undefined,
+): string {
+  if (!fallbackUrl) return rawUrl;
+  let parsedRaw: URL;
+  let parsedFallback: URL;
+  try {
+    parsedRaw = new URL(rawUrl);
+    parsedFallback = new URL(fallbackUrl);
+  } catch {
+    return rawUrl;
+  }
+  if (
+    normalizeHost(parsedRaw.hostname) !==
+    normalizeHost(parsedFallback.hostname)
+  ) {
+    return rawUrl;
+  }
+  if (!parsedRaw.port && parsedFallback.port) {
+    parsedRaw.port = parsedFallback.port;
+  }
+  const isOriginOnly =
+    parsedRaw.pathname === "/" &&
+    parsedRaw.search === "" &&
+    parsedRaw.hash === "";
+  const fallbackHasPathOrQuery =
+    parsedFallback.pathname !== "/" || parsedFallback.search !== "";
+  if (
+    isOriginOnly &&
+    fallbackHasPathOrQuery &&
+    (!parsedRaw.port || parsedRaw.port === parsedFallback.port)
+  ) {
+    return fallbackUrl;
+  }
+  return parsedRaw.toString();
+}
+
 function stripParamBraces(name: string): string {
   const trimmed = name.trim();
   if (trimmed.startsWith("{{") && trimmed.endsWith("}}")) {
@@ -940,7 +978,7 @@ function buildCompilePrompt(
     "3. Keep all distinct form fields (multi-field Tab forms keep every `fill` via its own `stepIndex`). Always preserve Enter-key submissions (`action: \"key\", key: \"Enter\"` with the `key` step's `stepIndex`) rather than dropping them.",
     "4. Copied values use `readText` with `bind` (REQUIRED on every `readText`, e.g. `\"bind\":\"<varName>\"`, NEVER omit `bind`) and `fill` with `\"{{<varName>}}\"`.",
     "5. User-supplied variables go in `params[]` and `\"{{paramName}}\"`. Never invent placeholder/masked literals; preserve `__PII_*__` tokens if typed literally.",
-    "6. `switchTab` uses `stepIndex` or `host` (hostname only), never `url`.",
+    "6. `switchTab` uses `stepIndex` or `host` (hostname only), never `url`. `navigate` MUST reuse `stepIndex` or keep the full URL including port and path (never strip to bare host/origin).",
     "7. Use `forEach` ONLY when PageSummary Lists is printed below AND has remaining unprocessed items (`runMode: \"run_remaining\"`, `itemIds` = ONLY remaining `itemId`s). Inside `forEach.steps`, only set `withinId` to a container `targetId` from PageSummary Targets (if any) and `withinTextParam` to an item field name from PageSummary Lists. Otherwise set `runMode: \"save_only\"` and emit flat steps.",
     "8. `offerAt2: true` when clearly generalizable at 2 repeats; `risk: \"high\"` for irreversible external actions (payments/wires/deletes/external sends); `suggest: false` only if one-off.",
     "",
@@ -1223,15 +1261,34 @@ function resolveLeafStep(
       };
     }
     case "navigate": {
-      const hostLookupUrl =
-        !raw.url && !captured?.url && raw.host?.trim()
-          ? ctx.indexedSteps.find(
-              (s) =>
-                normalizeHost(s.app) === normalizeHost(raw.host!) && s.url,
-            )?.url
-          : undefined;
-      const rawUrl = raw.url ?? captured?.url ?? hostLookupUrl;
-      if (!rawUrl) {
+      let targetHost: string | undefined;
+      if (raw.url) {
+        try {
+          targetHost = normalizeHost(new URL(raw.url).hostname);
+        } catch {
+          // ignore invalid URL when inferring host
+        }
+      }
+      if (!targetHost && raw.host?.trim()) {
+        targetHost = normalizeHost(raw.host);
+      }
+      if (!targetHost && captured?.app) {
+        targetHost = normalizeHost(captured.app);
+      }
+      const matchingHostUrl = targetHost
+        ? ctx.indexedSteps.find((s) => {
+            if (!s.url) return false;
+            if (normalizeHost(s.app) === targetHost) return true;
+            try {
+              return normalizeHost(new URL(s.url).hostname) === targetHost;
+            } catch {
+              return false;
+            }
+          })?.url
+        : undefined;
+      const fallbackUrl = captured?.url ?? matchingHostUrl;
+      const candidateUrl = raw.url ?? fallbackUrl;
+      if (!candidateUrl) {
         if (raw.host?.trim()) {
           const host = normalizeHost(raw.host);
           return {
@@ -1242,7 +1299,10 @@ function resolveLeafStep(
         }
         return null;
       }
-      const normalized = normalizeUrlHost(restoreText(rawUrl, restoreMap));
+      const mergedUrl = raw.url
+        ? mergeCapturedNavigateUrl(raw.url, fallbackUrl)
+        : candidateUrl;
+      const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
       let navHost = stepHost;
       try {
         navHost = normalizeHost(new URL(normalized).hostname);

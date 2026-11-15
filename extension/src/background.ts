@@ -1428,8 +1428,15 @@ async function runStepsInternal(
         getChromeApi()?.windows ?? (typeof chrome !== "undefined" ? chrome.windows : undefined);
 
       if (step.action === "navigate") {
+        lastFieldFrameByTab.delete(currentTabId);
         await tabsApi?.update?.(currentTabId, { url: step.url });
         await waitForTabLoad(currentTabId);
+        const updatedTab = tabsApi?.get
+          ? await tabsApi.get(currentTabId).catch(() => undefined)
+          : undefined;
+        if (updatedTab?.url?.startsWith("chrome-error://")) {
+          throw new Error(`Navigation failed for ${step.url} (error page)`);
+        }
         results.push({ ok: true, url: step.url });
         continue;
       }
@@ -1589,25 +1596,61 @@ async function executeDomStep(tabId: number, step: V2DomStep): Promise<StepResul
     knownFrameId !== undefined && !hasTarget
       ? { tabId, frameIds: [knownFrameId] }
       : { tabId };
-  if (api?.scripting?.executeScript) {
-    const [injection] = await api.scripting.executeScript({
-      target,
-      func: executeStep,
-      args: [step],
-    });
-    if (!injection?.result) throw new Error("Executor returned no result");
-    return injection.result;
+
+  const invokeExecuteScript = async () => {
+    if (api?.scripting?.executeScript) {
+      return api.scripting.executeScript({
+        target,
+        func: executeStep,
+        args: [step],
+      });
+    }
+    if (typeof chrome !== "undefined" && chrome.scripting?.executeScript) {
+      return chrome.scripting.executeScript({
+        target,
+        func: executeStep,
+        args: [step],
+      });
+    }
+    throw new Error("chrome.scripting.executeScript unavailable");
+  };
+
+  let injections: Array<{ frameId?: number; result?: StepResult }>;
+  try {
+    injections = await invokeExecuteScript();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("Frame with ID 0 is showing error page")) {
+      throw error;
+    }
+    const tabsApi = api?.tabs ?? (typeof chrome !== "undefined" ? chrome.tabs : undefined);
+    let tab = tabsApi?.get ? await tabsApi.get(tabId).catch(() => undefined) : undefined;
+    if (tab?.status === "loading") {
+      await waitForTabLoad(tabId);
+      try {
+        injections = await invokeExecuteScript();
+      } catch (retryError) {
+        const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        if (!retryMessage.includes("Frame with ID 0 is showing error page")) {
+          throw retryError;
+        }
+        tab = tabsApi?.get ? await tabsApi.get(tabId).catch(() => undefined) : undefined;
+        const urlInfo = tab?.url ? ` (${tab.url})` : "";
+        throw new Error(
+          `Tab is showing error page${urlInfo}: Frame with ID 0 is showing error page`,
+        );
+      }
+    } else {
+      const urlInfo = tab?.url ? ` (${tab.url})` : "";
+      throw new Error(
+        `Tab is showing error page${urlInfo}: Frame with ID 0 is showing error page`,
+      );
+    }
   }
-  if (typeof chrome !== "undefined" && chrome.scripting?.executeScript) {
-    const [injection] = await chrome.scripting.executeScript({
-      target,
-      func: executeStep,
-      args: [step],
-    });
-    if (!injection?.result) throw new Error("Executor returned no result");
-    return injection.result;
-  }
-  throw new Error("chrome.scripting.executeScript unavailable");
+
+  const [injection] = injections;
+  if (!injection?.result) throw new Error("Executor returned no result");
+  return injection.result;
 }
 
 export function substitute<T>(value: T, vars: Record<string, unknown>): T {

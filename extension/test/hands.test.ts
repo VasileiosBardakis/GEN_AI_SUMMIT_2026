@@ -1165,3 +1165,149 @@ describe("GEN-69: M2 Hands v2", () => {
     expect(keySequence3).toEqual(["keydown", "keyup"]);
   });
 });
+
+describe("GEN-99: navigate frame reset and chrome-error guards", () => {
+  const originalChrome = (globalThis as Record<string, unknown>).chrome;
+
+  afterEach(() => {
+    stopHandsRun();
+    if (originalChrome === undefined) {
+      delete (globalThis as Record<string, unknown>).chrome;
+    } else {
+      (globalThis as Record<string, unknown>).chrome = originalChrome;
+    }
+  });
+
+  it("clears lastFieldFrameByTab on navigate so subsequent targetless steps run against top frame", async () => {
+    const updateTab = vi.fn(async (tabId: number) => ({ id: tabId, status: "complete" }));
+    const getTab = vi.fn(async () => ({
+      id: 101,
+      url: "http://localhost:4173/form.html",
+      status: "complete",
+    }));
+    const executeScript = vi.fn(
+      async ({ target }: { target: { tabId: number; frameIds?: number[] } }) => [
+        { frameId: 0, result: { ok: true, url: `tab:${target.tabId}` } },
+      ],
+    );
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: { update: updateTab, get: getTab },
+      scripting: { executeScript },
+    };
+
+    const sendRes = vi.fn();
+    handleRuntimeMessage(
+      { kind: "HANDS_FIELD_FOCUSED" },
+      { tab: { id: 101, url: "http://localhost:4173/prev.html" }, frameId: 7 },
+      sendRes,
+    );
+    expect(sendRes).toHaveBeenCalledWith({ ok: true });
+
+    await runActionScript(101, {
+      steps: [
+        { action: "insertText", value: "in-iframe" },
+        { action: "navigate", url: "http://localhost:4173/form.html" },
+        { action: "insertText", value: "after-nav" },
+      ],
+    });
+
+    expect(executeScript).toHaveBeenCalledTimes(2);
+    expect(executeScript.mock.calls[0]?.[0].target).toEqual({ tabId: 101, frameIds: [7] });
+    expect(executeScript.mock.calls[1]?.[0].target).toEqual({ tabId: 101 });
+  });
+
+  it("throws a descriptive error when navigate lands on chrome-error://chromewebdata/", async () => {
+    const updateTab = vi.fn(async (tabId: number) => ({ id: tabId }));
+    const getTab = vi.fn(async () => ({
+      id: 101,
+      url: "chrome-error://chromewebdata/",
+      status: "complete",
+    }));
+    const executeScript = vi.fn();
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: { update: updateTab, get: getTab },
+      scripting: { executeScript },
+    };
+
+    await expect(
+      runActionScript(101, {
+        steps: [
+          { action: "navigate", url: "http://localhost/missing" },
+          { action: "click", target: { kind: "css", value: "#submit" } },
+        ],
+      }),
+    ).rejects.toThrow("Navigation failed for http://localhost/missing (error page)");
+
+    expect(executeScript).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a clear error including tab.url when executeScript hits Frame with ID 0 is showing error page", async () => {
+    const getTab = vi.fn(async () => ({
+      id: 101,
+      url: "chrome-error://chromewebdata/",
+      status: "complete",
+    }));
+    const executeScript = vi.fn(async () => {
+      throw new Error("Frame with ID 0 is showing error page");
+    });
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: { get: getTab },
+      scripting: { executeScript },
+    };
+
+    await expect(
+      runActionScript(101, {
+        steps: [{ action: "click", target: { kind: "css", value: "#submit" } }],
+      }),
+    ).rejects.toThrow(/chrome-error:\/\/chromewebdata\//);
+    expect(executeScript).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries executeScript once after waitForTabLoad when Frame with ID 0 error occurs while loading", async () => {
+    let tabState: { id: number; url: string; status: string } = {
+      id: 101,
+      url: "http://localhost:4173/form.html",
+      status: "loading",
+    };
+    const listeners = new Set<
+      (tabId: number, changeInfo: { status?: string; url?: string }, tab: { id: number; url?: string; status?: string }) => void
+    >();
+    const getTab = vi.fn(async () => tabState);
+    const onUpdated = {
+      addListener: vi.fn((cb) => {
+        listeners.add(cb);
+      }),
+      removeListener: vi.fn((cb) => {
+        listeners.delete(cb);
+      }),
+    };
+    const executeScript = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Frame with ID 0 is showing error page"))
+      .mockResolvedValueOnce([
+        { frameId: 0, result: { ok: true, url: "http://localhost:4173/form.html" } },
+      ]);
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: { get: getTab, onUpdated },
+      scripting: { executeScript },
+    };
+
+    const runPromise = runActionScript(101, {
+      steps: [{ action: "click", target: { kind: "css", value: "#submit" } }],
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    tabState = { id: 101, url: "http://localhost:4173/form.html", status: "complete" };
+    for (const cb of listeners) {
+      cb(101, { status: "complete" }, tabState);
+    }
+
+    const results = await runPromise;
+    expect(results).toEqual([{ ok: true, url: "http://localhost:4173/form.html" }]);
+    expect(executeScript).toHaveBeenCalledTimes(2);
+  });
+});
