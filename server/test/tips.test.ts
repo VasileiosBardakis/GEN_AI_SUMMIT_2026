@@ -4,7 +4,6 @@ import type { GeminiClient, ZodLikeSchema } from "../src/llm/gemini.ts";
 import {
   buildFlowTipPrompt,
   FlowTipSchema,
-  hasRepeatedInteraction,
   suggestFlowTip,
 } from "../src/tips.ts";
 
@@ -64,11 +63,6 @@ function makeClient(response: unknown): {
 }
 
 describe("flow tips", () => {
-  it("gates on a repeated interaction pair", () => {
-    expect(hasRepeatedInteraction(rightClickCopyPaste(1))).toBe(false);
-    expect(hasRepeatedInteraction(rightClickCopyPaste(3))).toBe(true);
-  });
-
   it("includes right-click menu context without raw values", () => {
     const prompt = buildFlowTipPrompt(rightClickCopyPaste(3));
     expect(prompt).toContain('"trigger": "right_click"');
@@ -76,18 +70,7 @@ describe("flow tips", () => {
     expect(prompt).not.toContain("text/plain");
   });
 
-  it("returns null without calling the model when nothing repeats", async () => {
-    const { client, calls } = makeClient({
-      tip: null,
-      keys: null,
-      why: "unused",
-    });
-    const result = await suggestFlowTip(rightClickCopyPaste(1), { client });
-    expect(result).toBeNull();
-    expect(calls()).toBe(0);
-  });
-
-  it("returns a validated shortcut tip for repeated right-click copy/paste", async () => {
+  it("returns a validated shortcut tip for right-click copy/paste", async () => {
     const { client, calls } = makeClient({
       tip: "Select the text and press Ctrl+C, then Ctrl+V instead of using the right-click menu.",
       keys: ["Ctrl+C", "Ctrl+V"],

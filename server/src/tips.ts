@@ -15,7 +15,6 @@ export type FlowTip = {
 export type FlowTipOptions = {
   client?: GeminiClient;
   gemini?: GeminiClientOptions;
-  minRepeats?: number;
   exclude?: string[];
 };
 
@@ -68,31 +67,6 @@ const FLOW_TIP_EVENT_TYPES = new Set<Event["type"]>([
   "submit",
   "tab_switch",
 ]);
-
-export function hasRepeatedInteraction(events: Event[], minRepeats = 3): boolean {
-  const tokens: string[] = [];
-  for (const ev of events) {
-    if (!FLOW_TIP_EVENT_TYPES.has(ev.type)) continue;
-    const token =
-      ev.type === "input" || ev.type === "change"
-        ? "fill"
-        : ev.type === "keydown" || ev.type === "key"
-          ? ev.meta?.key === "Enter"
-            ? "submit"
-            : "key"
-          : ev.type;
-    tokens.push(token);
-  }
-  const recent = tokens.slice(-40);
-  const counts = new Map<string, number>();
-  for (let i = 0; i < recent.length - 1; i++) {
-    const pair = `${recent[i]}>${recent[i + 1]}`;
-    const next = (counts.get(pair) ?? 0) + 1;
-    if (next >= minRepeats) return true;
-    counts.set(pair, next);
-  }
-  return false;
-}
 
 function summarizeFlowEvents(events: Event[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
@@ -155,7 +129,6 @@ export async function suggestFlowTip(
   events: Event[],
   opts?: FlowTipOptions,
 ): Promise<FlowTip | null> {
-  if (!hasRepeatedInteraction(events, opts?.minRepeats)) return null;
   const client =
     opts?.client ?? createGeminiClient({ thinkingBudget: 0, ...opts?.gemini });
   return client.generateJson(buildFlowTipPrompt(events, opts?.exclude), FlowTipSchema);

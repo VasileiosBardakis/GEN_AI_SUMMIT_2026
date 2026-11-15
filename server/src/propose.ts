@@ -14,7 +14,7 @@ import {
   compiledWorkflowToActionScript,
   compiledWorkflowToFinding,
 } from "./report.ts";
-import { hasRepeatedInteraction, type FlowTip } from "./tips.ts";
+import type { FlowTip } from "./tips.ts";
 import {
   eventsToSteps,
   normalizeHost,
@@ -242,7 +242,6 @@ export function createProposer(deps: ProposerDeps): Proposer {
   const proposedKeys = new Set<string>();
   const inFlightSessions = new Set<string>();
   const pendingRerunSessions = new Set<string>();
-  const shownFlowTips = new Set<string>();
   const shownFlowTipLabels: string[] = [];
   const flowTipCheckedAt = new Map<string, number>();
   let flowTipPending = false;
@@ -342,10 +341,16 @@ export function createProposer(deps: ProposerDeps): Proposer {
   }
 
   async function maybeFlowTip(sessionId: string, events: Event[]): Promise<void> {
-    if (!deps.suggestFlowTip || flowTipPending) return;
-    if (!hasRepeatedInteraction(events)) return;
-    const lastCheck = flowTipCheckedAt.get(sessionId) ?? 0;
-    if (now() - lastCheck < 60_000) return;
+    if (!deps.suggestFlowTip) return;
+    if (flowTipPending) {
+      safeLog(`[tip] session=${sessionId} skipped reason=pending`);
+      return;
+    }
+    const lastCheck = flowTipCheckedAt.get(sessionId);
+    if (lastCheck !== undefined && now() - lastCheck < 60_000) {
+      safeLog(`[tip] session=${sessionId} skipped reason=cooldown`);
+      return;
+    }
     flowTipCheckedAt.set(sessionId, now());
 
     let suggestion: FlowTip | null;
@@ -354,16 +359,26 @@ export function createProposer(deps: ProposerDeps): Proposer {
         events,
         shownFlowTipLabels.length > 0 ? [...shownFlowTipLabels] : undefined,
       );
-    } catch {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      safeLog(`[tip] session=${sessionId} skipped reason=error:${message}`);
       return;
     }
-    if (closed || !suggestion?.tip?.trim()) return;
+    if (closed) return;
+    if (!suggestion?.tip?.trim()) {
+      safeLog(`[tip] session=${sessionId} skipped reason=empty`);
+      return;
+    }
 
-    const key = flowTipDedupeKey(suggestion);
-    if (shownFlowTips.has(key)) return;
+    const key = `${sessionId}::${flowTipDedupeKey(suggestion)}`;
+    if (proposedKeys.has(key)) {
+      safeLog(`[tip] session=${sessionId} skipped reason=duplicate`);
+      return;
+    }
     const name = suggestion.keys?.join(" → ") || suggestion.tip.trim();
-    shownFlowTips.add(key);
+    proposedKeys.add(key);
     shownFlowTipLabels.push(name);
+    safeLog(`[tip] session=${sessionId} shown reason=${name}`);
 
     flowTipPending = true;
     try {
@@ -392,8 +407,6 @@ export function createProposer(deps: ProposerDeps): Proposer {
       return;
     }
     if (closed || events.length === 0) return;
-
-    if (deps.suggestFlowTip) void maybeFlowTip(sessionId, events);
 
     const { steps, piiMap } = eventsToSteps(events);
     const {
@@ -445,6 +458,8 @@ export function createProposer(deps: ProposerDeps): Proposer {
       }
     }
 
+    const irisYes = irisJudgment?.worthAutomating === true;
+
     let compiled: CompiledWorkflow | null = null;
     try {
       compiled = await deps.compileV2(
@@ -454,10 +469,19 @@ export function createProposer(deps: ProposerDeps): Proposer {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       safeLog(`[propose:v2] compile failed for ${sessionId}: ${message}`);
+      if (!closed && irisYes && deps.suggestFlowTip) {
+        await maybeFlowTip(sessionId, events);
+      }
       return;
     }
 
-    if (closed || !compiled) return;
+    if (closed) return;
+    if (!compiled) {
+      if (irisYes && deps.suggestFlowTip) {
+        await maybeFlowTip(sessionId, events);
+      }
+      return;
+    }
 
     const finding = compiledWorkflowToFinding(compiled);
     const script = compiledWorkflowToActionScript(compiled);
@@ -547,6 +571,9 @@ export function createProposer(deps: ProposerDeps): Proposer {
         safeLog(
           `[propose:v2] precheck blocked popup for ${compiled.name} (${precheckOutcome.error ?? "matchCount !== 1"})`,
         );
+        if (!closed && irisYes && deps.suggestFlowTip) {
+          await maybeFlowTip(sessionId, events);
+        }
         return;
       }
     }
@@ -554,6 +581,9 @@ export function createProposer(deps: ProposerDeps): Proposer {
     if (closed) return;
 
     proposedKeys.add(sessionScopedKey);
+    if (irisYes && deps.suggestFlowTip) {
+      safeLog(`[tip] session=${sessionId} skipped reason=offer`);
+    }
 
     await proposeV2Finding(sessionId, site, finding, script, compiled);
   }
