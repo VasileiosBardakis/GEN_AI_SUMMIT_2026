@@ -38,7 +38,7 @@ window.__EYES_ANNOTATE_STEP__ = function(label) {
       box.style.border = "2.5px solid #8a5a2b";
       box.style.background = "rgba(138, 90, 43, 0.14)";
       box.style.boxShadow = "0 0 0 3px rgba(138, 90, 43, 0.18)";
-      box.style.transition = "all 120ms ease-out";
+      box.style.transition = "none";
     }
     if (label && document.documentElement) {
       var banner = document.getElementById("__eyes_sandbox_banner__");
@@ -170,19 +170,52 @@ function findInitialUrl(
   return undefined;
 }
 
+type ReplayPage = {
+  url: () => string;
+  goto: (url: string, opts?: Record<string, unknown>) => Promise<unknown>;
+  evaluate: <R, A = unknown>(fn: string | ((arg: A) => R | Promise<R>), arg?: A) => Promise<R>;
+  video: () => { path: () => Promise<string> } | null;
+};
+
 type PlaywrightBrowser = {
   newContext: (opts: Record<string, unknown>) => Promise<{
     addInitScript: (script: { content: string }) => Promise<void>;
-    newPage: () => Promise<{
-      url: () => string;
-      goto: (url: string, opts?: Record<string, unknown>) => Promise<unknown>;
-      evaluate: <R, A = unknown>(fn: string | ((arg: A) => R | Promise<R>), arg?: A) => Promise<R>;
-      video: () => { path: () => Promise<string> } | null;
-    }>;
+    newPage: () => Promise<ReplayPage>;
     close: () => Promise<void>;
   }>;
   close: () => Promise<void>;
 };
+
+async function waitForRenderedFrame(page: ReplayPage, settleMs = 0): Promise<void> {
+  await Promise.race([
+    page
+      .evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => resolve());
+            });
+          }),
+      )
+      .catch(() => {}),
+    sleep(220),
+  ]);
+  if (settleMs > 0) {
+    await sleep(settleMs);
+  }
+}
+
+function countVisualSteps(steps: Step[]): number {
+  let count = 0;
+  for (const step of steps) {
+    if (step.action === "forEach") {
+      count += countVisualSteps(step.steps);
+    } else if (step.action !== "navigate" && step.action !== "switchTab" && step.action !== "wait") {
+      count += 1;
+    }
+  }
+  return count;
+}
 
 let sharedBrowserPromise: Promise<PlaywrightBrowser | null> | null = null;
 
@@ -346,6 +379,14 @@ export async function recordScriptReplay(
       }
     };
 
+    const visualStepCount = Math.max(1, countVisualSteps(steps));
+    const paceScale = visualStepCount > 8 ? 8 / visualStepCount : 1;
+    const navSettleMs = 150;
+    const preStepSettleMs = Math.max(100, Math.round(160 * paceScale));
+    const postReadSettleMs = Math.max(100, Math.round(160 * paceScale));
+    const postActionSettleMs = Math.max(140, Math.round(240 * paceScale));
+    const endSettleMs = 260;
+
     const navigateTo = async (targetUrl: string): Promise<boolean> => {
       if (!isHttpUrl(targetUrl) || !isReachableReplayUrl(targetUrl)) return false;
       if (page.url() === targetUrl) return true;
@@ -353,7 +394,7 @@ export async function recordScriptReplay(
       try {
         await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 3500 });
         await restoreFormSnapshot(page.url());
-        await sleep(80);
+        await waitForRenderedFrame(page, navSettleMs);
         return true;
       } catch {
         return false;
@@ -437,7 +478,7 @@ export async function recordScriptReplay(
           )
           .catch(() => {});
 
-        await sleep(100);
+        await waitForRenderedFrame(page, preStepSettleMs);
 
         // 2. Execute the actual step on the page
         const res = await page
@@ -469,12 +510,16 @@ export async function recordScriptReplay(
           bindings[step.bind] = res.items;
         }
 
-        await sleep(step.action === "readText" || step.action === "readValue" ? 90 : 160);
+        const postSettleMs =
+          step.action === "readText" || step.action === "readValue"
+            ? postReadSettleMs
+            : postActionSettleMs;
+        await waitForRenderedFrame(page, postSettleMs);
       }
     };
 
     await runStepList(steps, {});
-    await sleep(200);
+    await waitForRenderedFrame(page, endSettleMs);
 
     await context.close();
     context = null;
