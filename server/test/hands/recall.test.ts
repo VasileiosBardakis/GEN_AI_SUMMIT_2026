@@ -140,7 +140,7 @@ describe("createLibraryRecallMatcher", () => {
         makeEvent({
           app: "127.0.0.1",
           url: "http://127.0.0.1:5173/",
-          window: "Automation Ladder — Local Demo",
+          window: "AIz — Local Demo",
           target: { locators: [{ kind: "css", value: "td" }], role: "gridcell" },
         }),
       ],
@@ -233,7 +233,7 @@ describe("createLibraryRecallMatcher", () => {
       context: {
         app: "localhost",
         url: "http://localhost:5173/",
-        title: "Automation Ladder — Local Demo",
+        title: "AIz — Local Demo",
         targetLabel: "Reply to customer",
         targetRole: "textbox",
         locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
@@ -246,7 +246,7 @@ describe("createLibraryRecallMatcher", () => {
       makeEvent({
         app: "localhost",
         url: "http://localhost:5173/",
-        window: "Automation Ladder — Local Demo",
+        window: "AIz — Local Demo",
         target: {
           locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
           tag: "textarea",
@@ -282,7 +282,7 @@ describe("createLibraryRecallMatcher", () => {
           makeEvent({
             app: "localhost",
             url: "http://localhost:5173/",
-            window: "Automation Ladder — Local Demo",
+            window: "AIz — Local Demo",
             type: "click",
             value: "",
             target: {
@@ -305,7 +305,7 @@ describe("createLibraryRecallMatcher", () => {
           makeEvent({
             app: "localhost",
             url: "http://localhost:5173/",
-            window: "Automation Ladder — Local Demo",
+            window: "AIz — Local Demo",
             type: "click",
             target: {
               locators: [{ kind: "css", value: "#clear-reply" }],
@@ -348,7 +348,7 @@ describe("createLibraryRecallMatcher", () => {
       context: {
         app: "localhost",
         url: "http://localhost:5173/",
-        title: "Automation Ladder — Local Demo",
+        title: "AIz — Local Demo",
         targetLabel: "Company name",
         targetRole: "textbox",
         locators: [
@@ -923,7 +923,7 @@ describe("POST /events -> library half-detection -> /decide bridge", () => {
         context: {
           app: "localhost",
           url: "http://localhost:5173/",
-          title: "Automation Ladder — Local Demo",
+          title: "AIz — Local Demo",
           targetLabel: "Reply to customer",
           targetRole: "textbox",
           locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
@@ -943,7 +943,7 @@ describe("POST /events -> library half-detection -> /decide bridge", () => {
         makeEvent({
           app: "localhost",
           url: "http://localhost:5173/",
-          window: "Automation Ladder — Local Demo",
+          window: "AIz — Local Demo",
           type: "change",
           value: snippet,
           target: {
@@ -967,7 +967,7 @@ describe("POST /events -> library half-detection -> /decide bridge", () => {
         makeEvent({
           app: "localhost",
           url: "http://localhost:5173/",
-          window: "Automation Ladder — Local Demo",
+          window: "AIz — Local Demo",
           type: "focus",
           value: "",
           target: {

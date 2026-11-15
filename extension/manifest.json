@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Automation Ladder — Eyes Watcher",
+  "name": "AIz — Workflow Automation",
   "version": "0.1.0",
   "description": "Local-first workflow sensor: captures all browser, grid, shortcut, and clipboard events with Layer-1 PII redaction.",
   "permissions": ["storage", "tabs", "sidePanel", "activeTab", "scripting"],
@@ -30,7 +30,19 @@
   "side_panel": {
     "default_path": "dist/panel.html"
   },
+  "icons": {
+    "16": "dist/icons/icon-16.png",
+    "32": "dist/icons/icon-32.png",
+    "48": "dist/icons/icon-48.png",
+    "128": "dist/icons/icon-128.png"
+  },
   "action": {
-    "default_title": "Open Eyes"
+    "default_title": "Open Eyes",
+    "default_icon": {
+      "16": "dist/icons/icon-16.png",
+      "32": "dist/icons/icon-32.png",
+      "48": "dist/icons/icon-48.png",
+      "128": "dist/icons/icon-128.png"
+    }
   }
 }
