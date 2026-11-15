@@ -69,7 +69,6 @@ export async function executeStep(
   }
 
   function escapeValue(value: string): string {
-    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
     return value.replace(/["\\]/g, "\\$&");
   }
 
@@ -137,7 +136,17 @@ export async function executeStep(
     submit: "button",
     reset: "button",
   };
-  const TEXT_NAMED_ROLES = new Set(["button", "link", "menuitem", "tab", "option"]);
+  const TEXT_NAMED_ROLES = new Set([
+    "button",
+    "link",
+    "menuitem",
+    "tab",
+    "option",
+    "treeitem",
+    "checkbox",
+    "radio",
+    "switch",
+  ]);
   const TEXTBOX_EQUIVALENTS = new Set(["textbox", "searchbox"]);
 
   function implicitRole(element: Element): string {
@@ -246,7 +255,7 @@ export async function executeStep(
 
     const candidates = Array.from(
       root.querySelectorAll(
-        'input, textarea, select, button, a, summary, [role], [aria-label], [aria-labelledby], [contenteditable="true"]',
+        'input, textarea, select, button, a, summary, [role], [aria-label], [aria-labelledby], [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]',
       ),
     ).filter((el) => !wantedRole || roleMatches(implicitRole(el), wantedRole));
 
@@ -398,7 +407,12 @@ export async function executeStep(
       return found;
     }
     if (locator.kind === "testid") {
-      return Array.from(root.querySelectorAll(`[data-testid="${escapeValue(locator.value)}"]`));
+      const escaped = escapeValue(locator.value);
+      return Array.from(
+        root.querySelectorAll(
+          `[data-testid="${escaped}"], [data-test-id="${escaped}"], [data-test="${escaped}"], [data-qa="${escaped}"], [data-cy="${escaped}"]`,
+        ),
+      );
     }
     if (locator.kind === "aria") {
       return resolveAria(locator.value, root);
@@ -415,7 +429,13 @@ export async function executeStep(
     }
     if ((element as HTMLElement).isContentEditable) return true;
     const role = (element.getAttribute("role") || "").toLowerCase();
-    return role === "textbox" || role === "searchbox" || role === "checkbox" || role === "radio";
+    return (
+      role === "textbox" ||
+      role === "searchbox" ||
+      role === "checkbox" ||
+      role === "radio" ||
+      role === "switch"
+    );
   }
 
   function extractSemanticHints(locators: Locator[]): {

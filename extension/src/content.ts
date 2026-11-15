@@ -213,11 +213,8 @@ interface WatchLocator {
 
 let activeHighlightedEl: Element | null = null;
 
-function cssEscapeIdentLocal(val: string): string {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(val);
-  }
-  return val.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~ ])/g, "\\$1");
+function escapeCssAttrLocal(val: string): string {
+  return val.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function collapseWsLocal(value: string): string {
@@ -257,6 +254,26 @@ function pruneNestedPrecheckText(matches: Element[]): Element[] {
   );
 }
 
+const PRECHECK_TAG_ROLES: Record<string, string> = {
+  button: "button",
+  summary: "button",
+  a: "link",
+  select: "combobox",
+  textarea: "textbox",
+  option: "option",
+  td: "gridcell",
+  th: "gridcell",
+};
+
+const PRECHECK_INPUT_ROLES: Record<string, string> = {
+  checkbox: "checkbox",
+  radio: "radio",
+  search: "searchbox",
+  button: "button",
+  submit: "button",
+  reset: "button",
+};
+
 function resolvePrecheckMatches(locator: WatchLocator, root: ParentNode = document): Element[] {
   if (typeof document === "undefined") return [];
   const kind = locator.kind;
@@ -268,8 +285,11 @@ function resolvePrecheckMatches(locator: WatchLocator, root: ParentNode = docume
     if (kind === "css") {
       found = Array.from(root.querySelectorAll(raw));
     } else if (kind === "testid") {
+      const escaped = escapeCssAttrLocal(raw);
       found = Array.from(
-        root.querySelectorAll(`[data-testid="${cssEscapeIdentLocal(raw)}"]`)
+        root.querySelectorAll(
+          `[data-testid="${escaped}"], [data-test-id="${escaped}"], [data-test="${escaped}"], [data-qa="${escaped}"], [data-cy="${escaped}"]`
+        )
       );
     } else if (kind === "xpath" && typeof XPathResult !== "undefined") {
       const expr = root !== document && raw.startsWith("/") ? `.${raw}` : raw;
@@ -298,7 +318,7 @@ function resolvePrecheckMatches(locator: WatchLocator, root: ParentNode = docume
         if (wantedName) {
           const candidates = Array.from(
             root.querySelectorAll(
-              'input, textarea, select, button, a, summary, [role], [aria-label], [aria-labelledby], [contenteditable="true"]'
+              'input, textarea, select, button, a, summary, [role], [aria-label], [aria-labelledby], [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
             )
           );
           found = candidates.filter((el) => {
@@ -308,33 +328,42 @@ function resolvePrecheckMatches(locator: WatchLocator, root: ParentNode = docume
               const inputType = (el.getAttribute("type") || "text").toLowerCase();
               const implicit =
                 explicitRole ||
-                (tag === "button"
-                  ? "button"
-                  : tag === "a"
-                    ? "link"
-                    : tag === "select"
-                      ? "combobox"
-                      : tag === "textarea"
-                        ? "textbox"
-                        : tag === "input"
-                          ? inputType === "checkbox"
-                            ? "checkbox"
-                            : inputType === "radio"
-                              ? "radio"
-                              : inputType === "search"
-                                ? "searchbox"
-                                : inputType === "submit" || inputType === "button"
-                                  ? "button"
-                                  : "textbox"
-                          : "");
+                (tag === "input"
+                  ? (PRECHECK_INPUT_ROLES[inputType] ?? "textbox")
+                  : (PRECHECK_TAG_ROLES[tag] ?? ""));
               const matchRole =
                 implicit === wantedRole ||
                 ((implicit === "textbox" || implicit === "searchbox") &&
                   (wantedRole === "textbox" || wantedRole === "searchbox"));
               if (!matchRole) return false;
             }
+            const labelledBy = el.getAttribute("aria-labelledby");
+            const labelledByText =
+              labelledBy && typeof document.getElementById === "function"
+                ? labelledBy
+                    .split(/\s+/)
+                    .map((id) => document.getElementById(id)?.textContent || "")
+                    .filter(Boolean)
+                    .join(" ")
+                : "";
+            const assocLabels = (el as HTMLInputElement).labels;
+            const assocLabelText =
+              assocLabels && assocLabels.length > 0
+                ? Array.from(assocLabels)
+                    .map((lbl) => lbl.textContent || "")
+                    .filter(Boolean)
+                    .join(" ")
+                : "";
+            const inputBtnValue =
+              el.tagName.toLowerCase() === "input" &&
+              /^(submit|button|reset)$/i.test(el.getAttribute("type") || "")
+                ? (el as HTMLInputElement).value || el.getAttribute("value") || ""
+                : "";
             const names = [
               el.getAttribute("aria-label") || "",
+              labelledByText,
+              assocLabelText,
+              inputBtnValue,
               el.getAttribute("placeholder") || "",
               el.getAttribute("title") || "",
               collapseWsLocal(el.textContent || ""),

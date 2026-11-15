@@ -28,6 +28,10 @@ function cssEscapeIdent(val: string): string {
   return val.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~ ])/g, "\\$1");
 }
 
+function escapeCssAttr(val: string): string {
+  return val.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function cleanLabelText(labelEl: HTMLElement): string {
   const clone = labelEl.cloneNode(true) as HTMLElement;
   for (const nested of Array.from(
@@ -95,12 +99,12 @@ function buildCssSelector(el: HTMLElement): string {
 
   const name = el.getAttribute("name");
   if (name) {
-    return `${tag}[name="${cssEscapeIdent(name)}"]`;
+    return `${tag}[name="${escapeCssAttr(name)}"]`;
   }
 
   const dataCell = el.getAttribute("data-cell");
   if (dataCell) {
-    return `${tag}[data-cell="${cssEscapeIdent(dataCell)}"]`;
+    return `${tag}[data-cell="${escapeCssAttr(dataCell)}"]`;
   }
 
   const parts: string[] = [];
@@ -182,11 +186,11 @@ export function extractTarget(rawEl: EventTarget | null): {
 
   const label = getReadableLabel(interactive);
   if (role && label && label.length <= 60) {
-    locators.push({ kind: "aria", value: `${role}[name="${label.replace(/"/g, '\\"')}"]` });
+    locators.push({ kind: "aria", value: `${role}[name="${escapeCssAttr(label)}"]` });
   } else if (interactive.getAttribute("aria-label")) {
     locators.push({
       kind: "aria",
-      value: `[aria-label="${interactive.getAttribute("aria-label")!.replace(/"/g, '\\"')}"]`,
+      value: `[aria-label="${escapeCssAttr(interactive.getAttribute("aria-label")!)}"]`,
     });
   }
 

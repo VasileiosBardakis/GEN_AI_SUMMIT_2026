@@ -1413,6 +1413,74 @@ describe("GEN-69: M2 Hands v2", () => {
     expect(readRes.value).toBe("RATE-3190");
   });
 
+  it("matches non-testid attributes (data-test/data-qa), ARIA treeitem/checkbox/switch text, and submit/aria-labelledby in precheckStepLocators and executeStep", async () => {
+    const root = new FakeDomElement("body");
+    const qaBtn = new FakeDomElement("button", { "data-qa": "portal-continue" }, "Continue");
+    let qaClicks = 0;
+    qaBtn.addEventListener("click", () => {
+      qaClicks += 1;
+    });
+
+    const termsCheck = new FakeDomElement("div", { role: "checkbox" }, "Accept terms");
+    let checkClicks = 0;
+    termsCheck.addEventListener("click", () => {
+      checkClicks += 1;
+    });
+
+    const notifySwitch = new FakeDomElement("button", { role: "switch" }, "Email alerts");
+    let switchClicks = 0;
+    notifySwitch.addEventListener("click", () => {
+      switchClicks += 1;
+    });
+
+    const treeNode = new FakeDomElement("li", { role: "treeitem" }, "Municipality of Athens");
+    let treeClicks = 0;
+    treeNode.addEventListener("click", () => {
+      treeClicks += 1;
+    });
+
+    const lbl = new FakeDomElement("label", { id: "afm-lbl" }, "AFM Number");
+    const afmInput = new FakeDomInput({ id: "afm", "aria-labelledby": "afm-lbl" });
+    const submitInput = new FakeDomInput({ type: "submit", value: "Search Registry" });
+
+    root.appendChild(qaBtn);
+    root.appendChild(termsCheck);
+    root.appendChild(notifySwitch);
+    root.appendChild(treeNode);
+    root.appendChild(lbl);
+    root.appendChild(afmInput);
+    root.appendChild(submitInput);
+
+    const dom = installFakeDom(root);
+    restoreDom = dom.restore;
+
+    expect(precheckStepLocators([{ kind: "testid", value: "portal-continue" }])).toMatchObject({
+      matchCount: 1,
+      unique: true,
+    });
+    expect(precheckStepLocators([{ kind: "aria", value: 'textbox[name="AFM Number"]' }])).toMatchObject({
+      matchCount: 1,
+      unique: true,
+    });
+    expect(precheckStepLocators([{ kind: "aria", value: 'button[name="Search Registry"]' }])).toMatchObject({
+      matchCount: 1,
+      unique: true,
+    });
+    expect(precheckStepLocators([{ kind: "aria", value: 'checkbox[name="Accept terms"]' }])).toMatchObject({
+      matchCount: 1,
+      unique: true,
+    });
+
+    expect((await executeStep({ action: "click", target: { kind: "testid", value: "portal-continue" } })).ok).toBe(true);
+    expect((await executeStep({ action: "click", target: { kind: "aria", value: 'checkbox[name="Accept terms"]' } })).ok).toBe(true);
+    expect((await executeStep({ action: "click", target: { kind: "aria", value: 'switch[name="Email alerts"]' } })).ok).toBe(true);
+    expect((await executeStep({ action: "click", target: { kind: "aria", value: 'treeitem[name="Municipality of Athens"]' } })).ok).toBe(true);
+    expect(qaClicks).toBe(1);
+    expect(checkClicks).toBe(1);
+    expect(switchClicks).toBe(1);
+    expect(treeClicks).toBe(1);
+  });
+
   it("handleHandsCommand forwards step.within on precheck (substituting forEach.items[0]) and script.runMode on decide", async () => {
     const sendMessage = vi.fn(async (_tabId: number, msg: Record<string, unknown>) => {
       if (msg.kind === "EYES_PRECHECK_STEP") {

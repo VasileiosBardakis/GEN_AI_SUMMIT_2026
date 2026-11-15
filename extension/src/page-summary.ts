@@ -206,6 +206,17 @@ function sanitizeLocators(locators: Locator[]): Locator[] {
   return out;
 }
 
+function escapeCssAttrLocal(val: string): string {
+  return val.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function escapeCssIdentLocal(val: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(val);
+  }
+  return val.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~ ])/g, "\\$1");
+}
+
 function getElementLocators(el: HTMLElement): Locator[] {
   const { target } = extractTarget(el);
   if (target?.locators && target.locators.length > 0) {
@@ -223,17 +234,17 @@ function getElementLocators(el: HTMLElement): Locator[] {
   const ariaLabel = attrOf(el, "aria-label")?.trim();
   const role = attrOf(el, "role")?.trim();
   if (role && ariaLabel) {
-    locators.push({ kind: "aria", value: `${role}[name="${ariaLabel.replace(/"/g, '\\"')}"]` });
+    locators.push({ kind: "aria", value: `${role}[name="${escapeCssAttrLocal(ariaLabel)}"]` });
   } else if (ariaLabel) {
-    locators.push({ kind: "aria", value: `[aria-label="${ariaLabel.replace(/"/g, '\\"')}"]` });
+    locators.push({ kind: "aria", value: `[aria-label="${escapeCssAttrLocal(ariaLabel)}"]` });
   }
   const id = (el as { id?: string }).id || attrOf(el, "id");
   const name = attrOf(el, "name");
   const tag = tagOf(el) || "div";
   if (id) {
-    locators.push({ kind: "css", value: `#${id}` });
+    locators.push({ kind: "css", value: `#${escapeCssIdentLocal(id)}` });
   } else if (name) {
-    locators.push({ kind: "css", value: `${tag}[name="${name}"]` });
+    locators.push({ kind: "css", value: `${tag}[name="${escapeCssAttrLocal(name)}"]` });
   } else if (el.parentElement) {
     const siblings = childrenOf(el.parentElement).filter((s) => tagOf(s) === tag);
     const idx = siblings.indexOf(el);
