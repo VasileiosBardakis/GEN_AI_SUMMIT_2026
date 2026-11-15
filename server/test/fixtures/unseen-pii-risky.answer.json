@@ -1,33 +1,28 @@
 {
-  "promptHash": "1a95d329afefc73be7665830f4fa41651227b3721c4ad063676bc9717cb4ac4a",
+  "promptHash": "5647846bf2ce3867d323eb2691f09ce1fbef48858a414d84e8a6908ab52d10bf",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Process Outbound Wires",
-    "reason": "Automates wire transfer entry for approved invoices from AP inbox to Treasury portal",
+    "name": "Process Wire Remittances",
+    "reason": "Automation of repetitive wire payment entries from remittance data to treasury portal",
     "risk": "high",
-    "runMode": "run_remaining",
+    "runMode": "save_only",
     "params": [
       {
-        "name": "amount"
+        "name": "wireReference",
+        "example": "WIRE-301"
+      },
+      {
+        "name": "beneficiaryEmail",
+        "example": "__PII_EMAIL_1__"
+      },
+      {
+        "name": "wireAmount",
+        "example": "14500.00"
       }
     ],
     "steps": [
-      {
-        "action": "navigate",
-        "url": "http://ap-inbox.local:4500/remittance"
-      },
-      {
-        "action": "readText",
-        "stepIndex": 1,
-        "bind": "wireRef"
-      },
-      {
-        "action": "readText",
-        "stepIndex": 2,
-        "bind": "beneficiaryEmail"
-      },
       {
         "action": "switchTab",
         "host": "treasury.local"
@@ -35,7 +30,7 @@
       {
         "action": "fill",
         "stepIndex": 4,
-        "value": "{{wireRef}}"
+        "value": "{{wireReference}}"
       },
       {
         "action": "fill",
@@ -45,7 +40,7 @@
       {
         "action": "fill",
         "stepIndex": 6,
-        "value": "{{amount}}"
+        "value": "{{wireAmount}}"
       },
       {
         "action": "click",

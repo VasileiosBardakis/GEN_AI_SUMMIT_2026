@@ -1,11 +1,11 @@
 {
-  "promptHash": "e44ed4f4edd095336416a368be4197fd9e420f5f98fb5d814c5d7ed7f54b7338",
+  "promptHash": "13d88d29d327fd9f67a8f11111adff85142a466d4fffc97bb899162db8a11ea0",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Process Open Claims to Ledger",
-    "reason": "Automates recording open claims from the claims queue into the ledger system.",
+    "name": "Process Claims to Ledger",
+    "reason": "Automates recording claims from queue to the payout ledger system.",
     "risk": "medium",
     "runMode": "run_remaining",
     "params": [
@@ -13,7 +13,7 @@
         "name": "claimId"
       },
       {
-        "name": "claimantRef"
+        "name": "claimRef"
       }
     ],
     "steps": [
@@ -33,7 +33,7 @@
           {
             "action": "readText",
             "stepIndex": 2,
-            "bind": "claimantRef"
+            "bind": "claimRef"
           },
           {
             "action": "switchTab",
@@ -42,14 +42,12 @@
           {
             "action": "fill",
             "stepIndex": 4,
-            "value": "{{claimId}}",
-            "bind": "claimId"
+            "value": "{{claimId}}"
           },
           {
             "action": "fill",
             "stepIndex": 5,
-            "value": "{{claimantRef}}",
-            "bind": "claimantRef"
+            "value": "{{claimRef}}"
           },
           {
             "action": "click",

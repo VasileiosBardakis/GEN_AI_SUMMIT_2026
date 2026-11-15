@@ -9,6 +9,7 @@ import { implementSolution } from "../../server/src/hands/implementor.ts";
 import {
   BROWSER_SESSION_ID,
   fetchLatestScript,
+  handleHandsCommand,
   handleRuntimeMessage,
   pollHandsBridgeOnce,
   recordEvent,
@@ -1218,6 +1219,156 @@ describe("GEN-69: M2 Hands v2", () => {
     expect(formCancelled.requestSubmit).not.toHaveBeenCalled();
     expect(formCancelled.submit).not.toHaveBeenCalled();
     expect(keySequence3).toEqual(["keydown", "keyup"]);
+  });
+
+  it("forwards save_only runMode and params in decide, resolves local PII by piiHash, seeds bindings, and matches loopback tabs", async () => {
+    const receivedDecideMsgs: unknown[] = [];
+    const postedResults: unknown[] = [];
+    const executedSteps: V2DomStep[] = [];
+
+    mockServer = http.createServer((req, res) => {
+      if (req.method === "POST" && req.url === "/hands/result") {
+        let raw = "";
+        req.on("data", (c) => {
+          raw += c;
+        });
+        req.on("end", () => {
+          postedResults.push(JSON.parse(raw));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        });
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => {
+      mockServer!.listen(0, "127.0.0.1", () => resolve());
+    });
+    const addr = mockServer.address() as AddressInfo;
+    const serverUrl = `http://127.0.0.1:${addr.port}`;
+
+    const sendMessage = vi.fn(async (_tabId: number, msg: unknown) => {
+      const m = msg as { kind?: string };
+      if (m.kind === "EYES_SHOW_DECIDER") {
+        receivedDecideMsgs.push(msg);
+        return {
+          ok: true,
+          decision: "approved",
+          params: { hex_code: "#ff00aa", recipient_email: "alice@local.example" },
+        };
+      }
+      return { ok: true };
+    });
+
+    const executeScript = vi.fn(
+      async ({ args }: { target: { tabId: number }; args: [V2DomStep] }) => {
+        executedSteps.push(args[0]);
+        return [{ frameId: 0, result: { ok: true, url: "http://127.0.0.1:4173/unseen-form.html" } }];
+      },
+    );
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        query: vi.fn(async () => [
+          { id: 701, url: "http://127.0.0.1:4173/unseen-form.html", active: true, windowId: 1 },
+        ]),
+        update: vi.fn(async () => ({})),
+        sendMessage,
+      },
+      windows: { update: vi.fn(async () => ({})) },
+      scripting: { executeScript },
+    };
+
+    // Store local PII hash via EYES_EVENT without touching server
+    const evtRes = vi.fn();
+    handleRuntimeMessage(
+      {
+        kind: "EYES_EVENT",
+        localPii: { h_deadbeef: "alice@local.example" },
+        event: {
+          v: 1,
+          id: "evt-pii-1",
+          ts: Date.now(),
+          session: "sess_test",
+          source: "browser",
+          app: "127.0.0.1",
+          type: "input",
+          value: "[REDACTED:EMAIL#h_deadbeef]",
+        },
+      } as unknown as Parameters<typeof handleRuntimeMessage>[0],
+      { tab: { id: 701, url: "http://127.0.0.1:4173/unseen-form.html" } },
+      evtRes,
+    );
+    expect(evtRes).toHaveBeenCalledWith({ ok: true });
+
+    await handleHandsCommand(
+      {
+        id: "dec-save-only-1",
+        kind: "decide",
+        name: "Submit hex row",
+        solution: "Fill 3 fields and save.",
+        script: {
+          name: "Submit hex row",
+          runMode: "save_only",
+          params: [
+            { name: "hex_code", example: "#112233" },
+            { name: "recipient_email", piiHash: "h_deadbeef" },
+          ],
+          steps: [
+            { action: "switchTab", host: "localhost" },
+            { action: "fill", target: { kind: "testid", value: "hex-code" }, value: "{{hex_code}}" },
+            {
+              action: "fill",
+              target: { kind: "testid", value: "recipient-email" },
+              value: "{{recipient_email}}",
+            },
+          ],
+        },
+      },
+      serverUrl,
+    );
+
+    await vi.waitFor(() => {
+      expect(postedResults).toHaveLength(1);
+    });
+
+    expect(receivedDecideMsgs[0]).toMatchObject({
+      kind: "EYES_SHOW_DECIDER",
+      runMode: "save_only",
+      params: [
+        { name: "hex_code", example: "#112233" },
+        { name: "recipient_email", piiHash: "h_deadbeef", example: "alice@local.example" },
+      ],
+    });
+    expect(postedResults[0]).toEqual({
+      id: "dec-save-only-1",
+      ok: true,
+      decision: "approved",
+      params: { hex_code: "#ff00aa", recipient_email: "alice@local.example" },
+    });
+
+    // Run with switchTab host: "localhost" against 127.0.0.1 tab + param seeding from piiHash & example
+    await runActionScript(701, {
+      name: "Submit hex row",
+      params: [
+        { name: "hex_code", example: "#112233" },
+        { name: "recipient_email", piiHash: "h_deadbeef" },
+      ],
+      steps: [
+        { action: "switchTab", host: "localhost" },
+        { action: "fill", target: { kind: "testid", value: "hex-code" }, value: "{{hex_code}}" },
+        {
+          action: "fill",
+          target: { kind: "testid", value: "recipient-email" },
+          value: "{{recipient_email}}",
+        },
+      ],
+    });
+
+    expect(executedSteps).toHaveLength(2);
+    expect((executedSteps[0] as { value?: string }).value).toBe("#112233");
+    expect((executedSteps[1] as { value?: string }).value).toBe("alice@local.example");
   });
 });
 

@@ -1,32 +1,28 @@
 {
-  "promptHash": "9c38460b3a725db952d7f23a9f19d762cdb88554cee2ef7aca4fbf5dcdc0cbd9",
+  "promptHash": "3a29bd0b091a9cb303c70fcb6e91a3f29668160a8eba408a3f2177154f8f54c9",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Process Assay Samples",
-    "reason": "Automation of repetitive LIMS assay data entry from queued notes",
+    "name": "Process Assay Readings",
+    "reason": "Automation of repetitive sample readings entry into LIMS system",
     "risk": "low",
     "runMode": "run_remaining",
     "params": [
       {
-        "name": "phValue",
+        "name": "ph",
         "example": "7.12"
       },
       {
-        "name": "condValue",
+        "name": "cond",
         "example": "410"
       },
       {
-        "name": "turbValue",
+        "name": "turb",
         "example": "0.8"
       }
     ],
     "steps": [
-      {
-        "action": "navigate",
-        "url": "http://bench.local:4150/notes"
-      },
       {
         "action": "forEach",
         "items": "list_1",
@@ -42,17 +38,17 @@
           {
             "action": "fill",
             "stepIndex": 4,
-            "value": "{{phValue}}"
+            "value": "{{ph}}"
           },
           {
             "action": "fill",
             "stepIndex": 5,
-            "value": "{{condValue}}"
+            "value": "{{cond}}"
           },
           {
             "action": "fill",
             "stepIndex": 6,
-            "value": "{{turbValue}}"
+            "value": "{{turb}}"
           },
           {
             "action": "click",

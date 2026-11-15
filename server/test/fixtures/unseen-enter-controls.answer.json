@@ -1,28 +1,22 @@
 {
-  "promptHash": "7295fe330f206fa1ed72680773c2ab1df237603593e5b71b9d7cf9c261f5fb57",
+  "promptHash": "1d90dd93d15160f798d8c8db727a1f7ea49a3bf20eb6632df3795e7cceb50fd4",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Ticket Triage and Routing",
-    "reason": "Automate processing of tickets from triage queue to routing dispatch console.",
-    "risk": "low",
+    "name": "Assign Triage Tickets to Routing",
+    "reason": "Automate the transfer of ticket IDs from the triage queue to the dispatch console and set routing priorities.",
+    "risk": "medium",
     "runMode": "save_only",
     "params": [
+      {
+        "name": "ticketId"
+      },
       {
         "name": "priority"
       }
     ],
     "steps": [
-      {
-        "action": "navigate",
-        "url": "http://intake.local:4400/triage"
-      },
-      {
-        "action": "readText",
-        "stepIndex": 1,
-        "bind": "ticketId"
-      },
       {
         "action": "switchTab",
         "host": "routing.local"
@@ -33,7 +27,7 @@
         "value": "{{ticketId}}"
       },
       {
-        "action": "select",
+        "action": "fill",
         "stepIndex": 4,
         "value": "{{priority}}"
       },
@@ -54,6 +48,10 @@
       {
         "action": "submit",
         "stepIndex": 8
+      },
+      {
+        "action": "switchTab",
+        "host": "intake.local"
       }
     ]
   }

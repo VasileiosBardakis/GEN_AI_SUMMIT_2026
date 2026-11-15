@@ -34,9 +34,11 @@ type HandsNextResponse = {
   url?: string;
 };
 
+const DEFAULT_POLL_WAIT_MS = process.env.V2_UNSEEN_LIVE === "1" ? 8000 : 1500;
+
 async function pollHandsNext(
   baseUrl: string,
-  waitMs = 1500,
+  waitMs = DEFAULT_POLL_WAIT_MS,
 ): Promise<{ status: number; cmd?: HandsNextResponse }> {
   const res = await fetch(`${baseUrl}/hands/next?waitMs=${waitMs}`);
   if (res.status === 204) {
@@ -470,7 +472,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it.fails(
+  it(
     "unseen-rows-wrongtab.jsonl: compiles and executes run_remaining workflow with recorded real Gemini output",
     async () => {
       await runUnseenFixtureHttp({
@@ -518,7 +520,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it.fails(
+  it(
     "unseen-pii-risky.jsonl: compiles and proposes save_only workflow with pauseBeforeSubmit: true",
     async () => {
       await runUnseenFixtureHttp({
@@ -543,7 +545,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it.fails(
+  it(
     "unseen-sheet-loop.jsonl: compiles and executes run_remaining workflow with recorded real Gemini output",
     async () => {
       await runUnseenFixtureHttp({
@@ -555,7 +557,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it.fails(
+  it(
     "unseen-realcapture.jsonl: compiles and executes run_remaining workflow from { source, target } pageSummary",
     async () => {
       await runUnseenFixtureHttp({
@@ -1154,16 +1156,21 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     expect(recallDecide.status).toBe(200);
     expect(recallDecide.cmd?.kind).toBe("decide");
     expect(recallDecide.cmd?.name).toBe(claimEntry.name);
+    expect(recallDecide.cmd?.script?.runMode).toBe("run_remaining");
 
     await postHandsResult(recallUrl, {
       id: recallDecide.cmd!.id,
       ok: true,
       decision: "approved",
+      params: { claimId: "CLM-9901" },
     });
 
     const recallRun = await pollHandsNext(recallUrl);
     expect(recallRun.status).toBe(200);
     expect(recallRun.cmd?.kind).toBeUndefined();
+    expect((recallRun.cmd as unknown as { paramValues?: Record<string, string> })?.paramValues).toEqual({
+      claimId: "CLM-9901",
+    });
     await postHandsResult(recallUrl, {
       id: recallRun.cmd!.id,
       ok: true,

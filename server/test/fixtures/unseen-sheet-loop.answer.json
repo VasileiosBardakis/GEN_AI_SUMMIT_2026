@@ -1,11 +1,11 @@
 {
-  "promptHash": "198e6ad55d8e15d275327779ec4b78622b78a6c50c224167f47bf9bf929a95a7",
+  "promptHash": "b259189c70885b95f51abf8f1a6d9b354308f5a3d7538c65c1dfc7a2713d16fe",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Update Client Lookup Values",
-    "reason": "Automates the lookup and update process for client sheet values.",
+    "name": "Sync Client Lookup Values",
+    "reason": "Automate the transfer of lookup values from the sheet to client details for pending items.",
     "risk": "low",
     "runMode": "run_remaining",
     "params": [
@@ -35,7 +35,8 @@
             "action": "readText",
             "targetId": "ps_4",
             "withinId": "ps_4",
-            "withinTextParam": "lookupValue"
+            "withinTextParam": "lookupValue",
+            "bind": "val"
           },
           {
             "action": "click",
@@ -44,7 +45,7 @@
           {
             "action": "fill",
             "targetId": "ps_3",
-            "value": "{{lookupValue}}"
+            "value": "{{val}}"
           },
           {
             "action": "click",
@@ -52,7 +53,7 @@
           },
           {
             "action": "click",
-            "targetId": "ps_2"
+            "targetId": "ps_1"
           }
         ]
       }
