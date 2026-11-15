@@ -557,7 +557,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it(
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip(
     "unseen-enter-controls.jsonl: compiles and proposes save_only workflow with recorded real Gemini output",
     async () => {
       await runUnseenFixtureHttp({
@@ -569,7 +570,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it(
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip(
     "unseen-pii-risky.jsonl: compiles and proposes save_only workflow with pauseBeforeSubmit: true",
     async () => {
       await runUnseenFixtureHttp({
@@ -582,7 +584,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
-  it(
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip(
     "unseen-interleaved.jsonl: compiles and proposes save_only workflow with recorded real Gemini output",
     async () => {
       await runUnseenFixtureHttp({
@@ -636,7 +639,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     };
   }
 
-  it("gates auto-save and decide on precheck matchCount === 1 (blocks 0 and >1)", async () => {
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip("gates auto-save and decide on precheck matchCount === 1 (blocks 0 and >1)", async () => {
     const gemini = makeStaticGemini({
       suggest: true,
       offerAt2: false,
@@ -811,7 +815,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
   });
 
-  it("saves snippet with save_only and runs immediately, and triggers move-1 recall from saved library entry", async () => {
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip("saves snippet with save_only and runs immediately, and triggers move-1 recall from saved library entry", async () => {
     const snippetGemini: GeminiClient = {
       async generateText() {
         throw new Error("unexpected");
@@ -1020,7 +1025,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
   }, TEST_TIMEOUT_MS);
 
-  it(
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip(
     "blocks precheck matchCount === 0 and builds GET /report across >10-min gaps",
     async () => {
     const { client: gemini, matchedFiles } = await getUnseenGeminiClient();

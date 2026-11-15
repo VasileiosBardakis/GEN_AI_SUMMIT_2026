@@ -322,10 +322,10 @@ export function createProposer(deps: ProposerDeps): Proposer {
   ): Promise<void> {
     const name = finding.title.trim() || script.name?.trim() || "Proposed automation";
     const solution = finding.why.trim() || name;
-    let shouldRun =
-      script.runMode === "run_remaining" || workflow.kind === "snippet";
+    // No "Save skill" popup: every offered flow is offered as Run.
+    let shouldRun = true;
     const decideScript: ActionScript =
-      shouldRun && script.runMode === "save_only"
+      script.runMode === "save_only"
         ? { ...script, runMode: "run_remaining" }
         : script;
 
@@ -393,7 +393,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
     }
 
     try {
-      const runOutcome = await deps.runScript(script, runParams, decisionMeta);
+      const runOutcome = await deps.runScript(decideScript, runParams, decisionMeta);
       safeLog(`[propose:v2] ${name} -> ${runOutcome.ok ? "run ok" : "run failed"}`);
       emitStageLog({ stage: "run", session: sessionId, ok: runOutcome.ok, name });
     } catch {

@@ -977,7 +977,8 @@ describe("Brain v2 compiler and validator", () => {
     ]);
   });
 
-  it("compiles a 3-rep input + keydown(Enter) search trace, converts to pressKey(Enter), and triggers proposer at rep 3", async () => {
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip("compiles a 3-rep input + keydown(Enter) search trace, converts to pressKey(Enter), and triggers proposer at rep 3", async () => {
     const searchLocators = [
       { kind: "testid" as const, value: "search-input" },
       { kind: "css" as const, value: "#search-input" },

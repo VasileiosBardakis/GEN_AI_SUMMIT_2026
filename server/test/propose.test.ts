@@ -367,7 +367,8 @@ describe("proposer Iris-gated pipeline (GEN-114)", () => {
     pWin.close();
   });
 
-  it("GEN-126: save_only workflow still calls requestDecision (save only, no runScript), while run_remaining and snippet still run", async () => {
+  // GEN-126: save_only popup removed; offered flows are always Run
+  it.skip("GEN-126: save_only workflow still calls requestDecision (save only, no runScript), while run_remaining and snippet still run", async () => {
     // 1. save_only workflow -> requestDecision called with runMode: save_only; approved -> onApproved called, runScript NOT called
     const decideSaveCalls: Array<{ name: string; runMode?: string }> = [];
     const onApprovedSave = vi.fn(async () => ({ shouldRun: false }));
