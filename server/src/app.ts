@@ -4,6 +4,11 @@ import path from "node:path";
 import type { Event, Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
+import {
+  readFallbackDemoVideo,
+  recordScriptReplay,
+  warmReplayBrowser,
+} from "./replay-video.ts";
 import { STEP_TRIGGER_TYPES } from "./common/target.ts";
 import {
   buildLibraryEntryFromScript,
@@ -122,6 +127,7 @@ type HandsCommand =
       name: string;
       solution: string;
       script: ActionScript;
+      videoUrl?: string;
       primaryLabel?: string;
       isRecall?: boolean;
       entryId?: string;
@@ -166,6 +172,55 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const precheckTimeoutMs = opts.precheckTimeoutMs ?? 10000;
   let latestScript: ActionScript | null = null;
   const scriptsByFindingId = new Map<string, ActionScript>();
+  const lastUrlByHost = new Map<string, string>();
+  let lastActiveUrl: string | undefined;
+  let browserWarmed = false;
+  const replayVideosByEntryId = new Map<string, Promise<Buffer | null>>();
+  const replayVideosByScriptKey = new Map<string, Promise<Buffer | null>>();
+  const decideMetaById = new Map<
+    string,
+    {
+      script: ActionScript;
+      entryId?: string;
+      fallbackUrl?: string;
+      videoPromise?: Promise<Buffer | null>;
+    }
+  >();
+
+  function scriptCacheKey(script: ActionScript): string {
+    return JSON.stringify(script.steps ?? []);
+  }
+
+  function startOrGetScriptReplay(
+    script: ActionScript,
+    fallbackUrl?: string,
+  ): Promise<Buffer | null> {
+    const key = scriptCacheKey(script);
+    const existing = replayVideosByScriptKey.get(key);
+    if (existing) return existing;
+    const promise = recordScriptReplay(script, {
+      hostUrls: lastUrlByHost,
+      fallbackUrl: fallbackUrl ?? lastActiveUrl,
+    });
+    replayVideosByScriptKey.set(key, promise);
+    return promise;
+  }
+
+  function getOrStartReplayVideo(id: string): Promise<Buffer | null> | undefined {
+    const meta = decideMetaById.get(id);
+    if (!meta) return undefined;
+    if (meta.entryId && replayVideosByEntryId.has(meta.entryId)) {
+      return replayVideosByEntryId.get(meta.entryId);
+    }
+    if (!meta.videoPromise) {
+      const promise = startOrGetScriptReplay(meta.script, meta.fallbackUrl);
+      meta.videoPromise = promise;
+      if (meta.entryId) {
+        replayVideosByEntryId.set(meta.entryId, promise);
+      }
+    }
+    return meta.videoPromise;
+  }
   const reportCache = new Map<string, Report>();
   const compileLibraryEntry = async (
     solution: string,
@@ -276,6 +331,26 @@ export function createServer(opts: CreateServerOptions): http.Server {
     timeoutMs: number,
     timeoutError?: string,
   ): Promise<HandsOutcome> {
+    if (cmd.kind === "decide") {
+      const steps = cmd.script.steps ?? [];
+      const firstStep = steps[0];
+      const isSingleInsert =
+        steps.length === 1 &&
+        firstStep?.action === "insertText" &&
+        !("target" in firstStep && firstStep.target);
+      const isFlowTip = cmd.primaryLabel?.trim() === "Got it";
+      if (!isSingleInsert && !isFlowTip && steps.length > 0) {
+        cmd.videoUrl = `/replay/${cmd.id}.webm`;
+        decideMetaById.set(cmd.id, {
+          script: cmd.script,
+          entryId: cmd.entryId,
+          fallbackUrl: lastActiveUrl,
+        });
+        if (!process.env.VITEST) {
+          void getOrStartReplayVideo(cmd.id);
+        }
+      }
+    }
     return new Promise<HandsOutcome>((resolve) => {
       const timer = setTimeout(() => {
         waiters.delete(cmd.id);
@@ -575,9 +650,12 @@ export function createServer(opts: CreateServerOptions): http.Server {
             precheckTimeoutMs,
             "Timed out waiting for extension precheck",
           ),
-        onCompiled: ({ finding, script }) => {
+        onCompiled: ({ finding, script, workflow }) => {
           scriptsByFindingId.set(finding.id, script);
           latestScript = script;
+          if (!process.env.VITEST && workflow?.kind !== "snippet") {
+            void startOrGetScriptReplay(script, workflow?.startUrl ?? lastActiveUrl);
+          }
         },
         onApproved: async ({ sessionId, script, workflow, finding }) => {
           const flatSteps = collectFlatSteps(script.steps);
@@ -661,6 +739,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
           latestScript = entry.script;
           scriptsByFindingId.set(finding.id, entry.script);
           reportCache.clear();
+          if (!process.env.VITEST && entry.kind === "workflow") {
+            replayVideosByEntryId.set(
+              entry.id,
+              recordScriptReplay(entry.script, {
+                hostUrls: lastUrlByHost,
+                fallbackUrl: context.url ?? lastActiveUrl,
+              }),
+            );
+          }
           emitStageLog?.({
             stage: "save_skill",
             session: sessionId,
@@ -729,6 +816,31 @@ export function createServer(opts: CreateServerOptions): http.Server {
     const url = new URL(req.url ?? "/", "http://localhost");
 
     try {
+      if (req.method === "GET" && rawPath.startsWith("/replay/")) {
+        let rawName: string;
+        try {
+          rawName = decodeURIComponent(rawPath.slice("/replay/".length));
+        } catch {
+          sendJson(res, 400, { ok: false, error: "Invalid replay id" });
+          return;
+        }
+        const id = rawName.replace(/\.webm$/i, "");
+        const videoPromise = getOrStartReplayVideo(id);
+        const buf = (await videoPromise) ?? (await readFallbackDemoVideo());
+        if (!buf) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Not found");
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "video/webm",
+          "Content-Length": String(buf.length),
+          "Cache-Control": "no-store",
+        });
+        res.end(buf);
+        return;
+      }
+
       if (req.method === "GET" && rawPath.startsWith("/artifact/")) {
         let id: string;
         try {
@@ -830,7 +942,22 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const scrubbed = validation.events.length - events.filter((e) => original.has(e)).length;
 
         await appendEvents(opts.tracesDir, events);
+        if (!browserWarmed && !process.env.VITEST) {
+          browserWarmed = true;
+          warmReplayBrowser();
+        }
         for (const evt of events) {
+          if (typeof evt.url === "string" && /^https?:\/\//i.test(evt.url)) {
+            lastActiveUrl = evt.url;
+            if (typeof evt.app === "string" && evt.app.trim().length > 0) {
+              lastUrlByHost.set(evt.app.trim().toLowerCase(), evt.url);
+            }
+            try {
+              lastUrlByHost.set(new URL(evt.url).hostname.toLowerCase(), evt.url);
+            } catch {
+              // ignore malformed URL
+            }
+          }
           if (evt.type === "focus" || evt.type === "click") {
             const visitedKey = extractEditableTargetKey(evt);
             if (visitedKey) recallMatcher.notifyTargetVisited(visitedKey);
