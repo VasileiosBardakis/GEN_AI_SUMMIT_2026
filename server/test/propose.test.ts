@@ -551,10 +551,10 @@ describe("proposer Iris-gated pipeline (GEN-114)", () => {
       expect(compileCount).toBe(1);
     });
     await new Promise((r) => setTimeout(r, 25));
-    // Triggering more events in same session on same host after unanswered timeout must NOT compile again
+    // After a timed-out popup the lock is released, so new events may compile again
     pLock.onEvents("sess_offer_lock");
     await new Promise((r) => setTimeout(r, 25));
-    expect(compileCount).toBe(1);
+    expect(compileCount).toBe(2);
     pLock.close();
 
     // Also verify answering ("dismissed") allows compiling a new offer in the same session

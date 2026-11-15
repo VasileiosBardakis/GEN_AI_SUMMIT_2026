@@ -524,8 +524,8 @@ export function createProposer(deps: ProposerDeps): Proposer {
       pendingOfferSessionHosts.add(`${sessionId}::${h}`);
       activeOfferHosts.set(h, (activeOfferHosts.get(h) ?? 0) + 1);
     }
-    const clearOfferPending = (answered: boolean): void => {
-      if (!answered) return;
+    // Release on every popup end (answer, timeout or error) so a site never stays locked.
+    const clearOfferPending = (_answered: boolean): void => {
       for (const h of offerHosts) {
         pendingOfferSessionHosts.delete(`${sessionId}::${h}`);
       }
@@ -547,6 +547,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       emitStageLog({ stage: "decide", session: sessionId, site, decision: "error", error: message, name });
       return;
     } finally {
+      clearOfferPending(true);
       for (const h of offerHosts) {
         const nextCount = (activeOfferHosts.get(h) ?? 0) - 1;
         if (nextCount > 0) {
