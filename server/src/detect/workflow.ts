@@ -32,6 +32,8 @@ const INCLUDED_EVENT_TYPES = new Set<Event["type"]>([
   "copy",
   "nav",
   "submit",
+  "key",
+  "keydown",
 ]);
 
 const SHORTCUT_RE =
@@ -69,6 +71,34 @@ function eventTargetKey(target?: Event["target"]): string {
   return `${sorted[0].kind}:${sorted[0].value}`;
 }
 
+const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
+
+function isPlaceholderHost(host?: string): boolean {
+  if (!host) return true;
+  const trimmed = host.trim().toLowerCase();
+  const hostname = trimmed.split(":")[0] ?? "";
+  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
+}
+
+function resolveEventHost(ev?: { app?: string; url?: string }): string | undefined {
+  if (!ev) return undefined;
+  if (ev.app && !isPlaceholderHost(ev.app)) {
+    return ev.app.trim();
+  }
+  if (ev.url) {
+    try {
+      const parsed = new URL(ev.url);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        const host = parsed.hostname.trim().toLowerCase();
+        if (!isPlaceholderHost(host)) return host;
+      }
+    } catch {
+      // ignore invalid URL
+    }
+  }
+  return undefined;
+}
+
 function mapEventsToStepMeta(
   steps: Step[],
   events?: Event[],
@@ -103,7 +133,7 @@ function mapEventsToStepMeta(
           action: "fill",
           startTs: ev.ts,
           endTs: ev.ts,
-          app: ev.app,
+          app: resolveEventHost(ev) ?? ev.app,
           lastValue: ev.value ?? "",
         });
       }
@@ -123,7 +153,7 @@ function mapEventsToStepMeta(
           action: "fill",
           startTs: ev.ts,
           endTs: ev.ts,
-          app: ev.app,
+          app: resolveEventHost(ev) ?? ev.app,
           lastValue: ev.value ?? "",
         });
       }
@@ -133,12 +163,35 @@ function mapEventsToStepMeta(
         action: "nav",
         startTs: ev.ts,
         endTs: ev.ts,
-        app: ev.app,
+        app: resolveEventHost(ev) ?? ev.app,
       });
       lastKey = "";
+    } else if (ev.type === "key" || ev.type === "keydown") {
+      if (ev.meta?.key !== "Enter") continue;
+      collapsed.push({
+        action: "submit",
+        startTs: ev.ts,
+        endTs: ev.ts,
+        app: ev.app,
+        lastValue: "Enter",
+      });
+      lastKey = eventTargetKey(ev.target);
+    } else if (ev.type === "submit") {
+      const prev = collapsed[collapsed.length - 1];
+      if (prev && prev.action === "submit" && prev.lastValue === "Enter") {
+        prev.endTs = ev.ts;
+        prev.lastValue = undefined;
+      } else {
+        collapsed.push({
+          action: "submit",
+          startTs: ev.ts,
+          endTs: ev.ts,
+          app: ev.app,
+        });
+      }
+      lastKey = eventTargetKey(ev.target);
     } else if (
       ev.type === "click" ||
-      ev.type === "submit" ||
       ev.type === "paste" ||
       ev.type === "copy"
     ) {
@@ -146,7 +199,7 @@ function mapEventsToStepMeta(
         action: ev.type,
         startTs: ev.ts,
         endTs: ev.ts,
-        app: ev.app,
+        app: resolveEventHost(ev) ?? ev.app,
       });
       lastKey = eventTargetKey(ev.target);
     }
@@ -167,7 +220,13 @@ function mapEventsToStepMeta(
       typeof inlineTs === "number"
         ? inlineTs
         : (fromCollapsed?.endTs ?? fromDirect?.ts);
-    const app = fromCollapsed?.app ?? fromDirect?.app;
+    const app =
+      (fromCollapsed?.app && !isPlaceholderHost(fromCollapsed.app)
+        ? fromCollapsed.app
+        : undefined) ??
+      resolveEventHost(fromDirect) ??
+      fromCollapsed?.app ??
+      fromDirect?.app;
 
     return { startTs, endTs, app };
   });
@@ -212,7 +271,7 @@ function splitSequences(
       continue;
     }
 
-    if (item.step.action === "submit") {
+    if (item.step.action === "submit" && item.step.value !== "Enter") {
       current.push(item);
       flush();
       continue;
@@ -225,7 +284,9 @@ function splitSequences(
   const afterLoopSplit: EnrichedStep[][] = [];
   for (const seq of initialSeqs) {
     if (seq.length === 0) continue;
-    const hasSubmit = seq.some((s) => s.step.action === "submit");
+    const hasSubmit = seq.some(
+      (s) => s.step.action === "submit" && s.step.value !== "Enter",
+    );
     if (!hasSubmit) {
       const firstKey = exactStepKey(seq[0].step);
       const splitIndices: number[] = [0];
@@ -434,18 +495,38 @@ function resolveApps(
   members: EnrichedStep[][],
   events?: Event[],
 ): { sourceApp: string; destApp: string } {
-  const firstMember = members[0];
-  const fromMemberStart = firstMember?.[0]?.app;
-  const fromMemberEnd = firstMember?.[firstMember.length - 1]?.app;
+  const firstMember = members[0] ?? [];
+  const memberRealApps = firstMember
+    .map((m) => m.app)
+    .filter((app): app is string => Boolean(app) && !isPlaceholderHost(app));
 
   const nonNavEvents = events?.filter((e) => e.type !== "nav") ?? [];
   const fallbackEvents =
     nonNavEvents.length > 0 ? nonNavEvents : (events ?? []);
+  const eventRealApps = fallbackEvents
+    .map((ev) => resolveEventHost(ev))
+    .filter((app): app is string => Boolean(app));
+  const allEventRealApps = (events ?? [])
+    .map((ev) => resolveEventHost(ev))
+    .filter((app): app is string => Boolean(app));
+
+  const fromMemberStart = memberRealApps[0];
+  const fromMemberEnd = memberRealApps[memberRealApps.length - 1];
+  const fromEventsStart = eventRealApps[0] ?? allEventRealApps[0];
+  const fromEventsEnd =
+    eventRealApps[eventRealApps.length - 1] ??
+    allEventRealApps[allEventRealApps.length - 1];
 
   const sourceApp =
-    fromMemberStart ?? fallbackEvents[0]?.app ?? "browser";
+    fromMemberStart ??
+    fromEventsStart ??
+    firstMember[0]?.app ??
+    fallbackEvents[0]?.app ??
+    "browser";
   const destApp =
     fromMemberEnd ??
+    fromEventsEnd ??
+    firstMember[firstMember.length - 1]?.app ??
     fallbackEvents[fallbackEvents.length - 1]?.app ??
     sourceApp;
 

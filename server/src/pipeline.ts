@@ -80,6 +80,8 @@ const INCLUDED_EVENT_TYPES = new Set<Event["type"]>([
   "copy",
   "nav",
   "submit",
+  "key",
+  "keydown",
 ]);
 
 const SHORTCUT_RE =
@@ -214,9 +216,40 @@ function mapEventsToSteps(steps: Step[], events?: Event[]): EventStepMapping {
       });
       stepIndexByEvent.set(evIdx, collapsed.length - 1);
       lastKey = "";
+    } else if (ev.type === "key" || ev.type === "keydown") {
+      if (ev.meta?.key !== "Enter") continue;
+      collapsed.push({
+        action: "submit",
+        startTs: ev.ts,
+        endTs: ev.ts,
+        app: ev.app,
+        label: ev.target?.label,
+        lastValue: "Enter",
+      });
+      stepIndexByEvent.set(evIdx, collapsed.length - 1);
+      lastKey = eventTargetKey(ev.target);
+    } else if (ev.type === "submit") {
+      const prev = collapsed[collapsed.length - 1];
+      if (prev && prev.action === "submit" && prev.lastValue === "Enter") {
+        prev.endTs = ev.ts;
+        prev.lastValue = undefined;
+        if (!prev.label && ev.target?.label) {
+          prev.label = ev.target.label;
+        }
+        stepIndexByEvent.set(evIdx, collapsed.length - 1);
+      } else {
+        collapsed.push({
+          action: "submit",
+          startTs: ev.ts,
+          endTs: ev.ts,
+          app: ev.app,
+          label: ev.target?.label,
+        });
+        stepIndexByEvent.set(evIdx, collapsed.length - 1);
+      }
+      lastKey = eventTargetKey(ev.target);
     } else if (
       ev.type === "click" ||
-      ev.type === "submit" ||
       ev.type === "paste" ||
       ev.type === "copy"
     ) {
@@ -294,7 +327,7 @@ function splitIntoSequences(
       continue;
     }
 
-    if (item.step.action === "submit") {
+    if (item.step.action === "submit" && item.step.value !== "Enter") {
       current.push(item);
       flush();
       continue;
@@ -307,7 +340,9 @@ function splitIntoSequences(
   const afterLoopSplit: IndexedStep[][] = [];
   for (const seq of initialSeqs) {
     if (seq.length === 0) continue;
-    const hasSubmit = seq.some((s) => s.step.action === "submit");
+    const hasSubmit = seq.some(
+      (s) => s.step.action === "submit" && s.step.value !== "Enter",
+    );
     if (!hasSubmit) {
       const firstKey = seq[0].key;
       const splitIndices: number[] = [0];
@@ -644,10 +679,133 @@ function pickBestLocator(
   return best;
 }
 
+const CSS_SELECT_TARGET_RE = /(?:^|[\s>+~,])select(?=[#.[:\s>+~,]|$)/i;
+
+function normalizeLocatorKey(loc: { kind: string; value: string }): string {
+  const val =
+    loc.kind === "text" || loc.kind === "aria"
+      ? loc.value.replace(SHORTCUT_RE, "")
+      : loc.value;
+  return `${loc.kind}:${val}`;
+}
+
+export function isSelectStep(step: Step, events?: Event[]): boolean {
+  const target = step.target;
+  if (!target || target.length === 0) return false;
+
+  for (const loc of target) {
+    if (loc.kind === "css" && CSS_SELECT_TARGET_RE.test(loc.value.trim())) {
+      return true;
+    }
+    if (
+      loc.kind === "aria" &&
+      loc.value.trim().toLowerCase().startsWith("combobox[")
+    ) {
+      return true;
+    }
+  }
+
+  if (!events || events.length === 0) return false;
+
+  const stepKeys = new Set(target.map(normalizeLocatorKey));
+  for (const ev of events) {
+    const evLocs = ev.target?.locators;
+    if (!evLocs || evLocs.length === 0) continue;
+    const matchesTarget = evLocs.some((loc) =>
+      stepKeys.has(normalizeLocatorKey(loc)),
+    );
+    if (!matchesTarget) continue;
+    if (
+      ev.target?.tag?.toLowerCase() === "select" ||
+      ev.meta?.selectedValue !== undefined
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
+
+function isPlaceholderHost(host?: string): boolean {
+  if (!host) return true;
+  const trimmed = host.trim().toLowerCase();
+  const hostname = trimmed.split(":")[0] ?? "";
+  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
+}
+
+function resolveEventHost(ev?: Event): string | undefined {
+  if (!ev) return undefined;
+  if (ev.app && !isPlaceholderHost(ev.app)) {
+    return ev.app.trim();
+  }
+  if (ev.url) {
+    try {
+      const parsed = new URL(ev.url);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        const host = parsed.hostname.trim().toLowerCase();
+        if (!isPlaceholderHost(host)) return host;
+      }
+    } catch {
+      // ignore invalid URL
+    }
+  }
+  return undefined;
+}
+
+function resolveWorkflowHosts(
+  workflow: Workflow,
+  events?: Event[],
+): { sourceHost?: string; destHost?: string } {
+  const nonNav = events?.filter((e) => e.type !== "nav") ?? [];
+  const pool = nonNav.length > 0 ? nonNav : (events ?? []);
+  const copyHost = pool
+    .filter((e) => e.type === "copy")
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+  const firstPoolHost = pool
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+  const firstAllHost = (events ?? [])
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+
+  const destWriteHost = [...pool]
+    .reverse()
+    .filter(
+      (e) =>
+        e.type === "paste" ||
+        e.type === "input" ||
+        e.type === "change" ||
+        e.type === "submit",
+    )
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+  const lastPoolHost = [...pool]
+    .reverse()
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+  const lastAllHost = [...(events ?? [])]
+    .reverse()
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+
+  const sourceHost = !isPlaceholderHost(workflow.sourceApp)
+    ? workflow.sourceApp.trim()
+    : (copyHost ?? firstPoolHost ?? firstAllHost);
+  const destHost = !isPlaceholderHost(workflow.destApp)
+    ? workflow.destApp.trim()
+    : (destWriteHost ?? lastPoolHost ?? lastAllHost ?? sourceHost);
+
+  return { sourceHost, destHost };
+}
+
 export function buildSolutionText(
   verdict: Verdict,
-  workflow: Workflow,
+  workflow?: Workflow,
   snippetText?: string,
+  events?: Event[],
 ): string | null {
   if (verdict === "rung1") {
     if (typeof snippetText === "string" && snippetText.trim().length > 0) {
@@ -657,6 +815,7 @@ export function buildSolutionText(
   }
 
   if (verdict === "rung2") {
+    if (!workflow) return null;
     const paramExampleByName = new Map<string, string>();
     for (const p of workflow.params ?? []) {
       if (typeof p.example === "string" && p.example.trim().length > 0) {
@@ -664,24 +823,29 @@ export function buildSolutionText(
       }
     }
 
+    const { sourceHost, destHost } = resolveWorkflowHosts(workflow, events);
+    const hasValidSource = Boolean(sourceHost && !isPlaceholderHost(sourceHost));
+    const hasValidDest = Boolean(destHost && !isPlaceholderHost(destHost));
+
     const copiedParams = new Set<string>();
     const isCrossHost = Boolean(
-      workflow.sourceApp &&
-        workflow.destApp &&
-        workflow.sourceApp !== workflow.destApp,
+      hasValidSource &&
+        hasValidDest &&
+        sourceHost !== destHost,
     );
     const hasCopySteps = workflow.steps.some((s) => s.action === "copy");
     let sawCopy = false;
     let insertedSwitchTab = false;
     const rawLines: string[] = [];
 
-    if (workflow.sourceApp && (hasCopySteps || isCrossHost)) {
-      rawLines.push(`switchTab host="${workflow.sourceApp}"`);
+    if (hasValidSource && (hasCopySteps || isCrossHost)) {
+      rawLines.push(`switchTab host="${sourceHost}"`);
     }
 
     for (const step of workflow.steps) {
       if (
         isCrossHost &&
+        hasValidDest &&
         !insertedSwitchTab &&
         sawCopy &&
         (copiedParams.size > 0 || hasCopySteps) &&
@@ -689,7 +853,7 @@ export function buildSolutionText(
           step.action === "paste" ||
           step.action === "click")
       ) {
-        rawLines.push(`switchTab host="${workflow.destApp}"`);
+        rawLines.push(`switchTab host="${destHost}"`);
         insertedSwitchTab = true;
       }
 
@@ -706,6 +870,14 @@ export function buildSolutionText(
         }
       }
 
+      if (step.action === "submit") {
+        rawLines.push(`pressKey "Enter" on ${targetDesc}`);
+        continue;
+      }
+
+      const isSelect = step.action === "fill" && isSelectStep(step, events);
+      const actionVerb = isSelect ? "select <select>" : step.action;
+
       if (
         (step.action === "fill" || step.action === "paste") &&
         step.value !== undefined &&
@@ -713,13 +885,15 @@ export function buildSolutionText(
       ) {
         const { param } = step.value;
         if (copiedParams.has(param)) {
-          rawLines.push(`fill ${targetDesc} with "{{${param}}}"`);
+          rawLines.push(
+            `${isSelect ? "select <select>" : "fill"} ${targetDesc} with "{{${param}}}"`,
+          );
         } else {
           const example = paramExampleByName.get(param);
           if (example) {
-            rawLines.push(`${step.action} ${targetDesc} with "${example}"`);
+            rawLines.push(`${actionVerb} ${targetDesc} with "${example}"`);
           } else {
-            rawLines.push(`${step.action} ${targetDesc} with {${param}}`);
+            rawLines.push(`${actionVerb} ${targetDesc} with {${param}}`);
           }
         }
         continue;
@@ -735,13 +909,13 @@ export function buildSolutionText(
               : paramExampleByName.has(step.value.param)
                 ? ` with "${paramExampleByName.get(step.value.param)}"`
                 : ` with {${step.value.param}}`;
-      rawLines.push(`${step.action} ${targetDesc}${valDesc}`);
+      rawLines.push(`${actionVerb} ${targetDesc}${valDesc}`);
     }
 
     const lines = rawLines.map((line, idx) => `${idx + 1}. ${line}`);
     const header = isCrossHost
-      ? `Read values on ${workflow.sourceApp}, switch to ${workflow.destApp}, and fill on ${workflow.destApp}:`
-      : `Execute the workflow "${workflow.name}" on ${workflow.destApp}:`;
+      ? `Read values on ${sourceHost}, switch to ${destHost}, and fill on ${destHost}:`
+      : `Execute the workflow "${workflow.name}" on ${destHost ?? sourceHost ?? workflow.destApp}:`;
     return `${header}\n${lines.join("\n")}`;
   }
 
@@ -757,8 +931,16 @@ type PipelineItem = {
 };
 
 function resolvePrimaryApp(events?: Event[]): string {
-  const nonNav = events?.find((e) => e.type !== "nav");
-  return nonNav?.app ?? events?.[0]?.app ?? "browser";
+  const nonNav = events?.filter((e) => e.type !== "nav") ?? [];
+  for (const ev of nonNav) {
+    const host = resolveEventHost(ev);
+    if (host) return host;
+  }
+  for (const ev of events ?? []) {
+    const host = resolveEventHost(ev);
+    if (host) return host;
+  }
+  return nonNav[0]?.app ?? events?.[0]?.app ?? "browser";
 }
 
 function snippetToCandidate(
@@ -1065,6 +1247,7 @@ export async function runPipeline(
           verdict,
           candidate.workflow,
           item.snippetText,
+          opts.events,
         );
         if (solution && opts.llm) {
           const implementStartedAt = Date.now();

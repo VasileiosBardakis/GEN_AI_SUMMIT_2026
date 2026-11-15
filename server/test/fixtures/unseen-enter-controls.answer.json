@@ -1,0 +1,61 @@
+{
+  "promptHash": "47888ebdb9d750b0fcbf6a7e6136d7b3d513763b2c642593d7938b3e7b319c51",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Automated Ticket Routing",
+    "reason": "Repeated process of copying Ticket IDs from intake to dispatch console and assigning priority.",
+    "risk": "low",
+    "runMode": "save_only",
+    "params": [
+      {
+        "name": "priority",
+        "example": "expedited"
+      }
+    ],
+    "steps": [
+      {
+        "action": "readText",
+        "stepIndex": 1,
+        "value": "ticketId"
+      },
+      {
+        "action": "switchTab",
+        "host": "routing.local"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 3,
+        "value": "{{ticketId}}"
+      },
+      {
+        "action": "select",
+        "stepIndex": 4,
+        "value": "{{priority}}"
+      },
+      {
+        "action": "click",
+        "stepIndex": 5
+      },
+      {
+        "action": "fill",
+        "stepIndex": 6,
+        "value": "true"
+      },
+      {
+        "action": "key",
+        "stepIndex": 7,
+        "value": "Enter"
+      },
+      {
+        "action": "submit",
+        "stepIndex": 8
+      },
+      {
+        "action": "switchTab",
+        "host": "intake.local"
+      }
+    ]
+  }
+}

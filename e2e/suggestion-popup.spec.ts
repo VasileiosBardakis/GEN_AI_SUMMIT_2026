@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { resolveChromeExecutable } from "../scripts/lib/chrome.mjs";
 import { startDemoServer } from "../scripts/lib/static-server.mjs";
 import { createServer } from "../server/src/app.ts";
+import { listSessions, readEvents } from "../server/src/trace.ts";
+import type { Event } from "../shared/contract.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -50,6 +52,22 @@ test("silently saves repeated snippets and only prompts to actually insert when 
   const tracesDir = fs.mkdtempSync(path.join(os.tmpdir(), "eyes-e2e-traces-"));
   const dataDir = path.join(tracesDir, "data");
   const apiServer: http.Server = createServer({ tracesDir, dataDir, autoPropose: false });
+  const [defaultHandler] = apiServer.listeners("request") as Array<
+    (req: http.IncomingMessage, res: http.ServerResponse) => void
+  >;
+  apiServer.removeAllListeners("request");
+  apiServer.on("request", async (req, res) => {
+    if (req.method === "GET" && req.url?.split("?")[0] === "/events") {
+      const sessions = await listSessions(tracesDir);
+      const events = (
+        await Promise.all(sessions.map((s) => readEvents(tracesDir, s.session)))
+      ).flat();
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true, events }));
+      return;
+    }
+    defaultHandler(req, res);
+  });
   await new Promise<void>((resolve) => {
     apiServer.listen(0, "127.0.0.1", () => resolve());
   });
@@ -199,18 +217,21 @@ test("silently saves repeated snippets and only prompts to actually insert when 
     });
     await expect(popup).toHaveCount(0);
 
-    // 6. Short values (<20 chars) + "Company name" vs "Owner email":
+    // 6. Short values (<20 chars) + "Company name" vs "Payment notes":
     //    - no cross-field contamination from "name" attribute selectors
-    //    - clicking another field (City) before Insert still pastes into Owner email
+    //    - clicking another field (City) before Insert still pastes into Payment notes
+    await page
+      .locator('input[name="notes"]')
+      .evaluate((el) => el.setAttribute("placeholder", "Invoice notes"));
     for (let i = 0; i < 3; i += 1) {
       await dispatchPaste(page, 'input[name="company_name"]', "Nikolaidis logistics");
       await page.waitForTimeout(250);
       await page.locator('input[name="company_name"]').fill("");
     }
     for (let i = 0; i < 3; i += 1) {
-      await dispatchPaste(page, 'input[name="owner_email"]', "ops@example.com");
+      await dispatchPaste(page, 'input[name="notes"]', "Invoice ref 4820");
       await page.waitForTimeout(250);
-      await page.locator('input[name="owner_email"]').fill("");
+      await page.locator('input[name="notes"]').fill("");
     }
 
     await expect
@@ -218,28 +239,56 @@ test("silently saves repeated snippets and only prompts to actually insert when 
         const res = await fetch(`${apiBaseUrl}/library`);
         const json = (await res.json()) as { items?: Array<{ name: string }> };
         return (
-          Boolean(json.items?.some((item) => item.name.includes("ops@example.com"))) &&
+          Boolean(json.items?.some((item) => item.name.includes("Invoice ref 4820"))) &&
           Boolean(json.items?.some((item) => item.name.includes("Nikolaidis logistics")))
         );
       })
       .toBe(true);
 
-    const emailInput = page.locator('input[name="owner_email"]');
-    await emailInput.click();
+    const notesInput = page.locator('input[name="notes"]');
+    await notesInput.click();
     await expect(popup).toBeVisible({ timeout: 10_000 });
     await expect
       .poll(() =>
         popup.evaluate((host) => host.shadowRoot?.querySelector("h2")?.textContent?.trim() ?? "")
       )
-      .toContain("ops@example.com");
+      .toContain("Invoice ref 4820");
 
-    // Move focus to City (which has no snippet), then click Insert -> must fill Owner email, NOT City
+    // Move focus to City (which has no snippet), then click Insert -> must fill Payment notes, NOT City
     await page.locator('input[name="city"]').click();
     await popup.evaluate((host) => {
       (host.shadowRoot!.querySelector("[data-eyes-primary]") as HTMLButtonElement).click();
     });
-    await expect(emailInput).toHaveValue("ops@example.com", { timeout: 10_000 });
+    await expect(notesInput).toHaveValue("Invoice ref 4820", { timeout: 10_000 });
     await expect(page.locator('input[name="city"]')).toHaveValue("");
+
+    // Typed email addresses are masked before storage and never persisted in raw form
+    const emailInput = page.locator('input[name="owner_email"]');
+    await emailInput.click();
+    await emailInput.pressSequentially("alice@example.com");
+    await page.locator('input[name="city"]').click();
+
+    await expect
+      .poll(async () => {
+        const res = await fetch(`${apiBaseUrl}/events`);
+        const json = (await res.json()) as { events?: Event[] };
+        const allEvents = json.events ?? [];
+        const emailEvent = allEvents.find(
+          (evt) =>
+            evt.meta?.typing?.inputName === "owner_email" &&
+            typeof evt.value === "string" &&
+            /^\[REDACTED:EMAIL#h_[0-9a-f]+\]$/.test(evt.value)
+        );
+        return {
+          matched: Boolean(
+            emailEvent &&
+              emailEvent.meta?.privacy?.redacted === true &&
+              emailEvent.meta?.privacy?.piiTypes?.includes("email")
+          ),
+          leakedRawEmail: allEvents.some((evt) => JSON.stringify(evt).includes("alice@example.com")),
+        };
+      })
+      .toEqual({ matched: true, leakedRawEmail: false });
 
     // 7. Switching directly between two empty fields with saved snippets smoothly replaces the popup
     await page.waitForTimeout(1100);

@@ -1,0 +1,69 @@
+{
+  "promptHash": "9940d3d9b3290436645de05cc8d94d18bb1d1312f1e42bffca0a34419c9460f9",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "File Freight Declarations",
+    "reason": "Automates the process of reading waybill data from the freight manifest and filing declarations in the customs portal.",
+    "risk": "medium",
+    "runMode": "run_remaining",
+    "params": [
+      {
+        "name": "waybill",
+        "description": "Waybill number extracted from the freight manifest."
+      },
+      {
+        "name": "weight",
+        "description": "Weight extracted from the freight manifest."
+      }
+    ],
+    "steps": [
+      {
+        "action": "forEach",
+        "itemIds": [
+          "item_1_4",
+          "item_1_5"
+        ],
+        "steps": [
+          {
+            "action": "readText",
+            "stepIndex": 1,
+            "withinId": "item_1_4",
+            "withinTextParam": "col1",
+            "bind": "waybill"
+          },
+          {
+            "action": "readText",
+            "stepIndex": 2,
+            "withinId": "item_1_4",
+            "withinTextParam": "col2",
+            "bind": "weight"
+          },
+          {
+            "action": "switchTab",
+            "host": "customs.local"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 4,
+            "value": "{{waybill}}"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 5,
+            "value": "{{weight}}"
+          },
+          {
+            "action": "click",
+            "stepIndex": 6
+          },
+          {
+            "action": "switchTab",
+            "host": "freight.local"
+          }
+        ]
+      }
+    ]
+  }
+}

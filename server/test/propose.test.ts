@@ -74,6 +74,7 @@ describe("auto-propose HTTP integration (POST /events -> /hands/next -> /hands/r
     server = createServer({
       tracesDir,
       dataDir,
+      pipeline: "v1",
       gemini: { sdk: makeFakeGemini("rung1") },
       implement: fakeImplement,
       autoPropose: true,
@@ -273,6 +274,7 @@ describe("createProposer unit tests", () => {
     const runScript = vi.fn(async () => ({ ok: true }));
 
     const proposer = createProposer({
+      pipeline: "v1",
       runReport: async () => {
         throw new Error("report explosion");
       },
@@ -323,6 +325,7 @@ describe("createProposer unit tests", () => {
     const logs: string[] = [];
 
     const proposer = createProposer({
+      pipeline: "v1",
       runReport,
       requestDecision,
       runScript,
@@ -421,6 +424,7 @@ describe("createProposer unit tests", () => {
     const logs: string[] = [];
 
     const proposer = createProposer({
+      pipeline: "v1",
       runReport: async () => ({ findings, scripts }),
       requestDecision,
       runScript,
@@ -486,6 +490,7 @@ describe("createProposer unit tests", () => {
     });
 
     const proposer = createProposer({
+      pipeline: "v1",
       runReport: async () => ({
         findings,
         scripts: new Map<string, ActionScript>([
@@ -529,6 +534,7 @@ describe("createProposer unit tests", () => {
     const server = createServer({
       tracesDir: path.join(rootDir, "traces"),
       dataDir: path.join(rootDir, "data"),
+      pipeline: "v1",
       gemini: { sdk: makeFakeGemini("rung1") },
       implement: implementSpy,
       proposeDebounceMs: 0,

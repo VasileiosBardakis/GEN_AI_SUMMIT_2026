@@ -18,8 +18,10 @@ import {
   DEFAULT_PIPELINE_CONFIG,
   describeCandidate,
   filterNoisySteps,
+  isSelectStep,
   runPipeline,
 } from "../src/pipeline.ts";
+import { buildReport } from "../src/report.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -684,6 +686,376 @@ describe("pipeline unit & config tests", () => {
         stability: 0.9,
       }),
     ).toBe('Insert reply: "Hi, thanks for your order. It ships Frid..."');
+  });
+
+  it("buildSolutionText emits select <select> for <select> targets (css, combobox aria, or matching events) while keeping fill for <input>", () => {
+    const wf: Workflow = {
+      id: "wf_dropdown",
+      name: "erp.local workflow (4 steps)",
+      sourceApp: "erp.local",
+      destApp: "erp.local",
+      steps: [
+        {
+          action: "fill",
+          target: [{ kind: "css", value: 'select[name="priority"]' }],
+          value: "urgent",
+        },
+        {
+          action: "fill",
+          target: [
+            { kind: "testid", value: "status-select" },
+            { kind: "css", value: "#status" },
+          ],
+          value: { param: "status" },
+        },
+        {
+          action: "fill",
+          target: [
+            { kind: "aria", value: 'combobox[name="Region"]' },
+            { kind: "css", value: "#region-picker" },
+          ],
+          value: "eu-west",
+        },
+        {
+          action: "fill",
+          target: [
+            { kind: "testid", value: "note-input" },
+            { kind: "css", value: 'input[name="note"]' },
+          ],
+          value: { param: "note" },
+        },
+        {
+          action: "submit",
+          target: [{ kind: "css", value: "#entry-form" }],
+        },
+      ],
+      params: [
+        { name: "status", example: "approved" },
+        { name: "note", example: "Verified invoice" },
+      ],
+      instances: [],
+    };
+
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "ev-status",
+        ts: 1000,
+        session: "sess_drop",
+        source: "browser",
+        app: "erp.local",
+        type: "change",
+        target: {
+          tag: "select",
+          role: "combobox",
+          locators: [
+            { kind: "testid", value: "status-select" },
+            { kind: "css", value: "#status" },
+          ],
+        },
+        value: "approved",
+        meta: { selectedValue: "approved", selectedLabel: "Approved" },
+      },
+      {
+        v: 1,
+        id: "ev-note",
+        ts: 1100,
+        session: "sess_drop",
+        source: "browser",
+        app: "erp.local",
+        type: "input",
+        target: {
+          tag: "input",
+          role: "textbox",
+          locators: [
+            { kind: "testid", value: "note-input" },
+            { kind: "css", value: 'input[name="note"]' },
+          ],
+        },
+        value: "Verified invoice",
+      },
+    ];
+
+    expect(isSelectStep(wf.steps[0])).toBe(true);
+    expect(isSelectStep(wf.steps[1])).toBe(false);
+    expect(isSelectStep(wf.steps[1], events)).toBe(true);
+    expect(isSelectStep(wf.steps[2])).toBe(true);
+    expect(isSelectStep(wf.steps[3], events)).toBe(false);
+
+    const solution = buildSolutionText("rung2", wf, undefined, events);
+    expect(solution).not.toBeNull();
+    expect(solution).toContain(
+      '1. select <select> css="select[name="priority"]" with "urgent"',
+    );
+    expect(solution).toContain(
+      '2. select <select> testid="status-select" with "approved"',
+    );
+    expect(solution).toContain(
+      '3. select <select> css="#region-picker" with "eu-west"',
+    );
+    expect(solution).toContain(
+      '4. fill testid="note-input" with "Verified invoice"',
+    );
+    expect(solution).not.toContain('fill css="select[name="priority"]"');
+    expect(solution).not.toContain('fill testid="status-select"');
+    expect(solution).not.toContain('select <select> testid="note-input"');
+  });
+
+  it("buildSolutionText resolves real hosts from events and never emits switchTab host='browser', 'unknown', or 'local-page'", () => {
+    for (const placeholder of ["browser", "unknown", "local-page"]) {
+      const wfWithPlaceholder: Workflow = {
+        id: `wf_${placeholder}`,
+        name: "Placeholder flow",
+        sourceApp: placeholder,
+        destApp: placeholder,
+        steps: [
+          {
+            action: "copy",
+            target: [{ kind: "testid", value: "portal-id" }],
+            value: { param: "id" },
+          },
+          {
+            action: "paste",
+            target: [{ kind: "testid", value: "erp-id" }],
+            value: { param: "id" },
+          },
+          {
+            action: "click",
+            target: [{ kind: "testid", value: "save-btn" }],
+          },
+        ],
+        params: [{ name: "id", example: "INV-1" }],
+        instances: [],
+      };
+
+      // Without events having real hosts, omit switchTab host="browser" / "unknown" / "local-page"
+      const noHostSolution = buildSolutionText("rung2", wfWithPlaceholder);
+      expect(noHostSolution).not.toBeNull();
+      expect(noHostSolution).not.toContain(`switchTab host="${placeholder}"`);
+      expect(noHostSolution).not.toContain("switchTab");
+
+      // With events having real URLs despite placeholder app, resolve real hosts
+      const eventsWithUrls: Event[] = [
+        {
+          v: 1,
+          id: "ev-copy",
+          ts: 1000,
+          session: "sess_real",
+          source: "browser",
+          app: placeholder,
+          url: "http://localhost:4173/portal.html",
+          type: "copy",
+          target: { locators: [{ kind: "testid", value: "portal-id" }] },
+          value: "INV-1",
+        },
+        {
+          v: 1,
+          id: "ev-paste",
+          ts: 2000,
+          session: "sess_real",
+          source: "browser",
+          app: placeholder,
+          url: "http://127.0.0.1:4173/erp.html",
+          type: "paste",
+          target: { locators: [{ kind: "testid", value: "erp-id" }] },
+          value: "INV-1",
+        },
+      ];
+      const resolvedSolution = buildSolutionText(
+        "rung2",
+        wfWithPlaceholder,
+        undefined,
+        eventsWithUrls,
+      );
+      expect(resolvedSolution).not.toBeNull();
+      expect(resolvedSolution).toContain('switchTab host="localhost"');
+      expect(resolvedSolution).toContain('switchTab host="127.0.0.1"');
+      expect(resolvedSolution).not.toContain(`host="${placeholder}"`);
+    }
+  });
+
+  it("runPipeline passes events to buildSolutionText so implementor receives select <select> for dropdowns", async () => {
+    const baseTs = 1_700_000_000_000;
+    const events: Event[] = [0, 1, 2].flatMap((i) => [
+      {
+        v: 1 as const,
+        id: `sel-${i}`,
+        ts: baseTs + i * 5000,
+        session: "sess_dropdown_pipe",
+        source: "browser" as const,
+        app: "erp.local",
+        type: "change" as const,
+        target: {
+          tag: "select",
+          role: "combobox",
+          locators: [{ kind: "css" as const, value: "#priority" }],
+        },
+        value: "high",
+        meta: { selectedValue: "high", selectedLabel: "High" },
+      },
+      {
+        v: 1 as const,
+        id: `inp-${i}`,
+        ts: baseTs + i * 5000 + 200,
+        session: "sess_dropdown_pipe",
+        source: "browser" as const,
+        app: "erp.local",
+        type: "input" as const,
+        target: {
+          tag: "input",
+          role: "textbox",
+          locators: [{ kind: "css" as const, value: "#summary" }],
+        },
+        value: `Item ${i + 1}`,
+      },
+      {
+        v: 1 as const,
+        id: `sub-${i}`,
+        ts: baseTs + i * 5000 + 400,
+        session: "sess_dropdown_pipe",
+        source: "browser" as const,
+        app: "erp.local",
+        type: "submit" as const,
+        target: {
+          tag: "form",
+          locators: [{ kind: "css" as const, value: "#ticket-form" }],
+        },
+      },
+    ]);
+
+    const steps = normalize(events);
+    let capturedSolution = "";
+    const implement = vi.fn(async (solution: string, opts?: { name?: string }) => {
+      capturedSolution = solution;
+      return makeFakeActionScript(opts?.name);
+    });
+
+    const findings = await runPipeline(steps, {
+      llm: true,
+      events,
+      gemini: {
+        sdk: {
+          models: {
+            generateContent: async () => ({
+              text: JSON.stringify({
+                level: "rung2",
+                confidence: 0.95,
+                name: "Submit priority ticket",
+                risky: false,
+              }),
+            }),
+          },
+        },
+      },
+      implement,
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].verdict).toBe("rung2");
+    expect(implement).toHaveBeenCalledTimes(1);
+    expect(capturedSolution).toContain('select <select> css="#priority" with "high"');
+    expect(capturedSolution).toContain('fill css="#summary" with "Item 1"');
+  });
+
+  it("buildSolutionText emits pressKey \"Enter\" for submit steps and buildReport detects the 3-tag-plus-Save workflow", async () => {
+    const tagLocators = [{ kind: "testid" as const, value: "tag-input" }];
+    const saveLocators = [{ kind: "testid" as const, value: "save-tags" }];
+
+    const wf: Workflow = {
+      id: "wf_tags",
+      name: "tags.local workflow (8 steps)",
+      sourceApp: "tags.local",
+      destApp: "tags.local",
+      steps: [
+        { action: "click", target: tagLocators },
+        { action: "fill", target: tagLocators, value: { param: "tag_1" } },
+        { action: "submit", target: tagLocators, value: "Enter" },
+        { action: "fill", target: tagLocators, value: { param: "tag_2" } },
+        { action: "submit", target: tagLocators, value: "Enter" },
+        { action: "fill", target: tagLocators, value: { param: "tag_3" } },
+        { action: "submit", target: tagLocators, value: "Enter" },
+        { action: "click", target: saveLocators },
+      ],
+      params: [
+        { name: "tag_1", example: "alpha" },
+        { name: "tag_2", example: "beta" },
+        { name: "tag_3", example: "gamma" },
+      ],
+      instances: [],
+    };
+
+    const solution = buildSolutionText("rung2", wf);
+    expect(solution).not.toBeNull();
+    expect(solution).toContain('pressKey "Enter" on testid="tag-input"');
+    expect(solution?.match(/pressKey "Enter" on testid="tag-input"/g)).toHaveLength(3);
+    expect(solution).toContain('click testid="save-tags"');
+
+    const baseTs = 1_750_000_000_000;
+    const tagTriples = [
+      ["alpha", "beta", "gamma"],
+      ["delta", "epsilon", "zeta"],
+      ["eta", "theta", "iota"],
+    ];
+    let idx = 0;
+    const nextEvent = (
+      type: Event["type"],
+      extra: Partial<Omit<Event, "type">>,
+    ): Event => {
+      idx += 1;
+      return {
+        v: 1,
+        id: `tag-ev-${idx}`,
+        ts: baseTs + idx * 500,
+        session: "sess_tags_v1",
+        source: "browser",
+        app: "tags.local",
+        type,
+        ...extra,
+      };
+    };
+
+    const events: Event[] = tagTriples.flatMap(([t1, t2, t3]) => [
+      nextEvent("click", { target: { tag: "input", locators: tagLocators } }),
+      nextEvent("input", { target: { tag: "input", locators: tagLocators }, value: t1 }),
+      nextEvent("keydown", { target: { tag: "input", locators: tagLocators }, meta: { key: "Enter" } }),
+      nextEvent("input", { target: { tag: "input", locators: tagLocators }, value: t2 }),
+      nextEvent("keydown", { target: { tag: "input", locators: tagLocators }, meta: { key: "Enter" } }),
+      nextEvent("input", { target: { tag: "input", locators: tagLocators }, value: t3 }),
+      nextEvent("keydown", { target: { tag: "input", locators: tagLocators }, meta: { key: "Enter" } }),
+      nextEvent("click", { target: { tag: "button", locators: saveLocators } }),
+    ]);
+
+    let capturedSolution = "";
+    const scriptStore = new Map<string, ActionScript>();
+    const report = await buildReport("sess_tags_v1", events, {
+      pipeline: "v1",
+      llm: true,
+      gemini: {
+        sdk: {
+          models: {
+            generateContent: async () => ({
+              text: JSON.stringify({
+                verdict: "rung2",
+                confidence: 0.95,
+                name: "Add 3 tags and save",
+                risky: false,
+              }),
+            }),
+          },
+        },
+      },
+      implement: async (sol, opts) => {
+        capturedSolution = sol;
+        return makeFakeActionScript(opts?.name);
+      },
+      scriptStore,
+    });
+
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].verdict).toBe("rung2");
+    expect(report.findings[0].stats.repetitions).toBe(3);
+    expect(capturedSolution.match(/pressKey "Enter" on testid="tag-input"/g)).toHaveLength(3);
+    expect(capturedSolution).toContain('click testid="save-tags"');
   });
 });
 

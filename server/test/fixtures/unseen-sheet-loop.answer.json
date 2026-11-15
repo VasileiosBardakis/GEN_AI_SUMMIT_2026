@@ -1,0 +1,71 @@
+{
+  "promptHash": "04316bf55421802a8034b80e8c19e25563dc3c7d7b57f5e7dd4c20f63d798509",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Sync Client Rates",
+    "reason": "Automate copying lookup rates from sheet to client details for pending items.",
+    "risk": "low",
+    "runMode": "run_remaining",
+    "params": [
+      {
+        "name": "clientName",
+        "description": "The name of the client to process"
+      }
+    ],
+    "steps": [
+      {
+        "action": "forEach",
+        "itemIds": [
+          "item_1_3",
+          "item_1_4"
+        ],
+        "steps": [
+          {
+            "action": "click",
+            "stepIndex": 1,
+            "withinId": "ps_1",
+            "withinTextParam": "clientName"
+          },
+          {
+            "action": "click",
+            "stepIndex": 2,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName"
+          },
+          {
+            "action": "readText",
+            "stepIndex": 3,
+            "withinId": "ps_4",
+            "withinTextParam": "clientName",
+            "bind": "rateValue"
+          },
+          {
+            "action": "click",
+            "stepIndex": 4
+          },
+          {
+            "action": "fill",
+            "stepIndex": 5,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName",
+            "value": "{{rateValue}}"
+          },
+          {
+            "action": "click",
+            "stepIndex": 6,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName"
+          },
+          {
+            "action": "click",
+            "stepIndex": 7,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName"
+          }
+        ]
+      }
+    ]
+  }
+}
