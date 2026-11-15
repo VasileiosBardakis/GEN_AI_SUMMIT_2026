@@ -246,6 +246,106 @@ function isExactRepetitionOf(
   return true;
 }
 
+function primaryTargetKey(step: V2Step | undefined): string | undefined {
+  const loc = step?.target?.[0];
+  if (!loc) return undefined;
+  return `${loc.kind}:${loc.value}`;
+}
+
+function hasAnyPrimaryTarget(cand: PatternCandidate): boolean {
+  return cand.instances.some((inst) =>
+    inst.steps.some((step) => primaryTargetKey(step) !== undefined),
+  );
+}
+
+function hasDistinctRepeatingSubtargets(
+  longer: PatternCandidate,
+  subLen: number,
+): boolean {
+  if (longer.instances.length < 2 || subLen <= 0) return false;
+  if (longer.actions.length % subLen !== 0) return false;
+  const k = longer.actions.length / subLen;
+  if (k < 2) return false;
+  if (!longer.instances.every((inst) => inst.steps.length === longer.actions.length)) {
+    return false;
+  }
+
+  for (let j = 0; j < subLen; j++) {
+    const hasDistinctSubTargets = longer.instances.some((inst) => {
+      const seen = new Set<string>();
+      for (let m = 0; m < k; m++) {
+        const key = primaryTargetKey(inst.steps[m * subLen + j]);
+        if (key !== undefined) seen.add(key);
+      }
+      return seen.size >= 2;
+    });
+    if (!hasDistinctSubTargets) continue;
+
+    for (let m = 0; m < k; m++) {
+      const counts = new Map<string, number>();
+      for (const inst of longer.instances) {
+        const key = primaryTargetKey(inst.steps[m * subLen + j]);
+        if (key === undefined) continue;
+        const next = (counts.get(key) ?? 0) + 1;
+        if (next >= 2) {
+          return true;
+        }
+        counts.set(key, next);
+      }
+    }
+  }
+
+  return false;
+}
+
+function isTrivialRepetitionGrouping(
+  longer: PatternCandidate,
+  shorter: PatternCandidate,
+): boolean {
+  if (!isExactRepetitionOf(longer.actions, shorter.actions)) return false;
+  if (hasDistinctRepeatingSubtargets(longer, shorter.actions.length)) {
+    return false;
+  }
+  if (!hasAnyPrimaryTarget(longer) && !hasAnyPrimaryTarget(shorter)) {
+    return false;
+  }
+  return true;
+}
+
+function candidateCovers(
+  other: PatternCandidate,
+  cand: PatternCandidate,
+): boolean {
+  if (other === cand || other.actions.length <= cand.actions.length) return false;
+
+  const otherSteps = new Set<V2Step>();
+  for (const oi of other.instances) {
+    for (const s of oi.steps) {
+      otherSteps.add(s);
+    }
+  }
+
+  if (otherSteps.size > 0 && cand.instances.every((ci) => ci.steps.length > 0)) {
+    let totalSteps = 0;
+    let coveredSteps = 0;
+    const minPerInstance = Math.max(1, cand.actions.length - 1);
+    for (const ci of cand.instances) {
+      let instCovered = 0;
+      for (const s of ci.steps) {
+        if (otherSteps.has(s)) instCovered += 1;
+      }
+      if (instCovered < minPerInstance) return false;
+      totalSteps += ci.steps.length;
+      coveredSteps += instCovered;
+    }
+    return coveredSteps * 5 >= totalSteps * 4;
+  }
+
+  return cand.instances.every((ci) =>
+    other.instances.some((oi) => ci.startTs >= oi.startTs && ci.endTs <= oi.endTs),
+  );
+}
+
 export function pickPrimaryCandidate(
   candidates: readonly PatternCandidate[],
   minRepeats = resolveRepeatCount(),
@@ -253,35 +353,20 @@ export function pickPrimaryCandidate(
   if (candidates.length === 0) return undefined;
   const nonSubsumed = candidates.filter((cand) => {
     const subsumed = candidates.some((other) => {
-      if (other === cand || other.actions.length <= cand.actions.length) return false;
-      if (isExactRepetitionOf(other.actions, cand.actions)) return false;
-
-      const otherSteps = new Set<V2Step>();
-      for (const oi of other.instances) {
-        for (const s of oi.steps) {
-          otherSteps.add(s);
-        }
+      if (!candidateCovers(other, cand)) return false;
+      if (isTrivialRepetitionGrouping(other, cand)) return false;
+      if (
+        candidates.some(
+          (sup) =>
+            sup !== other &&
+            sup.actions.length > other.actions.length &&
+            candidateCovers(sup, other) &&
+            isTrivialRepetitionGrouping(sup, cand),
+        )
+      ) {
+        return false;
       }
-
-      if (otherSteps.size > 0 && cand.instances.every((ci) => ci.steps.length > 0)) {
-        let totalSteps = 0;
-        let coveredSteps = 0;
-        const minPerInstance = Math.max(1, cand.actions.length - 1);
-        for (const ci of cand.instances) {
-          let instCovered = 0;
-          for (const s of ci.steps) {
-            if (otherSteps.has(s)) instCovered += 1;
-          }
-          if (instCovered < minPerInstance) return false;
-          totalSteps += ci.steps.length;
-          coveredSteps += instCovered;
-        }
-        return coveredSteps * 5 >= totalSteps * 4;
-      }
-
-      return cand.instances.every((ci) =>
-        other.instances.some((oi) => ci.startTs >= oi.startTs && ci.endTs <= oi.endTs),
-      );
+      return true;
     });
     return !subsumed;
   });
@@ -291,7 +376,7 @@ export function pickPrimaryCandidate(
       !pool.some(
         (shorter) =>
           shorter !== cand &&
-          isExactRepetitionOf(cand.actions, shorter.actions),
+          isTrivialRepetitionGrouping(cand, shorter),
       ),
   );
   const finalPool = filteredPool.length > 0 ? filteredPool : pool;
@@ -313,7 +398,7 @@ async function runV2ReportForEvents(
   const { steps, piiMap } = eventsToSteps(events);
   const minRepeats = options.minRepeats ?? resolveRepeatCount();
   const candidates = detectRepeatedCandidates(steps, { minRepeats });
-  const top = pickPrimaryCandidate(candidates);
+  const top = pickPrimaryCandidate(candidates, minRepeats);
   if (!top) return [];
 
   if (options.llm === false) {

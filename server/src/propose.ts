@@ -381,9 +381,8 @@ function extractConstantsFromPair(
 function detectConstantDiff(
   constants: ReadonlyMap<number, StepConstant>,
   instances: readonly PatternInstance[],
-  startIdx = 2,
 ): string | null {
-  for (let i = startIdx; i < instances.length; i++) {
+  for (let i = 2; i < instances.length; i++) {
     const inst = instances[i];
     for (const [stepIdx, expected] of constants.entries()) {
       const step = inst.steps[stepIdx];
@@ -663,7 +662,13 @@ export function createProposer(deps: ProposerDeps): Proposer {
         if (!existingRep2.compiled || !existingRep2.compiled.offerAt2) {
           return;
         }
-        compiled = existingRep2.compiled;
+        compiled = {
+          ...existingRep2.compiled,
+          stats: {
+            ...existingRep2.compiled.stats,
+            repetitions: candidate.count,
+          },
+        };
       } else {
         try {
           compiled = await deps.compileV2({
@@ -708,7 +713,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
     } else {
       const cached = rep2Cache.get(cacheKey);
       if (cached && cached.compiled) {
-        const diffReason = detectConstantDiff(cached.constants, candidate.instances, precompileAt);
+        const diffReason = detectConstantDiff(cached.constants, candidate.instances);
         if (diffReason === null) {
           compiled = {
             ...cached.compiled,

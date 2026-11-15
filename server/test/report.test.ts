@@ -523,7 +523,7 @@ describe("buildReport (v2 repetition counting)", () => {
 
   function buildPortalToErpRowEvents(
     rows: number,
-    opts?: { omitInitialTabSwitch?: boolean },
+    opts?: { omitInitialTabSwitch?: boolean; omitSaveSubmit?: boolean },
   ): Event[] {
     const events: Event[] = [];
     let seq = 0;
@@ -574,10 +574,12 @@ describe("buildReport (v2 repetition counting)", () => {
           value: `${fields[f]}-${r}`,
         });
       }
-      push("click", "erp.local", {
-        target: { locators: [{ kind: "testid", value: "save-btn" }] },
-      });
-      push("submit", "erp.local");
+      if (!opts?.omitSaveSubmit) {
+        push("click", "erp.local", {
+          target: { locators: [{ kind: "testid", value: "save-btn" }] },
+        });
+        push("submit", "erp.local");
+      }
     }
     return events;
   }
@@ -626,6 +628,34 @@ describe("buildReport (v2 repetition counting)", () => {
     expect(primary).toBeDefined();
     expect(primary?.count).toBe(3);
     expect(primary?.actions.length).toBeGreaterThan(20);
+  });
+
+  it("reports repetitions === 3 (not 12) when 3 rows x 4 fields is an exact multiple of the field cycle (no save/submit)", async () => {
+    const events = buildPortalToErpRowEvents(3, { omitSaveSubmit: true });
+    const report = await buildReport("sess_v2_portal_erp", events, {
+      pipeline: "v2",
+      llm: false,
+    });
+
+    expect(ReportSchema.parse(report)).toEqual(report);
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].stats.repetitions).toBe(3);
+
+    const { steps } = eventsToSteps(events);
+    const candidates = detectRepeatedCandidates(steps);
+    const primary = pickPrimaryCandidate(candidates);
+    expect(primary).toBeDefined();
+    expect(primary?.count).toBe(3);
+    expect(primary?.actions.length).toBe(28);
+
+    // A genuine single 4-step task repeated 6 times still reports 6 (not grouped as 3x8)
+    const sixTries = buildFourStepEvents(6);
+    const sixReport = await buildReport("sess_v2_4step", sixTries, {
+      pipeline: "v2",
+      llm: false,
+    });
+    expect(sixReport.findings).toHaveLength(1);
+    expect(sixReport.findings[0].stats.repetitions).toBe(6);
   });
 
   it("returns findings: [] for 1 row of the 4-field portal-to-ERP flow", async () => {
