@@ -51,7 +51,17 @@ export type CompileOptions = {
   model?: string;
 };
 
-const DEFAULT_COMPILE_TIMEOUT_MS = 5000;
+export const DEFAULT_V2_COMPILE_MODEL = "gemini-3.1-flash-lite";
+export const DEFAULT_COMPILE_TIMEOUT_MS = 5000;
+
+export function resolveCompileTimeoutMs(): number {
+  const n = Number(process.env.V2_COMPILE_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_COMPILE_TIMEOUT_MS;
+}
+
+export function resolveCompileModel(): string {
+  return process.env.V2_COMPILE_MODEL?.trim() || DEFAULT_V2_COMPILE_MODEL;
+}
 const MAX_PROMPT_STEPS = 60;
 const MAX_SUMMARY_CHARS = 4096;
 
@@ -936,7 +946,7 @@ function buildCompilePrompt(
     "",
     "RULES:",
     "1. Never write selectors. Every click/fill/select/readText/key/submit MUST have `stepIndex` of a step with `hasTarget: true` (matching the action, e.g. `fill` stepIndex for `fill`, `key` stepIndex for `key`), OR an exact `targetId` from PageSummary Targets. Never emit empty \"\".",
-    "2. Pick ONE clean repetition and drop one-off stray clicks.",
+    "2. Pick ONE clean repetition and drop stray, decorative, or non-essential clicks and side excursions (e.g. help/info/tooltip links) even if repeated in every repetition. Never emit `navigate` to an informational/excursion URL or reload a form page the user is already on.",
     "3. Keep all distinct form fields (multi-field Tab forms keep every `fill` via its own `stepIndex`). Always preserve Enter-key submissions (`action: \"key\", key: \"Enter\"` with the `key` step's `stepIndex`) rather than dropping them.",
     "4. Copied values use `readText` with `bind` (REQUIRED on every `readText`, e.g. `\"bind\":\"<varName>\"`, NEVER omit `bind`) and `fill` with `\"{{<varName>}}\"`.",
     "5. User-supplied variables go in `params[]` and `\"{{paramName}}\"`. Never invent placeholder/masked literals; preserve `__PII_*__` tokens if typed literally.",
@@ -1481,11 +1491,11 @@ function createCompileGeminiClient(
   const baseOpts: GeminiClientOptions = opts?.gemini ?? {};
   return createGeminiClient({
     ...baseOpts,
-    ...(opts?.model !== undefined ? { model: opts.model } : {}),
+    model: opts?.model ?? baseOpts.model ?? resolveCompileModel(),
     thinkingBudget: baseOpts.thinkingBudget ?? 0,
     responseSchema:
       baseOpts.responseSchema ?? buildCompilerResponseSchema(ctx),
-    timeoutMs: baseOpts.timeoutMs ?? opts?.timeoutMs ?? DEFAULT_COMPILE_TIMEOUT_MS,
+    timeoutMs: baseOpts.timeoutMs ?? opts?.timeoutMs ?? resolveCompileTimeoutMs(),
   });
 }
 
