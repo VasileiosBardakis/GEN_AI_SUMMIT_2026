@@ -648,7 +648,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
     for (const [name, value] of entries) {
       const idx = out.findIndex((p) => p.name === name);
       if (idx >= 0) {
-        if (!out[idx].example) out[idx].example = value;
+        out[idx].example = value;
       } else {
         out.push({ name, example: value });
       }
@@ -734,12 +734,12 @@ export function createServer(opts: CreateServerOptions): http.Server {
         startStepIndex > 0 ? extractMatchedPrefixBindings(sessionEvents, entry) : {};
       const matchedUrl = typeof matchedEvent?.url === "string" ? matchedEvent.url : undefined;
       const providedParams: Record<string, string> = {
-        ...boundValues,
         ...Object.fromEntries(
           (entry.script.params ?? [])
             .filter((p) => p.example !== undefined || p.piiHash !== undefined)
             .map((p) => [p.name, p.example ?? p.piiHash ?? ""]),
         ),
+        ...boundValues,
       };
       const urlStartIndex =
         matchedUrl && entry.kind !== "snippet"
