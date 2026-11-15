@@ -3,7 +3,7 @@ import type http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Event } from "@gen/shared";
 import { createServer } from "../../src/app.ts";
 import { buildLibraryEntryFromScript } from "../../src/hands/implementor.ts";
@@ -444,6 +444,268 @@ describe("createLibraryRecallMatcher", () => {
         2_500,
       ),
     ).toBeNull();
+  });
+
+  it("fires a saved Portal->ERP workflow immediately on move 1 (copy event on portal.html)", async () => {
+    const matcher = createLibraryRecallMatcher();
+    const portalToErp = buildLibraryEntryFromScript({
+      name: "Portal order to ERP",
+      solution: "Read order ID on portal.html, switch to erp.html, and fill order ID.",
+      script: {
+        name: "Portal order to ERP",
+        steps: [
+          {
+            action: "readText",
+            target: { kind: "css", value: ".order-id" },
+            bind: "orderId",
+          },
+          { action: "switchTab", host: "erp.local" },
+          {
+            action: "fill",
+            target: { kind: "css", value: 'input[name="order_id"]' },
+            value: "{{orderId}}",
+          },
+        ],
+      },
+      context: {
+        app: "localhost",
+        url: "http://localhost:5173/portal.html",
+        title: "Customer Portal",
+      },
+      status: "active",
+      now: 1_000,
+    });
+
+    expect(portalToErp.eyes.guards.fieldEmptyOnly).toBe(false);
+    expect(portalToErp.eyes.targetHints.locators).toEqual([{ kind: "css", value: ".order-id" }]);
+
+    const copyEvt = makeEvent({
+      id: "evt_portal_copy",
+      app: "localhost",
+      url: "http://localhost:5173/portal.html",
+      window: "Customer Portal",
+      type: "copy",
+      value: "ORD-1042",
+      target: {
+        locators: [{ kind: "css", value: ".order-id" }],
+        tag: "span",
+      },
+    });
+
+    const match = matcher.matchEventsWithEvent([copyEvt], [portalToErp], 15_000);
+    expect(match?.entry.id).toBe(portalToErp.id);
+    expect(match?.borderline).toBe(false);
+
+    // Non-borderline Locator[] match does not need Iris
+    const fetchMock = vi.fn<typeof globalThis.fetch>();
+    const irisMatch = await matcher.matchEventsWithIris([copyEvt], [portalToErp], {
+      now: 15_000,
+      irisOpts: { apiKey: "test-key", projectId: "test-proj", fetch: fetchMock },
+    });
+    expect(irisMatch?.entry.id).toBe(portalToErp.id);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to semantic role/label/text matching when primary Locator[] drift and ranks Locator[] matches first", () => {
+    const matcher = createLibraryRecallMatcher();
+    const driftedEntry = buildLibraryEntryFromScript({
+      name: "Fill CRM email",
+      solution: "Fill Customer Email on CRM.",
+      script: {
+        name: "Fill CRM email",
+        steps: [
+          {
+            action: "fill",
+            target: { kind: "css", value: "#legacy-email-v1" },
+            value: "ops@acme.example",
+          },
+        ],
+      },
+      context: {
+        app: "crm.local",
+        url: "https://crm.local/customers/new",
+        title: "New Customer",
+        targetLabel: "Customer Email",
+        targetRole: "textbox",
+      },
+      status: "active",
+      now: 1_000,
+    });
+
+    const driftedEvt = makeEvent({
+      app: "crm.local",
+      url: "https://crm.local/customers/new",
+      window: "New Customer",
+      type: "click",
+      value: "",
+      target: {
+        locators: [{ kind: "css", value: "#email-v2" }],
+        tag: "input",
+        role: "textbox",
+        label: "Customer Email",
+      },
+    });
+
+    const fallbackMatch = matcher.matchEventsWithEvent([driftedEvt], [driftedEntry], 20_000);
+    expect(fallbackMatch?.entry.id).toBe(driftedEntry.id);
+    expect(fallbackMatch?.borderline).toBe(true);
+
+    // Exact/CSS-list Locator[] match beats semantic-only fallback
+    const exactEntry = buildLibraryEntryFromScript({
+      name: "Fill CRM email v2",
+      solution: "Fill Customer Email v2 on CRM.",
+      script: {
+        name: "Fill CRM email v2",
+        steps: [
+          {
+            action: "fill",
+            target: { kind: "css", value: "input.primary, #email-v2" },
+            value: "v2@acme.example",
+          },
+        ],
+      },
+      context: {
+        app: "crm.local",
+        url: "https://crm.local/customers/new",
+        title: "New Customer",
+        targetLabel: "Customer Email",
+        targetRole: "textbox",
+      },
+      status: "active",
+      now: 900,
+    });
+
+    const rankedMatch = matcher.matchEventsWithEvent(
+      [driftedEvt],
+      [driftedEntry, exactEntry],
+      20_000,
+    );
+    expect(rankedMatch?.entry.id).toBe(exactEntry.id);
+    expect(rankedMatch?.borderline).toBe(false);
+    expect(rankedMatch?.score).toBeGreaterThan(fallbackMatch!.score);
+  });
+
+  it("resolves 1-signal and semantic borderline matches via judgeRecallIris and ignores timeouts without throwing", async () => {
+    const matcher = createLibraryRecallMatcher();
+
+    // 1-signal match (unscoped entry with minSignals: 1, single label match)
+    const oneSignalBase = buildLibraryEntryFromScript({
+      name: "Fill invoice code",
+      solution: "Fill Invoice Code.",
+      script: {
+        name: "Fill invoice code",
+        steps: [
+          {
+            action: "fill",
+            target: { kind: "aria", value: "Invoice Code" },
+            value: "INV-900",
+          },
+        ],
+      },
+      status: "active",
+      now: 1_000,
+    });
+    const oneSignalEntry: LibraryEntry = {
+      ...oneSignalBase,
+      eyes: {
+        ...oneSignalBase.eyes,
+        targetHints: {
+          roles: [],
+          labelContains: ["invoice code"],
+          locators: [],
+        },
+        guards: {
+          ...oneSignalBase.eyes.guards,
+          minSignals: 1,
+        },
+      },
+    };
+
+    const evt = makeEvent({
+      app: "unseen.local",
+      url: "https://unseen.local/form",
+      window: "Form",
+      type: "focus",
+      value: "",
+      target: {
+        locators: [{ kind: "css", value: "#inv-code" }],
+        tag: "input",
+        label: "Invoice Code",
+      },
+    });
+
+    const syncMatch = matcher.matchEventsWithEvent([evt], [oneSignalEntry], 30_000);
+    expect(syncMatch?.score).toBe(1);
+    expect(syncMatch?.borderline).toBe(true);
+
+    // Iris approves borderline match
+    const approveFetch = vi.fn<typeof globalThis.fetch>(async () =>
+      new Response(
+        JSON.stringify({
+          model: "projects/test-proj/models/iris-latest",
+          answers: { match: { noul: 0.92 } },
+          usage: { inputTokens: 12, outputTokens: 2 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const approved = await matcher.matchEventsWithIris([evt], [oneSignalEntry], {
+      now: 30_000,
+      irisOpts: { apiKey: "test-key", projectId: "test-proj", fetch: approveFetch },
+    });
+    expect(approveFetch).toHaveBeenCalledTimes(1);
+    expect(approved?.entry.id).toBe(oneSignalEntry.id);
+
+    // Iris rejects borderline match
+    const rejectFetch = vi.fn<typeof globalThis.fetch>(async () =>
+      new Response(
+        JSON.stringify({
+          model: "projects/test-proj/models/iris-latest",
+          answers: { match: { noul: 0.15 } },
+          usage: { inputTokens: 12, outputTokens: 2 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const rejected = await matcher.matchEventsWithIris([evt], [oneSignalEntry], {
+      now: 30_000,
+      irisOpts: { apiKey: "test-key", projectId: "test-proj", fetch: rejectFetch },
+    });
+    expect(rejectFetch).toHaveBeenCalledTimes(1);
+    expect(rejected).toBeNull();
+
+    // Timeout / null from Iris falls back cleanly to accepting the semantic match without throwing
+    const hungTimers: ReturnType<typeof setTimeout>[] = [];
+    const timeoutFetch = vi.fn<typeof globalThis.fetch>(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("late")), 5_000);
+          hungTimers.push(timer);
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(new DOMException("Aborted", "AbortError"));
+            },
+            { once: true },
+          );
+        }),
+    );
+
+    const timedOutFallback = await matcher.matchEventsWithIris([evt], [oneSignalEntry], {
+      now: 30_000,
+      irisOpts: {
+        apiKey: "test-key",
+        projectId: "test-proj",
+        timeoutMs: 25,
+        fetch: timeoutFetch,
+      },
+    });
+    for (const t of hungTimers) clearTimeout(t);
+    expect(timeoutFetch).toHaveBeenCalledTimes(1);
+    expect(timedOutFallback?.entry.id).toBe(oneSignalEntry.id);
   });
 });
 
