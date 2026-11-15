@@ -525,7 +525,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       activeOfferHosts.set(h, (activeOfferHosts.get(h) ?? 0) + 1);
     }
     // Release on every popup end (answer, timeout or error) so a site never stays locked.
-    const clearOfferPending = (_answered: boolean): void => {
+    const clearOfferPending = (): void => {
       for (const h of offerHosts) {
         pendingOfferSessionHosts.delete(`${sessionId}::${h}`);
       }
@@ -547,7 +547,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       emitStageLog({ stage: "decide", session: sessionId, site, decision: "error", error: message, name });
       return;
     } finally {
-      clearOfferPending(true);
+      clearOfferPending();
       for (const h of offerHosts) {
         const nextCount = (activeOfferHosts.get(h) ?? 0) - 1;
         if (nextCount > 0) {
@@ -562,14 +562,14 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
     if (!outcome.ok || outcome.decision !== "approved") {
       const isTimeout = !outcome.ok && /timed?\s*out/i.test(outcome.error ?? "");
-      clearOfferPending(!isTimeout);
+      clearOfferPending();
       const decision = outcome.decision === "dismissed" ? "dismissed" : isTimeout ? "timeout" : "dismissed";
       safeLog(`[propose:v2] ${name} -> ${decision}`);
       emitStageLog({ stage: "decide", session: sessionId, site, decision, name });
       return;
     }
 
-    clearOfferPending(true);
+    clearOfferPending();
 
     safeLog(`[propose:v2] ${name} -> approved`);
     emitStageLog({ stage: "decide", session: sessionId, site, decision: "approved", name });
