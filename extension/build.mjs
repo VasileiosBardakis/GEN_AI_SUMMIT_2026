@@ -29,7 +29,9 @@ const pageSummaryCode = compileTs(path.join(srcDir, "page-summary.ts"))
 const handsCode = compileTs(path.join(srcDir, "hands", "execute.ts")).replace(/export\s+/g, "");
 const suggestionCode = compileTs(path.join(srcDir, "suggestion.ts")).replace(/export\s+/g, "");
 const utilsCode = compileTs(path.join(srcDir, "utils.ts")).replace(/export\s+/g, "");
-const libraryCode = compileTs(path.join(srcDir, "library.ts")).replace(/export\s+/g, "");
+const libraryCode = compileTs(path.join(srcDir, "library.ts"))
+  .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/suggestion\.js["'];?/g, "")
+  .replace(/export\s+/g, "");
 
 const contentCode = compileTs(path.join(srcDir, "content.ts"))
   .replace(
@@ -66,7 +68,7 @@ const panelSource = compileTs(path.join(srcDir, "panel.ts"))
   .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/(library|utils)\.js["'];?/g, "")
   .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/hands\/execute\.(ts|js)["'];?/g, "")
   .replace(/export\s+/g, "");
-const panelCode = `(() => {\n"use strict";\n${handsCode}\n${utilsCode}\n${libraryCode}\n${panelSource}\n})();\n`;
+const panelCode = `(() => {\n"use strict";\n${handsCode}\n${suggestionCode}\n${utilsCode}\n${libraryCode}\n${panelSource}\n})();\n`;
 fs.writeFileSync(path.join(distDir, "panel.js"), panelCode, "utf8");
 fs.copyFileSync(path.join(srcDir, "panel.html"), path.join(distDir, "panel.html"));
 

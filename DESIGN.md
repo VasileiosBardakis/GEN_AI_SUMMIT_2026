@@ -46,8 +46,8 @@ This document defines the visual language, color tokens, typography, and compone
 
 ## 3. Typography
 
-- **UI Sans**: `system-ui, -apple-system, "Segoe UI", sans-serif`
-- **Monospace**: `ui-monospace, "SFMono-Regular", Menlo, monospace` (reserved for keycap targets, trace selectors, and keyboard shortcuts)
+- **UI Sans**: `"Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif` (bundled SIL OFL variable font `dist/fonts/Geist-Variable.woff2`)
+- **Monospace**: `"Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace` (bundled SIL OFL variable font `dist/fonts/GeistMono-Variable.woff2`; reserved for keycap targets, metrics, trace selectors, and keyboard shortcuts)
 - **Weights**:
   - `400` — body text, node labels
   - `500` — buttons, pattern count tags, sub-labels
