@@ -2,7 +2,8 @@ import {
   computeLibrarySummary,
   formatDuration,
   formatRelativeTime,
-  libraryEntryToOptimization,
+  LIBRARY_STORAGE_KEY,
+  mergeServerAndLocalOptimizations,
   recordOptimizationRun,
   type LibraryEntryWithStats,
   type OptimizationItem,
@@ -64,6 +65,10 @@ interface ChromePanelApi {
     }) => Promise<Array<{ result?: StepResult }>>;
   };
   storage?: {
+    local?: {
+      get?: (keys?: string | string[] | null) => Promise<Record<string, unknown>>;
+      set?: (items: Record<string, unknown>) => Promise<void>;
+    };
     onChanged?: {
       addListener: (cb: (changes: Record<string, unknown>, areaName: string) => void) => void;
     };
@@ -71,6 +76,8 @@ interface ChromePanelApi {
 }
 
 let allItems: OptimizationItem[] = [];
+let lastServerEntries: LibraryEntryWithStats[] = [];
+let latestLocalItems: OptimizationItem[] | null = null;
 let currentFilter: FilterMode = "all";
 let searchQuery = "";
 const expandedFlows = new Set<string>();
@@ -1009,40 +1016,48 @@ async function handleAction(action: string, id: string): Promise<void> {
   }
 
   if (action === "toggle") {
+    const nextStatus: OptimizationItem["status"] =
+      target.status === "active" ? "paused" : "active";
     const res = await sendBgMessage({ kind: "EYES_TOGGLE_OPTIMIZATION", id });
     if (res?.items) {
-      allItems = res.items;
-    } else {
-      allItems = allItems.map((item) =>
-        item.id === id
-          ? { ...item, status: item.status === "active" ? "paused" : "active" }
-          : item
-      );
+      allItems = mergeServerAndLocalOptimizations(lastServerEntries, res.items);
     }
+    allItems = allItems.map((item) =>
+      item.id === id ? { ...item, status: nextStatus } : item
+    );
+    await saveLocalLibrary(allItems);
     render();
     return;
   }
 
   if (action === "activate") {
-    const res = await sendBgMessage({ kind: "EYES_ACTIVATE_OPTIMIZATION", id });
+    const activated: OptimizationItem = { ...target, status: "active" };
+    const res = await sendBgMessage({
+      kind: "EYES_ACTIVATE_OPTIMIZATION",
+      id,
+      item: activated,
+    });
     if (res?.items) {
-      allItems = res.items;
-    } else {
-      allItems = allItems.map((item) =>
-        item.id === id ? { ...item, status: "active" } : item
-      );
+      allItems = mergeServerAndLocalOptimizations(lastServerEntries, res.items);
     }
+    if (allItems.some((item) => item.id === id)) {
+      allItems = allItems.map((item) => (item.id === id ? activated : item));
+    } else {
+      allItems = [activated, ...allItems];
+    }
+    await saveLocalLibrary(allItems);
     setFeedback(id, "Added to library", "ok");
     return;
   }
 
   if (action === "dismiss") {
+    lastServerEntries = lastServerEntries.filter((entry) => entry.id !== id);
     const res = await sendBgMessage({ kind: "EYES_DISMISS_OPTIMIZATION", id });
     if (res?.items) {
-      allItems = res.items;
-    } else {
-      allItems = allItems.filter((item) => item.id !== id);
+      allItems = mergeServerAndLocalOptimizations(lastServerEntries, res.items);
     }
+    allItems = allItems.filter((item) => item.id !== id);
+    await saveLocalLibrary(allItems);
     render();
     return;
   }
@@ -1070,6 +1085,7 @@ async function handleAction(action: string, id: string): Promise<void> {
         if (activeHttpTab?.id === undefined) {
           if (target.snippetText && (await copyFallback(target.snippetText))) {
             allItems = recordOptimizationRun(allItems, id);
+            await saveLocalLibrary(allItems);
             setFeedback(id, `Copied · +${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
             return;
           }
@@ -1079,10 +1095,12 @@ async function handleAction(action: string, id: string): Promise<void> {
         try {
           await runActionScriptInTab(chromeApi!, activeHttpTab.id, target.script);
           allItems = recordOptimizationRun(allItems, id);
+          await saveLocalLibrary(allItems);
           setFeedback(id, `+${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
         } catch (err) {
           if (target.snippetText && (await copyFallback(target.snippetText))) {
             allItems = recordOptimizationRun(allItems, id);
+            await saveLocalLibrary(allItems);
             setFeedback(id, `Copied · +${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
             return;
           }
@@ -1099,6 +1117,7 @@ async function handleAction(action: string, id: string): Promise<void> {
       if (res && !res.ok) {
         if (target.snippetText && (await copyFallback(target.snippetText))) {
           allItems = recordOptimizationRun(allItems, id);
+          await saveLocalLibrary(allItems);
           setFeedback(id, `Copied · +${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
           return;
         }
@@ -1109,6 +1128,7 @@ async function handleAction(action: string, id: string): Promise<void> {
         await copyFallback(target.snippetText);
       }
       allItems = recordOptimizationRun(allItems, id);
+      await saveLocalLibrary(allItems);
       setFeedback(id, `+${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
       return;
     }
@@ -1117,11 +1137,12 @@ async function handleAction(action: string, id: string): Promise<void> {
       await copyFallback(target.snippetText);
     }
     allItems = recordOptimizationRun(allItems, id);
+    await saveLocalLibrary(allItems);
     setFeedback(id, `+${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
   }
 }
 
-async function loadServerLibrary(): Promise<OptimizationItem[]> {
+async function loadServerEntries(): Promise<LibraryEntryWithStats[]> {
   try {
     const resp = await fetch(`${SERVER_URL}/library`);
     if (!resp.ok) return [];
@@ -1130,14 +1151,63 @@ async function loadServerLibrary(): Promise<OptimizationItem[]> {
       items?: LibraryEntryWithStats[];
     };
     if (data?.ok === false || !Array.isArray(data?.items)) return [];
-    return data.items.map((entry) => libraryEntryToOptimization(entry));
+    return data.items;
   } catch {
     return [];
   }
 }
 
+async function loadLocalLibrary(): Promise<OptimizationItem[]> {
+  const chromeApi = getChromeApi();
+  if (chromeApi?.storage?.local?.get) {
+    try {
+      const stored = await chromeApi.storage.local.get(LIBRARY_STORAGE_KEY);
+      const raw = stored?.[LIBRARY_STORAGE_KEY];
+      if (Array.isArray(raw)) {
+        return raw as OptimizationItem[];
+      }
+      return [];
+    } catch {
+      // fall through to runtime message
+    }
+  }
+  const res = await sendBgMessage({ kind: "EYES_GET_LIBRARY" });
+  return Array.isArray(res?.items) ? res.items : [];
+}
+
+async function saveLocalLibrary(items: OptimizationItem[]): Promise<void> {
+  latestLocalItems = items;
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.storage?.local?.set) return;
+  try {
+    await chromeApi.storage.local.set({ [LIBRARY_STORAGE_KEY]: items });
+  } catch {
+    // ignore storage write error
+  }
+}
+
 async function init(): Promise<void> {
-  allItems = await loadServerLibrary();
+  const chromeApi = getChromeApi();
+  chromeApi?.storage?.onChanged?.addListener((changes, areaName) => {
+    if (areaName !== "local") return;
+    const updated = changes[LIBRARY_STORAGE_KEY] as
+      | { newValue?: OptimizationItem[] }
+      | undefined;
+    if (Array.isArray(updated?.newValue)) {
+      latestLocalItems = updated.newValue;
+      allItems = mergeServerAndLocalOptimizations(lastServerEntries, updated.newValue);
+      render();
+    }
+  });
+
+  const [serverEntries, localItems] = await Promise.all([
+    loadServerEntries(),
+    loadLocalLibrary(),
+  ]);
+  lastServerEntries = serverEntries;
+  const effectiveLocal = latestLocalItems ?? localItems;
+  latestLocalItems = effectiveLocal;
+  allItems = mergeServerAndLocalOptimizations(serverEntries, effectiveLocal);
   render();
 }
 

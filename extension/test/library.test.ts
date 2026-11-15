@@ -195,4 +195,81 @@ describe("optimization library helpers", () => {
     expect(opt.detectedCount).toBe(4);
     expect(opt.totalTimeSavedSec).toBe(84);
   });
+
+  it("retains local active, paused, and suggested items missing from serverEntries", () => {
+    const localItems = [
+      {
+        id: "local_active_1",
+        title: "Local active workflow",
+        description: "Accepted locally",
+        kind: "workflow" as const,
+        status: "active" as const,
+        timeSavedPerRunSec: 15,
+        runCount: 1,
+        totalTimeSavedSec: 15,
+        createdAt: 1_000,
+      },
+      {
+        id: "local_paused_1",
+        title: "Local paused workflow",
+        description: "Paused locally",
+        kind: "workflow" as const,
+        status: "paused" as const,
+        timeSavedPerRunSec: 20,
+        runCount: 2,
+        totalTimeSavedSec: 40,
+        createdAt: 2_000,
+      },
+      {
+        id: "local_suggested_1",
+        title: "Local suggested snippet",
+        description: "Suggested locally",
+        kind: "snippet" as const,
+        status: "suggested" as const,
+        snippetText: "Thanks for reaching out.",
+        timeSavedPerRunSec: 10,
+        runCount: 0,
+        totalTimeSavedSec: 0,
+        createdAt: 3_000,
+      },
+    ];
+
+    const mergedEmpty = mergeServerAndLocalOptimizations([], localItems);
+    expect(mergedEmpty.map((item) => ({ id: item.id, status: item.status }))).toEqual([
+      { id: "local_active_1", status: "active" },
+      { id: "local_paused_1", status: "paused" },
+      { id: "local_suggested_1", status: "suggested" },
+    ]);
+
+    const serverEntry = {
+      id: "server_item_1",
+      name: "Server workflow",
+      kind: "workflow" as const,
+      status: "active" as const,
+      description: "Saved on server",
+      solution: "Click button",
+      script: {
+        name: "Server workflow",
+        steps: [{ action: "click" as const, target: { kind: "css" as const, value: "#btn" } }],
+      },
+      eyes: {
+        intent: "Click button",
+        scope: { apps: ["127.0.0.1"], urlPatterns: [], pageHints: [] },
+        targetHints: { roles: [], labelContains: [], locators: [] },
+        textHints: { prefixHints: [], minCharsBeforeMatch: 0 },
+        guards: { requireClipboard: false, fieldEmptyOnly: true, minSignals: 2, cooldownMs: 5000 },
+      },
+      runCount: 1,
+      createdAt: 500,
+      updatedAt: 900,
+    };
+
+    const mergedWithServer = mergeServerAndLocalOptimizations([serverEntry], localItems);
+    expect(mergedWithServer.map((item) => ({ id: item.id, status: item.status }))).toEqual([
+      { id: "server_item_1", status: "active" },
+      { id: "local_active_1", status: "active" },
+      { id: "local_paused_1", status: "paused" },
+      { id: "local_suggested_1", status: "suggested" },
+    ]);
+  });
 });
