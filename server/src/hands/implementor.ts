@@ -12,6 +12,7 @@ import {
   LibraryEntrySchema,
   parseActionScript,
   parseImplementedLibraryDraft,
+  toLocatorList,
   type ActionScript,
   type EyesDetectionSpec,
   type ImplementedLibraryDraft,
@@ -309,8 +310,7 @@ function extractPrefixHint(text: string): string | null {
 function normalizeTargetLocators(
   target: Locator | Locator[] | undefined | null,
 ): Locator[] {
-  const raw = Array.isArray(target) ? target : target ? [target] : [];
-  return dedupeLocators(raw);
+  return dedupeLocators(toLocatorList(target ?? undefined));
 }
 
 function findStartStepInfo(steps: Step[]): {
@@ -470,12 +470,11 @@ function collectStepSignals(steps: Step[]): {
         break;
       }
       if ("target" in step && step.target) {
-        const targets = normalizeTargetLocators(step.target as Locator | Locator[] | undefined);
-        if (step.action !== "waitFor") {
-          locators.push(...targets);
-        }
-        for (const target of targets) {
-          labelHints.push(...extractLabelsFromLocator(target));
+        for (const loc of dedupeLocators(toLocatorList(step.target))) {
+          if (step.action !== "waitFor") {
+            locators.push(loc);
+          }
+          labelHints.push(...extractLabelsFromLocator(loc));
         }
       }
       switch (step.action) {
