@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  IMPLEMENTOR_SYSTEM_INSTRUCTION,
   buildGroundedEyesSpec,
+  buildStartSignature,
   implementForLibrary,
   implementSolution,
 } from "../../src/hands/implementor.ts";
@@ -8,6 +10,8 @@ import {
   ACTION_SCRIPT_RESPONSE_SCHEMA,
   IMPLEMENTED_LIBRARY_RESPONSE_SCHEMA,
   parseActionScript,
+  type ActionScript,
+  type Locator,
 } from "../../src/hands/types.ts";
 import type { GeminiSdk } from "../../src/llm/gemini.ts";
 
@@ -315,5 +319,235 @@ describe("Stage 3: implementForLibrary & buildGroundedEyesSpec", () => {
     });
 
     expect(eyes.targetHints.labelContains).toContain("from these owners");
+  });
+});
+
+describe("Stage 4: buildStartSignature", () => {
+  it("handles single Locator targets on fill and click steps", () => {
+    const fillSig = buildStartSignature(
+      {
+        name: "Fill email",
+        steps: [
+          {
+            action: "fill",
+            target: { kind: "css", value: 'input[name="customer_email"]' },
+            value: "ops@acme.example",
+          },
+        ],
+      },
+      { app: "crm.local", url: "https://crm.local/accounts/42" },
+    );
+
+    expect(fillSig).toEqual({
+      host: "crm.local",
+      urlPattern: "/accounts/*",
+      action: "input",
+      locators: [{ kind: "css", value: 'input[name="customer_email"]' }],
+      roles: ["textbox"],
+      labelContains: ["customer email", "customer", "email"],
+      fieldEmptyOnly: true,
+    });
+
+    const clickSig = buildStartSignature({
+      name: "Submit order",
+      steps: [
+        { action: "navigate", url: "https://shop.local/orders/99" },
+        { action: "click", target: { kind: "text", value: "Approve Order" } },
+      ],
+    });
+
+    expect(clickSig).toEqual({
+      host: "shop.local",
+      urlPattern: "/orders/*",
+      action: "click",
+      locators: [{ kind: "text", value: "Approve Order" }],
+      roles: ["button"],
+      labelContains: ["approve order", "approve", "order"],
+      fieldEmptyOnly: false,
+    });
+  });
+
+  it("normalizes Locator[] target arrays on step 1", () => {
+    const multiTarget = [
+      { kind: "testid", value: "order-input" },
+      { kind: "css", value: 'input[name="order_id"]' },
+      { kind: "testid", value: "order-input" },
+    ] as unknown as Locator;
+
+    const script: ActionScript = {
+      name: "Multi locator fill",
+      steps: [
+        {
+          action: "fill",
+          target: multiTarget,
+          value: "ORD-77",
+        },
+      ],
+    };
+
+    const sig = buildStartSignature(script, { url: "https://erp.local/orders/new" });
+    expect(sig.host).toBe("erp.local");
+    expect(sig.urlPattern).toBe("/orders/new");
+    expect(sig.action).toBe("input");
+    expect(sig.locators).toEqual([
+      { kind: "testid", value: "order-input" },
+      { kind: "css", value: 'input[name="order_id"]' },
+    ]);
+    expect(sig.labelContains).toContain("order input");
+    expect(sig.labelContains).toContain("order id");
+  });
+
+  it("maps readText/readValue/extractList source reads to action='copy' with fieldEmptyOnly=false", () => {
+    const portalToErp: ActionScript = {
+      name: "Portal to ERP",
+      steps: [
+        {
+          action: "readText",
+          target: { kind: "css", value: ".order-id" },
+          bind: "orderId",
+        },
+        { action: "switchTab", host: "erp.local" },
+        {
+          action: "fill",
+          target: { kind: "css", value: 'input[name="order_id"]' },
+          value: "{{orderId}}",
+        },
+      ],
+    };
+
+    const sig = buildStartSignature(portalToErp, {
+      app: "portal.local",
+      url: "http://portal.local/portal.html",
+      targetLabel: "Order ID",
+    });
+
+    expect(sig).toEqual({
+      host: "portal.local",
+      urlPattern: "/portal.html",
+      action: "copy",
+      locators: [{ kind: "css", value: ".order-id" }],
+      roles: [],
+      labelContains: ["order id", "order"],
+      fieldEmptyOnly: false,
+    });
+
+    const eyes = buildGroundedEyesSpec({
+      script: portalToErp,
+      solution: "Read Order ID from portal.html and fill it into ERP.",
+      context: {
+        app: "portal.local",
+        url: "http://portal.local/portal.html",
+        title: "Customer Portal",
+        targetLabel: "Order ID",
+      },
+      rawEyes: {
+        intent: "portal_to_erp",
+        scope: { apps: [], urlPatterns: [], pageHints: [] },
+        targetHints: { roles: ["textbox"], labelContains: [], locators: [] },
+        textHints: { prefixHints: [], minCharsBeforeMatch: 0 },
+        guards: { fieldEmptyOnly: true, requireClipboard: false, cooldownMs: 60_000, minSignals: 2 },
+      },
+    });
+
+    expect(eyes.guards.fieldEmptyOnly).toBe(false);
+    expect(eyes.targetHints.roles).toEqual([]);
+    expect(eyes.targetHints.locators).toEqual([{ kind: "css", value: ".order-id" }]);
+  });
+
+  it("forbids 'browser' in IMPLEMENTOR_SYSTEM_INSTRUCTION and replaces or drops placeholder switchTab.host", async () => {
+    expect(IMPLEMENTOR_SYSTEM_INSTRUCTION).toMatch(/NEVER use "browser"/i);
+
+    // 1. Replaces placeholder host ("browser", "unknown", "local-page") from context.url / context.app
+    for (const placeholder of ["browser", "unknown", "local-page"]) {
+      const replacedFromUrl = await implementSolution("Fill order id on erp", {
+        context: { url: "http://127.0.0.1:4173/erp.html" },
+        generate: async () => ({
+          steps: [
+            { action: "switchTab", host: placeholder },
+            { action: "fill", target: { kind: "testid", value: "erp-id" }, value: "ORD-4" },
+          ],
+        }),
+      });
+      expect(replacedFromUrl.steps[0]).toEqual({ action: "switchTab", host: "127.0.0.1" });
+
+      const replacedFromApp = await implementSolution("Fill order id on erp", {
+        context: { app: "erp.local" },
+        generate: async () => ({
+          steps: [
+            { action: "switchTab", host: placeholder },
+            { action: "fill", target: { kind: "testid", value: "erp-id" }, value: "ORD-4" },
+          ],
+        }),
+      });
+      expect(replacedFromApp.steps[0]).toEqual({ action: "switchTab", host: "erp.local" });
+    }
+
+    // 2. Drops placeholder switchTab when no real host is available in context or step.url
+    const dropped = await implementSolution("Fill order id", {
+      generate: async () => ({
+        steps: [
+          { action: "switchTab", host: "browser" },
+          { action: "fill", target: { kind: "testid", value: "erp-id" }, value: "ORD-4" },
+        ],
+      }),
+    });
+    expect(dropped.steps).toEqual([
+      { action: "fill", target: { kind: "testid", value: "erp-id" }, value: "ORD-4" },
+    ]);
+
+    // 3. Rejects if only placeholder switchTab steps exist and none remain
+    await expect(
+      implementSolution("Switch tab", {
+        generate: async () => ({
+          steps: [{ action: "switchTab", host: "browser" }],
+        }),
+      }),
+    ).rejects.toThrow(/placeholder/i);
+  });
+
+  it("collects signals past a leading switchTab and infers textbox role when click targets a textbox aria locator", () => {
+    const script: ActionScript = {
+      name: "Fill Hex Swatch",
+      steps: [
+        { action: "switchTab", host: "localhost" },
+        {
+          action: "click",
+          target: [
+            { kind: "testid", value: "hex-code" },
+            { kind: "aria", value: 'textbox[name="Hex Code"]' },
+          ],
+        },
+        {
+          action: "fill",
+          target: [
+            { kind: "testid", value: "hex-code" },
+            { kind: "aria", value: 'textbox[name="Hex Code"]' },
+          ],
+          value: "{{hexCode}}",
+        },
+        {
+          action: "click",
+          target: [{ kind: "testid", value: "tab-submit-btn" }],
+        },
+      ],
+    };
+
+    const sig = buildStartSignature(script, {
+      app: "localhost",
+      url: "http://localhost:4173/unseen-form.html",
+    });
+    expect(sig.roles).toEqual(["textbox"]);
+
+    const eyes = buildGroundedEyesSpec({
+      script,
+      solution: "Fill Hex Swatch and submit.",
+      context: {
+        app: "localhost",
+        url: "http://localhost:4173/unseen-form.html",
+      },
+    });
+    expect(eyes.targetHints.roles).toContain("textbox");
+    expect(eyes.guards.fieldEmptyOnly).toBe(true);
+    expect(eyes.targetHints.locators.some((l) => l.value === "tab-submit-btn")).toBe(true);
   });
 });

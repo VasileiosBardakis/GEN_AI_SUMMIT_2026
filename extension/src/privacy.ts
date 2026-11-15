@@ -24,6 +24,53 @@ const REASON_TO_PII_TYPE: Record<string, "password" | "credit_card" | "secret_to
   payment_field: "credit_card",
 };
 
+const localPiiByHash = new Map<string, string>();
+const REDACTED_HASH_RE = /\[REDACTED:[A-Z0-9_]+#(h_[0-9a-f]+)\]/gi;
+
+export function rememberLocalPii(hash: string, rawValue: string): void {
+  if (!hash || !rawValue) return;
+  localPiiByHash.set(hash, rawValue);
+}
+
+export function getLocalPiiByHash(hash: string): string | undefined {
+  return localPiiByHash.get(hash);
+}
+
+export function clearLocalPiiMap(): void {
+  localPiiByHash.clear();
+}
+
+export function extractLocalPiiEntries(sanitizedValue?: string): Record<string, string> | undefined {
+  if (!sanitizedValue) return undefined;
+  const entries: Record<string, string> = {};
+  let match: RegExpExecArray | null;
+  REDACTED_HASH_RE.lastIndex = 0;
+  while ((match = REDACTED_HASH_RE.exec(sanitizedValue)) !== null) {
+    const hash = match[1];
+    const raw = localPiiByHash.get(hash);
+    if (raw !== undefined) {
+      entries[hash] = raw;
+    }
+  }
+  return Object.keys(entries).length > 0 ? entries : undefined;
+}
+
+export function restoreLocalPiiText(
+  value: string,
+  extraMap?: ReadonlyMap<string, string> | Record<string, string>
+): string {
+  REDACTED_HASH_RE.lastIndex = 0;
+  return value.replace(REDACTED_HASH_RE, (full, hash: string) => {
+    const fromExtra =
+      extraMap instanceof Map
+        ? extraMap.get(hash)
+        : extraMap
+          ? (extraMap as Record<string, string>)[hash]
+          : undefined;
+    return fromExtra ?? localPiiByHash.get(hash) ?? full;
+  });
+}
+
 export function hashValue(input: string): string {
   const normalized = input.trim().toLowerCase();
   let hash = 0x811c9dc5;
@@ -56,6 +103,11 @@ export interface ElementPrivacyCheck {
   reason?: NonNullable<EventMeta["privacy"]>["reason"];
   autofillEligible: boolean;
   autocompleteAttr?: string;
+  maskEmail?: boolean;
+}
+
+export interface SanitizeValueOptions {
+  maskEmail?: boolean;
 }
 
 export function inspectElementPrivacy(el: Element | null): ElementPrivacyCheck {
@@ -118,7 +170,8 @@ export function inspectElementPrivacy(el: Element | null): ElementPrivacyCheck {
 
 export function sanitizeValue(
   rawValue: string | undefined,
-  elCheck?: ElementPrivacyCheck
+  elCheck?: ElementPrivacyCheck,
+  options?: SanitizeValueOptions
 ): { value: string | undefined; privacy: NonNullable<EventMeta["privacy"]> } {
   if (rawValue === undefined || rawValue === null) {
     return { value: undefined, privacy: { redacted: false } };
@@ -150,13 +203,17 @@ export function sanitizeValue(
   scrubbed = scrubbed.replace(SECRET_TOKEN_PATTERN, (match) => {
     redacted = true;
     piiTypes.add("secret_token");
-    return `[REDACTED:TOKEN#${hashValue(match)}]`;
+    const h = hashValue(match);
+    rememberLocalPii(h, match);
+    return `[REDACTED:TOKEN#${h}]`;
   });
 
   scrubbed = scrubbed.replace(IBAN_PATTERN, (match) => {
     redacted = true;
     piiTypes.add("iban");
-    return `[REDACTED:IBAN#${hashValue(match)}]`;
+    const h = hashValue(match);
+    rememberLocalPii(h, match);
+    return `[REDACTED:IBAN#${h}]`;
   });
 
   scrubbed = scrubbed.replace(CARD_PATTERN, (match) => {
@@ -164,15 +221,28 @@ export function sanitizeValue(
     if (luhnCheck(digits)) {
       redacted = true;
       piiTypes.add("credit_card");
-      return `[REDACTED:CARD#${hashValue(digits)}]`;
+      const h = hashValue(digits);
+      rememberLocalPii(h, match);
+      return `[REDACTED:CARD#${h}]`;
     }
     return match;
   });
 
-  if (EMAIL_PATTERN.test(scrubbed)) {
-    piiTypes.add("email");
+  const maskEmail = options?.maskEmail ?? elCheck?.maskEmail ?? elCheck !== undefined;
+  if (maskEmail) {
+    scrubbed = scrubbed.replace(EMAIL_PATTERN, (match) => {
+      redacted = true;
+      piiTypes.add("email");
+      const h = hashValue(match);
+      rememberLocalPii(h, match);
+      return `[REDACTED:EMAIL#${h}]`;
+    });
+  } else {
+    if (EMAIL_PATTERN.test(scrubbed)) {
+      piiTypes.add("email");
+    }
+    EMAIL_PATTERN.lastIndex = 0;
   }
-  EMAIL_PATTERN.lastIndex = 0;
 
   if (PHONE_PATTERN.test(scrubbed) && scrubbed.replace(/\D/g, "").length >= 10) {
     piiTypes.add("phone");

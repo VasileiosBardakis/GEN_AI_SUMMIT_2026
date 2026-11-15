@@ -29,18 +29,52 @@ describe("optimization library helpers", () => {
     expect(formatRelativeTime(now - 2 * 86_400_000, now)).toBe("2d ago");
   });
 
-  it("computes library totals and increments runs accurately", () => {
+  it("returns empty defaults and computes library totals accurately", () => {
     const defaults = createDefaultOptimizations(1_000_000);
-    const before = computeLibrarySummary(defaults);
-    expect(before.activeCount).toBe(3);
-    expect(before.suggestedCount).toBe(1);
-    expect(before.totalRuns).toBe(32);
-    expect(before.totalTimeSavedSec).toBe(606);
+    expect(defaults).toEqual([]);
+    const summary = computeLibrarySummary([]);
+    expect(summary.totalRuns).toBe(0);
+    expect(summary.totalTimeSavedSec).toBe(0);
+    expect(summary.activeCount).toBe(0);
+    expect(summary.suggestedCount).toBe(0);
 
-    const updated = recordOptimizationRun(defaults, "opt_shipping_reply", 2_000_000);
+    const item = libraryEntryToOptimization({
+      id: "lib_run_test",
+      name: "Copy invoice reference",
+      kind: "workflow",
+      status: "active",
+      description: "Copies invoice code.",
+      solution: "Read and fill.",
+      script: {
+        name: "Copy invoice reference",
+        steps: [
+          { action: "readText", target: { kind: "css", value: "#invoice-source" }, bind: "ref" },
+          { action: "fill", target: { kind: "css", value: "#erp-invoice" }, value: "{{ref}}" },
+        ],
+      },
+      eyes: {
+        intent: "Copy invoice code",
+        scope: { apps: ["127.0.0.1"], urlPatterns: [], pageHints: [] },
+        targetHints: { roles: [], labelContains: [], locators: [] },
+        textHints: { prefixHints: [], minCharsBeforeMatch: 0 },
+        guards: { requireClipboard: false, fieldEmptyOnly: true, minSignals: 2, cooldownMs: 5000 },
+      },
+      stats: {
+        repetitions: 3,
+        stepCount: 2,
+        manualSeconds: 26,
+        replaySeconds: 4,
+        timeSavedSeconds: 22,
+      },
+      runCount: 0,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+
+    const updated = recordOptimizationRun([item], "lib_run_test", 2_000_000);
     const after = computeLibrarySummary(updated);
-    expect(after.totalRuns).toBe(33);
-    expect(after.totalTimeSavedSec).toBe(628);
+    expect(after.totalRuns).toBe(1);
+    expect(after.totalTimeSavedSec).toBe(22);
     expect(updated[0].lastRunAt).toBe(2_000_000);
   });
 
@@ -119,5 +153,123 @@ describe("optimization library helpers", () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].id).toBe("lib_abc123");
     expect(merged[0].runCount).toBe(3);
+  });
+
+  it("maps measured entry.stats onto OptimizationItem instead of step-count estimates", () => {
+    const entry = {
+      id: "lib_workflow_stats",
+      name: "Fill ERP invoice",
+      kind: "workflow" as const,
+      status: "active" as const,
+      description: "Copies invoice code to ERP field.",
+      solution: "Read #invoice-source and fill #erp-invoice.",
+      script: {
+        name: "Fill ERP invoice",
+        steps: [
+          { action: "readText" as const, target: { kind: "css" as const, value: "#invoice-source" }, bind: "ref" },
+          { action: "fill" as const, target: { kind: "css" as const, value: "#erp-invoice" }, value: "{{ref}}" },
+          { action: "click" as const, target: { kind: "css" as const, value: "#save-btn" } },
+        ],
+      },
+      eyes: {
+        intent: "Fill ERP invoice",
+        scope: { apps: ["127.0.0.1"], urlPatterns: [], pageHints: [] },
+        targetHints: { roles: ["textbox"], labelContains: ["invoice"], locators: [] },
+        textHints: { prefixHints: [], minCharsBeforeMatch: 0 },
+        guards: { requireClipboard: false, fieldEmptyOnly: true, minSignals: 2, cooldownMs: 5000 },
+      },
+      stats: {
+        repetitions: 4,
+        stepCount: 3,
+        manualSeconds: 50,
+        replaySeconds: 8,
+        timeSavedSeconds: 42,
+      },
+      runCount: 2,
+      createdAt: 1_000,
+      updatedAt: 2_000,
+    };
+
+    const opt = libraryEntryToOptimization(entry);
+    expect(opt.timeSavedPerRunSec).toBe(42);
+    expect(opt.detectedCount).toBe(4);
+    expect(opt.totalTimeSavedSec).toBe(84);
+  });
+
+  it("retains local active, paused, and suggested items missing from serverEntries", () => {
+    const localItems = [
+      {
+        id: "local_active_1",
+        title: "Local active workflow",
+        description: "Accepted locally",
+        kind: "workflow" as const,
+        status: "active" as const,
+        timeSavedPerRunSec: 15,
+        runCount: 1,
+        totalTimeSavedSec: 15,
+        createdAt: 1_000,
+      },
+      {
+        id: "local_paused_1",
+        title: "Local paused workflow",
+        description: "Paused locally",
+        kind: "workflow" as const,
+        status: "paused" as const,
+        timeSavedPerRunSec: 20,
+        runCount: 2,
+        totalTimeSavedSec: 40,
+        createdAt: 2_000,
+      },
+      {
+        id: "local_suggested_1",
+        title: "Local suggested snippet",
+        description: "Suggested locally",
+        kind: "snippet" as const,
+        status: "suggested" as const,
+        snippetText: "Thanks for reaching out.",
+        timeSavedPerRunSec: 10,
+        runCount: 0,
+        totalTimeSavedSec: 0,
+        createdAt: 3_000,
+      },
+    ];
+
+    const mergedEmpty = mergeServerAndLocalOptimizations([], localItems);
+    expect(mergedEmpty.map((item) => ({ id: item.id, status: item.status }))).toEqual([
+      { id: "local_active_1", status: "active" },
+      { id: "local_paused_1", status: "paused" },
+      { id: "local_suggested_1", status: "suggested" },
+    ]);
+
+    const serverEntry = {
+      id: "server_item_1",
+      name: "Server workflow",
+      kind: "workflow" as const,
+      status: "active" as const,
+      description: "Saved on server",
+      solution: "Click button",
+      script: {
+        name: "Server workflow",
+        steps: [{ action: "click" as const, target: { kind: "css" as const, value: "#btn" } }],
+      },
+      eyes: {
+        intent: "Click button",
+        scope: { apps: ["127.0.0.1"], urlPatterns: [], pageHints: [] },
+        targetHints: { roles: [], labelContains: [], locators: [] },
+        textHints: { prefixHints: [], minCharsBeforeMatch: 0 },
+        guards: { requireClipboard: false, fieldEmptyOnly: true, minSignals: 2, cooldownMs: 5000 },
+      },
+      runCount: 1,
+      createdAt: 500,
+      updatedAt: 900,
+    };
+
+    const mergedWithServer = mergeServerAndLocalOptimizations([serverEntry], localItems);
+    expect(mergedWithServer.map((item) => ({ id: item.id, status: item.status }))).toEqual([
+      { id: "server_item_1", status: "active" },
+      { id: "local_active_1", status: "active" },
+      { id: "local_paused_1", status: "paused" },
+      { id: "local_suggested_1", status: "suggested" },
+    ]);
   });
 });

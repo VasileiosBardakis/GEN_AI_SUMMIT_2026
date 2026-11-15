@@ -26,6 +26,11 @@ export interface FlowNode {
   label: string;
 }
 
+export interface SuggestionParam {
+  name: string;
+  example?: string;
+}
+
 export interface Suggestion {
   id: string;
   kind: SuggestionKind;
@@ -36,6 +41,11 @@ export interface Suggestion {
   detail: string;
   meta: string;
   videoUrl?: string;
+  pauseBeforeSubmit?: boolean;
+  runMode?: "run" | "save_only";
+  params?: SuggestionParam[];
+  primaryLabel?: string;
+  pauseNotice?: string;
   flows: {
     user: FlowNode[];
     proposed: FlowNode[];
@@ -239,6 +249,11 @@ export interface DeciderProposalInput {
   name: string;
   solution: string;
   script: ActionScript;
+  pauseBeforeSubmit?: boolean;
+  runMode?: "run" | "save_only";
+  params?: SuggestionParam[];
+  primaryLabel?: string;
+  pauseNotice?: string;
 }
 
 function stepToUserFlowNode(step: ActionScript["steps"][number]): FlowNode {
@@ -286,6 +301,24 @@ export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion 
   userNodes.push({ kind: "loop", label: "Repeat" });
 
   const stepLabel = `${steps.length} ${steps.length === 1 ? "step" : "steps"}`;
+  const runMode = input.runMode;
+  const pauseBeforeSubmit = input.pauseBeforeSubmit;
+  const pauseNotice =
+    input.pauseNotice?.trim() ||
+    (pauseBeforeSubmit ? "Pauses before submit — you click the final button." : undefined);
+  const primaryLabel =
+    input.primaryLabel?.trim() ||
+    (runMode === "save_only" ? "Save skill" : undefined);
+  const params =
+    Array.isArray(input.params) && input.params.length > 0
+      ? input.params
+          .filter((param) => typeof param?.name === "string" && param.name.trim().length > 0)
+          .map((param) => ({
+            name: param.name.trim(),
+            ...(typeof param.example === "string" ? { example: param.example } : {}),
+          }))
+      : undefined;
+  const metaSuffix = runMode === "save_only" ? "Ready to save" : "Ready to run";
 
   return {
     id: `decider_${shortHash(`${name}:${solution}`)}`,
@@ -297,7 +330,12 @@ export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion 
       : {}),
     headline: collapsePreview(name, 56),
     detail: collapsePreview(solution, 140),
-    meta: `${stepLabel} · Ready to run`,
+    meta: `${stepLabel} · ${metaSuffix}`,
+    ...(pauseBeforeSubmit !== undefined ? { pauseBeforeSubmit } : {}),
+    ...(runMode !== undefined ? { runMode } : {}),
+    ...(params && params.length > 0 ? { params } : {}),
+    ...(primaryLabel ? { primaryLabel } : {}),
+    ...(pauseNotice ? { pauseNotice } : {}),
     flows: {
       user: userNodes,
       proposed: [

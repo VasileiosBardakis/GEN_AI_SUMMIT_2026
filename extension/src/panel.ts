@@ -1,15 +1,15 @@
-import type { Report } from "@gen/shared";
 import {
   computeLibrarySummary,
-  createDefaultOptimizations,
-  findingToOptimization,
   formatDuration,
   formatRelativeTime,
+  LIBRARY_STORAGE_KEY,
+  mergeServerAndLocalOptimizations,
   recordOptimizationRun,
-  upsertOptimizationItem,
+  type LibraryEntryWithStats,
   type OptimizationItem,
 } from "./library.ts";
 import type { FlowNode } from "./suggestion.ts";
+import type { ActionScript, BindingValue, DomStep, Locator, Step, StepResult } from "./types.ts";
 
 const SERVER_URL = "http://localhost:8787";
 
@@ -21,13 +21,54 @@ interface LibraryResponse {
   appliedToPage?: boolean;
   note?: string;
   error?: string;
+  results?: StepResult[];
+}
+
+interface ChromeTab {
+  id?: number;
+  url?: string;
+  active?: boolean;
+  windowId?: number;
+  lastAccessed?: number;
+  status?: string;
 }
 
 interface ChromePanelApi {
   runtime?: {
     sendMessage?: (msg: unknown, cb: (res?: LibraryResponse) => void) => void;
   };
+  tabs?: {
+    getCurrent?: () => Promise<ChromeTab | undefined>;
+    query?: (queryInfo: {
+      url?: string | string[];
+      active?: boolean;
+      currentWindow?: boolean;
+    }) => Promise<ChromeTab[]>;
+    get?: (tabId: number) => Promise<ChromeTab>;
+    update?: (
+      tabId: number,
+      updateProperties: { url?: string; active?: boolean }
+    ) => Promise<ChromeTab>;
+    onUpdated?: {
+      addListener: (cb: (tabId: number, changeInfo: { status?: string }) => void) => void;
+      removeListener: (cb: (tabId: number, changeInfo: { status?: string }) => void) => void;
+    };
+  };
+  windows?: {
+    update?: (windowId: number, updateInfo: { focused?: boolean }) => Promise<unknown>;
+  };
+  scripting?: {
+    executeScript?: (injection: {
+      target: { tabId: number; frameIds?: number[] };
+      func: (step: DomStep) => Promise<StepResult>;
+      args?: [DomStep];
+    }) => Promise<Array<{ result?: StepResult }>>;
+  };
   storage?: {
+    local?: {
+      get?: (keys?: string | string[] | null) => Promise<Record<string, unknown>>;
+      set?: (items: Record<string, unknown>) => Promise<void>;
+    };
     onChanged?: {
       addListener: (cb: (changes: Record<string, unknown>, areaName: string) => void) => void;
     };
@@ -35,6 +76,8 @@ interface ChromePanelApi {
 }
 
 let allItems: OptimizationItem[] = [];
+let lastServerEntries: LibraryEntryWithStats[] = [];
+let latestLocalItems: OptimizationItem[] | null = null;
 let currentFilter: FilterMode = "all";
 let searchQuery = "";
 const expandedFlows = new Set<string>();
@@ -311,6 +354,741 @@ async function copyFallback(text: string): Promise<boolean> {
   return false;
 }
 
+async function executeDomStepInPage(step: DomStep): Promise<StepResult> {
+  function escapeValue(value: string): string {
+    if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+    return value.replace(/["\\]/g, "\\$&");
+  }
+
+  function collapseWs(value: string): string {
+    return value.replace(/\s+/g, " ").trim();
+  }
+
+  function isVisible(element: Element): boolean {
+    if (element instanceof HTMLInputElement && element.type.toLowerCase() === "hidden") {
+      return false;
+    }
+    if (element.closest('[hidden], [aria-hidden="true"]')) return false;
+    if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+      const style = window.getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+    }
+    return typeof element.getClientRects === "function" && element.getClientRects().length > 0;
+  }
+
+  const TAG_ROLES: Record<string, string> = {
+    button: "button",
+    summary: "button",
+    a: "link",
+    select: "combobox",
+    textarea: "textbox",
+    td: "gridcell",
+    th: "gridcell",
+    option: "option",
+  };
+  const INPUT_ROLES: Record<string, string> = {
+    checkbox: "checkbox",
+    radio: "radio",
+    search: "searchbox",
+    button: "button",
+    submit: "button",
+    reset: "button",
+  };
+  const TEXT_NAMED_ROLES = new Set(["button", "link", "menuitem", "tab", "option"]);
+  const TEXTBOX_EQUIVALENTS = new Set(["textbox", "searchbox"]);
+
+  function implicitRole(element: Element): string {
+    const explicit = element.getAttribute("role")?.trim().toLowerCase();
+    if (explicit) return explicit;
+    const tag = element.tagName.toLowerCase();
+    if (tag === "input") {
+      const inputType = (element.getAttribute("type") || "text").toLowerCase();
+      return INPUT_ROLES[inputType] ?? "textbox";
+    }
+    return TAG_ROLES[tag] ?? "";
+  }
+
+  function roleMatches(actual: string, wanted: string): boolean {
+    return actual === wanted || (TEXTBOX_EQUIVALENTS.has(actual) && TEXTBOX_EQUIVALENTS.has(wanted));
+  }
+
+  function cleanLabelNode(label: HTMLElement): string {
+    const clone = label.cloneNode(true) as HTMLElement;
+    for (const nested of Array.from(
+      clone.querySelectorAll("input, select, textarea, button, datalist, script, style")
+    )) {
+      nested.remove();
+    }
+    return collapseWs(clone.textContent ?? "");
+  }
+
+  function accessibleNames(element: Element): string[] {
+    const names: string[] = [];
+    const ariaLabel = element.getAttribute("aria-label");
+    if (ariaLabel) names.push(collapseWs(ariaLabel));
+
+    const labelledBy = element.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      const joined = labelledBy
+        .split(/\s+/)
+        .map((id) => collapseWs(document.getElementById(id)?.textContent ?? ""))
+        .filter(Boolean)
+        .join(" ");
+      if (joined) names.push(joined);
+    }
+
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement
+    ) {
+      if (element.labels && element.labels.length > 0) {
+        const labelText = Array.from(element.labels)
+          .map((label) => cleanLabelNode(label))
+          .filter(Boolean)
+          .join(" ");
+        if (labelText) names.push(labelText);
+      }
+      if (
+        element instanceof HTMLInputElement &&
+        /^(submit|button|reset)$/i.test(element.type) &&
+        element.value
+      ) {
+        names.push(collapseWs(element.value));
+      }
+      const placeholder = element.getAttribute("placeholder");
+      if (placeholder) names.push(collapseWs(placeholder));
+    }
+
+    const title = element.getAttribute("title");
+    if (title) names.push(collapseWs(title));
+
+    const role = implicitRole(element);
+    if (
+      !(element instanceof HTMLSelectElement) &&
+      (TEXT_NAMED_ROLES.has(role) || element.tagName.toLowerCase() === "label")
+    ) {
+      const text = collapseWs(element.textContent ?? "");
+      if (text) names.push(text);
+    }
+
+    return names.filter(Boolean);
+  }
+
+  function resolveAria(raw: string, root: ParentNode): Element[] {
+    const trimmed = raw.trim();
+    if (!trimmed) return [];
+
+    if (trimmed.startsWith("[")) {
+      try {
+        return Array.from(root.querySelectorAll(trimmed));
+      } catch {
+        return [];
+      }
+    }
+
+    const roleSyntax = /^([a-z]+)\[\s*name\s*=\s*["']([\s\S]*?)["']\s*\]$/i.exec(trimmed);
+    const wantedRole = roleSyntax ? roleSyntax[1].toLowerCase() : null;
+    const wantedName = collapseWs(
+      roleSyntax ? roleSyntax[2].replace(/\\(["'\\])/g, "$1") : trimmed
+    );
+    if (!wantedName) return [];
+    const wantedLower = wantedName.toLowerCase();
+
+    const candidates = Array.from(
+      root.querySelectorAll(
+        'input, textarea, select, button, a, summary, [role], [aria-label], [aria-labelledby], [contenteditable="true"]'
+      )
+    ).filter((el) => !wantedRole || roleMatches(implicitRole(el), wantedRole));
+
+    const exact: Element[] = [];
+    const partial: Element[] = [];
+    for (const candidate of candidates) {
+      const names = accessibleNames(candidate).map((n) => n.toLowerCase());
+      if (names.some((n) => n === wantedLower)) {
+        exact.push(candidate);
+      } else if (names.some((n) => n.includes(wantedLower))) {
+        partial.push(candidate);
+      }
+    }
+    return [...exact, ...partial];
+  }
+
+  function isInteractiveControl(element: Element): boolean {
+    return element.matches(
+      'button, a, input, select, textarea, summary, label, option, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="radio"], [role="checkbox"]'
+    );
+  }
+
+  function resolveText(raw: string, root: ParentNode): Element[] {
+    const wanted = collapseWs(raw);
+    if (!wanted) return [];
+    const wantedLower = wanted.toLowerCase();
+
+    const submitInputs = Array.from(
+      root.querySelectorAll('input[type="submit"], input[type="button"], input[type="reset"]')
+    ).filter((el) => {
+      const val = collapseWs((el as HTMLInputElement).value);
+      return val === wanted || val.toLowerCase() === wantedLower;
+    });
+
+    const allNodes = Array.from(root.querySelectorAll("*"));
+    let textMatched = allNodes.filter((el) => collapseWs(el.textContent ?? "") === wanted);
+    if (textMatched.length === 0) {
+      textMatched = allNodes.filter(
+        (el) => collapseWs(el.textContent ?? "").toLowerCase() === wantedLower
+      );
+    }
+
+    const matchedSet = new Set(textMatched);
+    textMatched.sort((a, b) => {
+      const aInteractive = isInteractiveControl(a) ? 0 : 1;
+      const bInteractive = isInteractiveControl(b) ? 0 : 1;
+      if (aInteractive !== bInteractive) return aInteractive - bInteractive;
+      const aHasChild = Array.from(a.children).some((c) => matchedSet.has(c)) ? 1 : 0;
+      const bHasChild = Array.from(b.children).some((c) => matchedSet.has(c)) ? 1 : 0;
+      return aHasChild - bHasChild;
+    });
+
+    return [...submitInputs, ...textMatched];
+  }
+
+  function toLocatorList(target: Locator | Locator[]): Locator[] {
+    return Array.isArray(target) ? target : [target];
+  }
+
+  function resolveAllForLocator(locator: Locator, root: ParentNode = document): Element[] {
+    if (locator.kind === "css") return Array.from(root.querySelectorAll(locator.value));
+    if (locator.kind === "xpath") {
+      const snapshot = document.evaluate(
+        locator.value,
+        root as Node,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null
+      );
+      const found: Element[] = [];
+      for (let index = 0; index < snapshot.snapshotLength; index += 1) {
+        const node = snapshot.snapshotItem(index);
+        if (node instanceof Element) found.push(node);
+      }
+      return found;
+    }
+    if (locator.kind === "testid") {
+      return Array.from(root.querySelectorAll(`[data-testid="${escapeValue(locator.value)}"]`));
+    }
+    if (locator.kind === "aria") {
+      return resolveAria(locator.value, root);
+    }
+    return resolveText(locator.value, root);
+  }
+
+  function resolveAll(target: Locator | Locator[], root: ParentNode = document): Element[] {
+    for (const locator of toLocatorList(target)) {
+      const found = resolveAllForLocator(locator, root);
+      if (found.length > 0) return found;
+    }
+    return [];
+  }
+
+  function resolve(target: Locator | Locator[], root: ParentNode = document): Element | null {
+    for (const locator of toLocatorList(target)) {
+      const found = resolveAllForLocator(locator, root);
+      const match = found.find(isVisible) ?? found[0] ?? null;
+      if (match) return match;
+    }
+    return null;
+  }
+
+  function unwrapControl(element: Element): Element {
+    if (element instanceof HTMLLabelElement && element.control) {
+      return element.control;
+    }
+    return element;
+  }
+
+  function readValue(rawElement: Element): string {
+    const element = unwrapControl(rawElement);
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement
+    ) {
+      return element.value;
+    }
+    if (element instanceof HTMLElement && element.isContentEditable) {
+      return element.innerText;
+    }
+    return (element.textContent ?? "").trim();
+  }
+
+  function setNativeValue(element: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+    const prototype =
+      element instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (setter) setter.call(element, value);
+    else element.value = value;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function insertIntoEditable(element: HTMLElement, value: string): void {
+    element.focus();
+    const selection = window.getSelection();
+    if (selection) {
+      const hasRangeInside =
+        selection.rangeCount > 0 &&
+        element.contains(selection.getRangeAt(0).commonAncestorContainer);
+      if (!hasRangeInside) {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+    }
+    const inserted = document.execCommand("insertText", false, value);
+    if (!inserted) {
+      element.textContent = `${element.textContent ?? ""}${value}`;
+      element.dispatchEvent(
+        new InputEvent("input", { bubbles: true, inputType: "insertText", data: value })
+      );
+    }
+  }
+
+  function insertText(element: Element, value: string): void {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      element.focus();
+      const existingNorm = element.value.trim().toLowerCase();
+      const incomingNorm = value.trim().toLowerCase();
+      if (
+        existingNorm.length > 0 &&
+        incomingNorm.length > 0 &&
+        incomingNorm.startsWith(existingNorm)
+      ) {
+        setNativeValue(element, value);
+      } else {
+        const start = element.selectionStart ?? element.value.length;
+        const end = element.selectionEnd ?? element.value.length;
+        setNativeValue(element, `${element.value.slice(0, start)}${value}${element.value.slice(end)}`);
+      }
+      const caret = element.value.length;
+      try {
+        element.setSelectionRange(caret, caret);
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    if (element instanceof HTMLElement && element.isContentEditable) {
+      insertIntoEditable(element, value);
+      return;
+    }
+    throw new Error("Target is not editable");
+  }
+
+  function click(element: Element): void {
+    if (element instanceof HTMLElement) {
+      element.click();
+      return;
+    }
+    element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  }
+
+  function selectOption(rawElement: Element, value: string): void {
+    const element = unwrapControl(rawElement);
+    if (!(element instanceof HTMLSelectElement)) throw new Error("Target is not a select");
+    const wanted = collapseWs(value);
+    const wantedLower = wanted.toLowerCase();
+    const options = Array.from(element.options);
+    const matched =
+      options.find((opt) => opt.value === value) ??
+      options.find((opt) => opt.value.toLowerCase() === wantedLower) ??
+      options.find((opt) => collapseWs(opt.label || opt.textContent || "").toLowerCase() === wantedLower) ??
+      options.find((opt) =>
+        collapseWs(opt.label || opt.textContent || "").toLowerCase().includes(wantedLower)
+      );
+    if (!matched) throw new Error(`Option not found: ${value}`);
+    element.value = matched.value;
+    matched.selected = true;
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function wait(ms: number): Promise<void> {
+    return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+  }
+
+  const winFlag = window as unknown as { __EYES_SUPPRESS_SYNTHETIC__?: boolean };
+  const prevSuppress = winFlag.__EYES_SUPPRESS_SYNTHETIC__;
+  winFlag.__EYES_SUPPRESS_SYNTHETIC__ = true;
+  try {
+    switch (step.action) {
+      case "click": {
+        const element = resolve(step.target);
+        if (!element) throw new Error("Target not found");
+        click(element);
+        return { ok: true, url: location.href };
+      }
+      case "fill": {
+        const rawElement = resolve(step.target);
+        if (!rawElement) throw new Error("Target not found");
+        const element = unwrapControl(rawElement);
+        if (
+          element instanceof HTMLInputElement &&
+          (element.type === "checkbox" || element.type === "radio")
+        ) {
+          if (element.type === "radio") {
+            if (!element.checked) click(element);
+          } else {
+            const wantChecked = !/^(false|0|off|no|unchecked)$/i.test(step.value.trim());
+            if (element.checked !== wantChecked) click(element);
+          }
+          return { ok: true, url: location.href, value: String(element.checked) };
+        }
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+          setNativeValue(element, step.value);
+        } else if (element instanceof HTMLSelectElement) {
+          selectOption(element, step.value);
+          return { ok: true, url: location.href, value: readValue(element) };
+        } else if (element instanceof HTMLElement && element.isContentEditable) {
+          element.textContent = "";
+          insertIntoEditable(element, step.value);
+        } else {
+          throw new Error("Target is not fillable");
+        }
+        return { ok: true, url: location.href, value: readValue(element) };
+      }
+      case "insertText": {
+        let active: Element | null = document.activeElement;
+        while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+          active = active.shadowRoot.activeElement;
+        }
+        const remembered = (window as unknown as { __HANDS_LAST_EDITABLE__?: Element | null })
+          .__HANDS_LAST_EDITABLE__;
+        const lastEditable = remembered && remembered.isConnected ? remembered : null;
+        const element = (step.target ? resolve(step.target) : null) ?? lastEditable ?? active;
+        if (!element) throw new Error("No target and nothing focused");
+        insertText(element, step.value);
+        return { ok: true, url: location.href, value: readValue(element) };
+      }
+      case "select": {
+        const element = resolve(step.target);
+        if (!element) throw new Error("Target not found");
+        selectOption(element, step.value);
+        return { ok: true, url: location.href, value: readValue(element) };
+      }
+      case "waitFor": {
+        const deadline = Date.now() + (step.timeoutMs ?? 5000);
+        while (Date.now() < deadline) {
+          if (resolve(step.target)) return { ok: true, url: location.href };
+          await wait(100);
+        }
+        throw new Error("Timed out waiting for target");
+      }
+      case "readText":
+      case "readValue": {
+        const element = resolve(step.target);
+        if (!element) throw new Error("Target not found");
+        return { ok: true, url: location.href, value: readValue(element) };
+      }
+      case "extractList": {
+        const roots = resolveAll(step.target);
+        if (roots.length === 0) throw new Error("Target not found");
+        const items = roots.map((row) => {
+          if (!step.fields) return { text: readValue(row) };
+          const item: Record<string, string> = {};
+          for (const [name, locator] of Object.entries(step.fields)) {
+            const field = resolve(locator, row);
+            item[name] = field ? readValue(field) : "";
+          }
+          return item;
+        });
+        return { ok: true, url: location.href, items };
+      }
+      default:
+        throw new Error(`Unsupported step: ${(step as { action?: string }).action ?? "unknown"}`);
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      url: location.href,
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
+  } finally {
+    winFlag.__EYES_SUPPRESS_SYNTHETIC__ = prevSuppress;
+  }
+}
+
+function lookupBinding(vars: Record<string, unknown>, path: string): unknown {
+  let current: unknown = vars;
+  for (const part of path.split(".")) {
+    if (!current || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function substituteString(value: string, vars: Record<string, unknown>): unknown {
+  const whole = /^\{\{\s*([^}]+?)\s*\}\}$/.exec(value);
+  if (whole) return lookupBinding(vars, whole[1]);
+  return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, path: string) => {
+    const found = lookupBinding(vars, path);
+    return found === undefined ? "" : String(found);
+  });
+}
+
+function substituteStepValue<T>(value: T, vars: Record<string, unknown>): T {
+  if (typeof value === "string") return substituteString(value, vars) as T;
+  if (Array.isArray(value)) return value.map((item) => substituteStepValue(item, vars)) as T;
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const isForEach = obj.action === "forEach";
+    const result: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(obj)) {
+      result[key] = isForEach && key === "steps" ? child : substituteStepValue(child, vars);
+    }
+    return result as T;
+  }
+  return value;
+}
+
+export function normalizeLoopbackHost(host: string): string {
+  return host.trim().toLowerCase();
+}
+function normalizeUrlPath(pathname: string): string {
+  if (pathname.length > 1 && pathname.endsWith("/")) {
+    return pathname.slice(0, -1);
+  }
+  return pathname;
+}
+
+function isExactHostMatch(url: string | undefined, targetHost: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const want = targetHost.trim().toLowerCase();
+    const got = want.includes(":") ? parsed.host.toLowerCase() : parsed.hostname.toLowerCase();
+    return got === want;
+  } catch {
+    return false;
+  }
+}
+
+export function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const want = normalizeLoopbackHost(targetHost);
+    if (!want) return false;
+    const got = normalizeLoopbackHost(want.includes(":") ? parsed.host : parsed.hostname);
+    return got === want;
+  } catch {
+    return false;
+  }
+}
+
+export function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string): number {
+  if (!tabUrl) return 0;
+  if (tabUrl === targetUrl) return 4;
+  try {
+    const tabParsed = new URL(tabUrl);
+    if (targetUrl.startsWith("/")) {
+      const targetPath = normalizeUrlPath(targetUrl.split("?")[0]);
+      if (normalizeUrlPath(tabParsed.pathname) === targetPath) return 2;
+      if (tabParsed.pathname.startsWith(targetPath)) return 1;
+      return 0;
+    }
+    const targetParsed = new URL(targetUrl);
+    if (tabParsed.href.replace(/#.*$/, "") === targetParsed.href.replace(/#.*$/, "")) return 4;
+    if (
+      tabParsed.protocol !== targetParsed.protocol ||
+      normalizeLoopbackHost(tabParsed.host) !== normalizeLoopbackHost(targetParsed.host)
+    ) {
+      return 0;
+    }
+    if (
+      normalizeUrlPath(tabParsed.pathname) === normalizeUrlPath(targetParsed.pathname) &&
+      tabParsed.search === targetParsed.search
+    ) {
+      return 3;
+    }
+    if (normalizeUrlPath(tabParsed.pathname) === normalizeUrlPath(targetParsed.pathname)) {
+      return targetParsed.search ? 0 : 2;
+    }
+    if (tabUrl.startsWith(targetUrl)) return 1;
+    return 0;
+  } catch {
+    return tabUrl.startsWith(targetUrl) ? 1 : 0;
+  }
+}
+
+function waitForTabLoad(chromeApi: ChromePanelApi, tabId: number): Promise<void> {
+  const tabsApi = chromeApi.tabs;
+  if (!tabsApi?.onUpdated || !tabsApi?.get) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      tabsApi.onUpdated?.removeListener(listener);
+      if (error) reject(error);
+      else resolve();
+    };
+    const listener = (updatedTabId: number, changeInfo: { status?: string }): void => {
+      if (updatedTabId === tabId && changeInfo.status === "complete") finish();
+    };
+    const timer = setTimeout(() => finish(new Error("Timed out waiting for page load")), 30_000);
+    tabsApi.onUpdated?.addListener(listener);
+    void tabsApi
+      .get?.(tabId)
+      .then((tab) => {
+        if (tab.status === "complete") finish();
+      })
+      .catch((error: unknown) => {
+        finish(error instanceof Error ? error : new Error("Failed to read tab"));
+      });
+  });
+}
+
+async function runStepsInTab(
+  chromeApi: ChromePanelApi,
+  tabId: number,
+  steps: Step[],
+  bindings: Record<string, BindingValue>,
+  scope: Record<string, unknown>
+): Promise<StepResult[]> {
+  const results: StepResult[] = [];
+  let currentTabId = tabId;
+
+  for (const rawStep of steps) {
+    let step: Step;
+    try {
+      step = substituteStepValue(rawStep, { ...bindings, ...scope }) as Step;
+    } catch (error) {
+      if (rawStep.optional) continue;
+      throw error;
+    }
+
+    try {
+      if (step.action === "navigate") {
+        await chromeApi.tabs?.update?.(currentTabId, { url: step.url });
+        await waitForTabLoad(chromeApi, currentTabId);
+        results.push({ ok: true, url: step.url });
+        continue;
+      }
+
+      if (step.action === "wait") {
+        await new Promise((resolve) => setTimeout(resolve, step.ms));
+        results.push({ ok: true, url: "" });
+        continue;
+      }
+
+      if (step.action === "switchTab") {
+        const allTabs = (await chromeApi.tabs?.query?.({ url: ["http://*/*", "https://*/*"] })) ?? [];
+        let match: ChromeTab | undefined;
+        if (step.url) {
+          const urlMatches = allTabs
+            .map((t) => ({ tab: t, score: scoreTabUrlMatch(t.url, step.url!) }))
+            .filter((entry) => entry.tab.id !== undefined && entry.score > 0);
+          urlMatches.sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            const accessDiff = (b.tab.lastAccessed ?? 0) - (a.tab.lastAccessed ?? 0);
+            if (accessDiff !== 0) return accessDiff;
+            if (Boolean(a.tab.active) !== Boolean(b.tab.active)) return a.tab.active ? -1 : 1;
+            return 0;
+          });
+          match = urlMatches[0]?.tab;
+        }
+        if (!match) {
+          const matches = allTabs.filter(
+            (t) => t.id !== undefined && tabMatchesHost(t.url, step.host)
+          );
+          matches.sort((a, b) => {
+            const exactDiff =
+              Number(isExactHostMatch(b.url, step.host)) -
+              Number(isExactHostMatch(a.url, step.host));
+            if (exactDiff !== 0) return exactDiff;
+            const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
+            if (accessDiff !== 0) return accessDiff;
+            if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;
+            return 0;
+          });
+          match = matches[0];
+        }
+        if (match?.id === undefined) {
+          throw new Error(`No open tab for ${step.url ?? step.host}`);
+        }
+        await chromeApi.tabs?.update?.(match.id, { active: true });
+        if (match.windowId !== undefined) {
+          await chromeApi.windows?.update?.(match.windowId, { focused: true });
+        }
+        currentTabId = match.id;
+        results.push({
+          ok: true,
+          tab: step.host,
+          ...(match.url || step.url ? { url: match.url ?? step.url } : {}),
+        });
+        continue;
+      }
+
+      if (step.action === "forEach") {
+        const items = Array.isArray(step.items) ? step.items : bindings[step.items];
+        if (!Array.isArray(items)) throw new Error(`No array binding: ${step.items}`);
+        for (const item of items) {
+          const nested = await runStepsInTab(chromeApi, currentTabId, step.steps, bindings, {
+            ...scope,
+            ...item,
+            item,
+          });
+          results.push(...nested);
+        }
+        continue;
+      }
+
+      if (!chromeApi.scripting?.executeScript) {
+        throw new Error("chrome.scripting.executeScript unavailable");
+      }
+      const injections = await chromeApi.scripting.executeScript({
+        target: { tabId: currentTabId },
+        func: executeDomStepInPage,
+        args: [step],
+      });
+      const result = injections?.[0]?.result;
+      if (!result) throw new Error("Executor returned no result");
+      results.push(result);
+      if (!result.ok) {
+        if (step.optional) continue;
+        throw new Error(result.error ?? "Step failed");
+      }
+
+      if (step.action === "readText" || step.action === "readValue") {
+        bindings[step.bind] = result.value ?? "";
+      }
+
+      if (step.action === "extractList") {
+        bindings[step.bind] = result.items ?? [];
+      }
+    } catch (error) {
+      if (step.optional) continue;
+      throw error;
+    }
+  }
+
+  return results;
+}
+
+async function runActionScriptInTab(
+  chromeApi: ChromePanelApi,
+  tabId: number,
+  script: ActionScript
+): Promise<StepResult[]> {
+  return runStepsInTab(chromeApi, tabId, script.steps, {}, {});
+}
+
 async function handleAction(action: string, id: string): Promise<void> {
   const target = allItems.find((item) => item.id === id);
   if (!target) return;
@@ -323,60 +1101,120 @@ async function handleAction(action: string, id: string): Promise<void> {
   }
 
   if (action === "toggle") {
+    const nextStatus: OptimizationItem["status"] =
+      target.status === "active" ? "paused" : "active";
     const res = await sendBgMessage({ kind: "EYES_TOGGLE_OPTIMIZATION", id });
     if (res?.items) {
-      allItems = res.items;
-    } else {
-      allItems = allItems.map((item) =>
-        item.id === id
-          ? { ...item, status: item.status === "active" ? "paused" : "active" }
-          : item
-      );
+      allItems = mergeServerAndLocalOptimizations(lastServerEntries, res.items);
     }
+    allItems = allItems.map((item) =>
+      item.id === id ? { ...item, status: nextStatus } : item
+    );
+    await saveLocalLibrary(allItems);
     render();
     return;
   }
 
   if (action === "activate") {
-    const res = await sendBgMessage({ kind: "EYES_ACTIVATE_OPTIMIZATION", id });
+    const activated: OptimizationItem = { ...target, status: "active" };
+    const res = await sendBgMessage({
+      kind: "EYES_ACTIVATE_OPTIMIZATION",
+      id,
+      item: activated,
+    });
     if (res?.items) {
-      allItems = res.items;
-    } else {
-      allItems = allItems.map((item) =>
-        item.id === id ? { ...item, status: "active" } : item
-      );
+      allItems = mergeServerAndLocalOptimizations(lastServerEntries, res.items);
     }
+    if (allItems.some((item) => item.id === id)) {
+      allItems = allItems.map((item) => (item.id === id ? activated : item));
+    } else {
+      allItems = [activated, ...allItems];
+    }
+    await saveLocalLibrary(allItems);
     setFeedback(id, "Added to library", "ok");
     return;
   }
 
   if (action === "dismiss") {
+    lastServerEntries = lastServerEntries.filter((entry) => entry.id !== id);
     const res = await sendBgMessage({ kind: "EYES_DISMISS_OPTIMIZATION", id });
     if (res?.items) {
-      allItems = res.items;
-    } else {
-      allItems = allItems.filter((item) => item.id !== id);
+      allItems = mergeServerAndLocalOptimizations(lastServerEntries, res.items);
     }
+    allItems = allItems.filter((item) => item.id !== id);
+    await saveLocalLibrary(allItems);
     render();
     return;
   }
 
   if (action === "run") {
-    const res = await sendBgMessage({ kind: "EYES_RUN_OPTIMIZATION", id });
-    if (res) {
-      if (res.items) allItems = res.items;
-      if (res.ok) {
-        if (!res.appliedToPage && target.snippetText) {
-          await copyFallback(target.snippetText);
+    if (target.script) {
+      const chromeApi = getChromeApi();
+      let currentTab: ChromeTab | undefined;
+      if (chromeApi?.tabs?.getCurrent) {
+        try {
+          currentTab = await chromeApi.tabs.getCurrent();
+        } catch {
+          currentTab = undefined;
         }
-        setFeedback(
-          id,
-          `${res.note ?? "Completed"} · +${formatDuration(target.timeSavedPerRunSec)} saved`,
-          "ok"
-        );
-      } else {
-        setFeedback(id, res.error ?? "Open matching page to run", "err");
       }
+
+      if (currentTab?.id !== undefined) {
+        const tabs = chromeApi?.tabs?.query
+          ? await chromeApi.tabs.query({ url: ["http://*/*", "https://*/*"] })
+          : [];
+        const httpTabs = tabs
+          .filter((tab) => tab.id !== undefined && tab.id !== currentTab?.id)
+          .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+        const activeHttpTab = httpTabs[0];
+        if (activeHttpTab?.id === undefined) {
+          if (target.snippetText && (await copyFallback(target.snippetText))) {
+            allItems = recordOptimizationRun(allItems, id);
+            await saveLocalLibrary(allItems);
+            setFeedback(id, `Copied · +${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
+            return;
+          }
+          setFeedback(id, "Open matching page to run", "err");
+          return;
+        }
+        try {
+          await runActionScriptInTab(chromeApi!, activeHttpTab.id, target.script);
+          allItems = recordOptimizationRun(allItems, id);
+          await saveLocalLibrary(allItems);
+          setFeedback(id, `+${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
+        } catch (err) {
+          if (target.snippetText && (await copyFallback(target.snippetText))) {
+            allItems = recordOptimizationRun(allItems, id);
+            await saveLocalLibrary(allItems);
+            setFeedback(id, `Copied · +${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
+            return;
+          }
+          setFeedback(
+            id,
+            err instanceof Error ? err.message : "Open matching page to run",
+            "err"
+          );
+        }
+        return;
+      }
+
+      const res = await sendBgMessage({ kind: "HANDS_RUN_SCRIPT", script: target.script });
+      if (res && !res.ok) {
+        if (target.snippetText && (await copyFallback(target.snippetText))) {
+          allItems = recordOptimizationRun(allItems, id);
+          await saveLocalLibrary(allItems);
+          setFeedback(id, `Copied · +${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
+          return;
+        }
+        setFeedback(id, res.error ?? "Open matching page to run", "err");
+        return;
+      }
+      if (!res && target.snippetText) {
+        await copyFallback(target.snippetText);
+      }
+      allItems = recordOptimizationRun(allItems, id);
+      await saveLocalLibrary(allItems);
+      setFeedback(id, `+${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
       return;
     }
 
@@ -384,52 +1222,78 @@ async function handleAction(action: string, id: string): Promise<void> {
       await copyFallback(target.snippetText);
     }
     allItems = recordOptimizationRun(allItems, id);
+    await saveLocalLibrary(allItems);
     setFeedback(id, `+${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
   }
 }
 
-async function syncServerFindings(): Promise<void> {
+async function loadServerEntries(): Promise<LibraryEntryWithStats[]> {
   try {
-    const resp = await fetch(`${SERVER_URL}/report?llm=0`);
-    if (!resp.ok) return;
-    const report = (await resp.json()) as Report;
-    if (!Array.isArray(report.findings) || report.findings.length === 0) return;
-
-    let changed = false;
-    for (const finding of report.findings) {
-      if (finding.verdict !== "rung1" && finding.verdict !== "rung2") continue;
-      const converted = findingToOptimization(finding);
-      if (!converted) continue;
-      const exists = allItems.some((item) => item.id === converted.id);
-      if (!exists) {
-        allItems = upsertOptimizationItem(allItems, converted);
-        changed = true;
-        void sendBgMessage({ kind: "EYES_UPSERT_OPTIMIZATION", item: converted });
-      }
-    }
-    if (changed) render();
+    const resp = await fetch(`${SERVER_URL}/library`);
+    if (!resp.ok) return [];
+    const data = (await resp.json()) as {
+      ok?: boolean;
+      items?: LibraryEntryWithStats[];
+    };
+    if (data?.ok === false || !Array.isArray(data?.items)) return [];
+    return data.items;
   } catch {
-    // ignore offline local server
+    return [];
+  }
+}
+
+async function loadLocalLibrary(): Promise<OptimizationItem[]> {
+  const chromeApi = getChromeApi();
+  if (chromeApi?.storage?.local?.get) {
+    try {
+      const stored = await chromeApi.storage.local.get(LIBRARY_STORAGE_KEY);
+      const raw = stored?.[LIBRARY_STORAGE_KEY];
+      if (Array.isArray(raw)) {
+        return raw as OptimizationItem[];
+      }
+      return [];
+    } catch {
+      // fall through to runtime message
+    }
+  }
+  const res = await sendBgMessage({ kind: "EYES_GET_LIBRARY" });
+  return Array.isArray(res?.items) ? res.items : [];
+}
+
+async function saveLocalLibrary(items: OptimizationItem[]): Promise<void> {
+  latestLocalItems = items;
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.storage?.local?.set) return;
+  try {
+    await chromeApi.storage.local.set({ [LIBRARY_STORAGE_KEY]: items });
+  } catch {
+    // ignore storage write error
   }
 }
 
 async function init(): Promise<void> {
-  const res = await sendBgMessage({ kind: "EYES_GET_LIBRARY" });
-  allItems = res?.items ?? createDefaultOptimizations();
-  render();
-  void syncServerFindings();
-
   const chromeApi = getChromeApi();
   chromeApi?.storage?.onChanged?.addListener((changes, areaName) => {
     if (areaName !== "local") return;
-    const updated = changes.eyes_optimization_library_v1 as
+    const updated = changes[LIBRARY_STORAGE_KEY] as
       | { newValue?: OptimizationItem[] }
       | undefined;
     if (Array.isArray(updated?.newValue)) {
-      allItems = updated.newValue;
+      latestLocalItems = updated.newValue;
+      allItems = mergeServerAndLocalOptimizations(lastServerEntries, updated.newValue);
       render();
     }
   });
+
+  const [serverEntries, localItems] = await Promise.all([
+    loadServerEntries(),
+    loadLocalLibrary(),
+  ]);
+  lastServerEntries = serverEntries;
+  const effectiveLocal = latestLocalItems ?? localItems;
+  latestLocalItems = effectiveLocal;
+  allItems = mergeServerAndLocalOptimizations(serverEntries, effectiveLocal);
+  render();
 }
 
 document.querySelectorAll<HTMLButtonElement>(".filter-tab").forEach((tab) => {

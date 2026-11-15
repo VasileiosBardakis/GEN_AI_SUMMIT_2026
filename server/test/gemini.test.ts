@@ -142,6 +142,62 @@ describe("createGeminiClient", () => {
       contents: "Produce a Finding",
       config: { responseMimeType: "application/json" },
     });
+    const passedConfig = generateContent.mock.calls[0]?.[0]?.config;
+    expect(passedConfig).not.toHaveProperty("thinkingConfig");
+    expect(passedConfig).not.toHaveProperty("responseSchema");
+    expect(passedConfig).not.toHaveProperty("abortSignal");
+  });
+
+  it("generateJson forwards thinkingBudget, responseSchema, and timeoutMs only when provided", async () => {
+    const schema = {
+      type: "object",
+      properties: {
+        kind: { type: "string" },
+        value: { type: "string" },
+      },
+      required: ["kind", "value"],
+    };
+    const { sdk, generateContent } = makeFakeSdk(
+      JSON.stringify({ kind: "testid", value: "submit-btn" }),
+    );
+    const client = createGeminiClient({
+      sdk,
+      thinkingBudget: 0,
+      responseSchema: schema,
+      timeoutMs: 2500,
+    });
+
+    const result = await client.generateJson("Locate submit", LocatorSchema);
+    expect(result).toEqual({ kind: "testid", value: "submit-btn" });
+    expect(generateContent).toHaveBeenCalledTimes(1);
+    const call = generateContent.mock.calls[0]?.[0];
+    expect(call?.config?.responseMimeType).toBe("application/json");
+    expect(call?.config?.thinkingConfig).toEqual({ thinkingBudget: 0 });
+    expect(call?.config?.responseSchema).toEqual(schema);
+    expect(call?.config?.abortSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("generateJson aborts when timeoutMs expires", async () => {
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const hungSdk: GeminiSdk = {
+      models: {
+        generateContent: vi.fn(
+          () =>
+            new Promise<{ text?: string }>((resolve) => {
+              const t = setTimeout(() => resolve({ text: '{"kind":"testid","value":"x"}' }), 5000);
+              t.unref?.();
+              timers.push(t);
+            }),
+        ),
+      },
+    };
+    const client = createGeminiClient({ sdk: hungSdk, timeoutMs: 25 });
+    await expect(client.generateJson("Locate submit", LocatorSchema)).rejects.toThrow(
+      /timed out/i,
+    );
+    for (const t of timers) {
+      clearTimeout(t);
+    }
   });
 
   it("generateJson throws a clear error on malformed JSON", async () => {

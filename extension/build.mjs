@@ -23,16 +23,22 @@ const privacyCode = compileTs(path.join(srcDir, "privacy.ts")).replace(/export\s
 const locatorsCode = compileTs(path.join(srcDir, "locators.ts"))
   .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/privacy\.js["'];?/g, "")
   .replace(/export\s+/g, "");
+const pageSummaryCode = compileTs(path.join(srcDir, "page-summary.ts"))
+  .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/(locators|privacy)\.js["'];?/g, "")
+  .replace(/export\s+/g, "");
 const handsCode = compileTs(path.join(srcDir, "hands", "execute.ts")).replace(/export\s+/g, "");
 const suggestionCode = compileTs(path.join(srcDir, "suggestion.ts")).replace(/export\s+/g, "");
 const libraryCode = compileTs(path.join(srcDir, "library.ts")).replace(/export\s+/g, "");
 
 const contentCode = compileTs(path.join(srcDir, "content.ts"))
-  .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/(locators|privacy|suggestion|library)\.js["'];?/g, "")
+  .replace(
+    /import\s+\{[^}]*\}\s+from\s+["']\.\/(locators|privacy|page-summary|suggestion|library)\.js["'];?/g,
+    ""
+  )
   .replace(/import\s+\{[^}]*\}\s+from\s+["']\.\/hands\/execute\.(ts|js)["'];?/g, "")
   .replace(/export\s+/g, "");
 
-const bundledContent = `(() => {\n"use strict";\n${privacyCode}\n${locatorsCode}\n${handsCode}\n${suggestionCode}\n${libraryCode}\n${contentCode}\n})();\n`;
+const bundledContent = `(() => {\n"use strict";\n${privacyCode}\n${locatorsCode}\n${pageSummaryCode}\n${handsCode}\n${suggestionCode}\n${libraryCode}\n${contentCode}\n})();\n`;
 fs.writeFileSync(path.join(distDir, "content.js"), bundledContent, "utf8");
 
 const backgroundSource = compileTs(path.join(srcDir, "background.ts")).replace(
