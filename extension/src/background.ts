@@ -1428,6 +1428,11 @@ async function runStepsInternal(
         getChromeApi()?.windows ?? (typeof chrome !== "undefined" ? chrome.windows : undefined);
 
       if (step.action === "navigate") {
+        const currentTab = await tabsApi?.get?.(currentTabId);
+        if (currentTab?.url && scoreTabUrlMatch(currentTab.url, step.url) >= 3) {
+          results.push({ ok: true, url: currentTab.url });
+          continue;
+        }
         await tabsApi?.update?.(currentTabId, { url: step.url });
         await waitForTabLoad(currentTabId);
         results.push({ ok: true, url: step.url });
