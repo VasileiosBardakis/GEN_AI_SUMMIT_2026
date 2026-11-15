@@ -879,7 +879,7 @@ function normalizeUrlPath(pathname: string): string {
   return pathname;
 }
 
-function normalizeLoopbackHost(host: string): string {
+export function normalizeLoopbackHost(host: string): string {
   return host.trim().toLowerCase();
 }
 
@@ -1407,21 +1407,32 @@ export async function runActionScript(
   }
 }
 
-function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
+function isExactHostMatch(url: string | undefined, targetHost: string): boolean {
   if (!url) return false;
   try {
     const parsed = new URL(url);
-    const want = normalizeLoopbackHost(targetHost);
-    const got = want.includes(":")
-      ? normalizeLoopbackHost(parsed.host)
-      : normalizeLoopbackHost(parsed.hostname);
+    const want = targetHost.trim().toLowerCase();
+    const got = want.includes(":") ? parsed.host.toLowerCase() : parsed.hostname.toLowerCase();
     return got === want;
   } catch {
     return false;
   }
 }
 
-function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string): number {
+export function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const want = normalizeLoopbackHost(targetHost);
+    if (!want) return false;
+    const got = normalizeLoopbackHost(want.includes(":") ? parsed.host : parsed.hostname);
+    return got === want;
+  } catch {
+    return false;
+  }
+}
+
+export function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string): number {
   if (!tabUrl) return 0;
   if (tabUrl === targetUrl) return 4;
   try {
@@ -1710,6 +1721,10 @@ async function runStepsInternal(
           (t) => t.id !== undefined && tabMatchesHost(t.url, targetHost),
         );
         matches.sort((a, b) => {
+          const exactDiff =
+            Number(isExactHostMatch(b.url, targetHost)) -
+            Number(isExactHostMatch(a.url, targetHost));
+          if (exactDiff !== 0) return exactDiff;
           const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
           if (accessDiff !== 0) return accessDiff;
           if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;

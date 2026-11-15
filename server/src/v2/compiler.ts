@@ -13,6 +13,7 @@ import {
 import { eventsToSteps, type PiiMap, type V2Step } from "./steps.ts";
 import { countRepeatedPatterns, splitEpisodes } from "./tries.ts";
 import {
+  isPlaceholderHost,
   normalizeHost,
   validateCompiledWorkflow,
   type CompiledLeafStep,
@@ -21,6 +22,8 @@ import {
   type CompiledWorkflow,
   type CompiledWorkflowStats,
 } from "./validate.ts";
+
+export { isPlaceholderHost };
 
 export type {
   CompiledLeafStep,
@@ -314,6 +317,30 @@ function normalizeUrlHost(rawUrl: string): string {
   } catch {
     return rawUrl;
   }
+}
+
+function hostnameFromUrl(rawUrl?: string): string | undefined {
+  if (!rawUrl || !rawUrl.trim()) return undefined;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return undefined;
+    }
+    const host = normalizeHost(parsed.hostname);
+    return isPlaceholderHost(host) ? undefined : host;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveStepRealHost(step: { app?: string; url?: string }): string | undefined {
+  const fromUrl = hostnameFromUrl(step.url);
+  if (fromUrl) return fromUrl;
+  if (step.app) {
+    const normalized = normalizeHost(step.app);
+    if (!isPlaceholderHost(normalized)) return normalized;
+  }
+  return undefined;
 }
 
 function mergeCapturedNavigateUrl(
@@ -612,7 +639,7 @@ function extractPageSummaryData(
 
   for (const step of steps) {
     if (step.rawPageSummary === undefined) continue;
-    const host = normalizeHost(step.app);
+    const host = resolveStepRealHost(step) ?? normalizeHost(step.app);
     const scrubbed = scrubUnknown(step.rawPageSummary, scrubText);
 
     if (typeof scrubbed === "string") {
@@ -1199,7 +1226,7 @@ function buildCompilePrompt(
 ): string {
   const seenUrlForApp = new Set<string>();
   const stepLines = ctx.indexedSteps.map((step, idx) => {
-    const app = normalizeHost(step.app);
+    const app = resolveStepRealHost(step) ?? normalizeHost(step.app);
     const entry: Record<string, unknown> = {
       stepIndex: idx,
       action: step.action,
@@ -1375,6 +1402,7 @@ function resolveLeafStep(
   stabilityCounts: ReadonlyMap<string, number>,
   restoreMap: ReadonlyMap<string, string>,
   inLoop: boolean,
+  nextHintStep?: ModelLeafStep,
   loopItemKeys?: ReadonlySet<string>,
   fallbackItemKey?: string,
 ): { step: CompiledLeafStep; host?: string; url?: string } | null {
@@ -1481,13 +1509,19 @@ function resolveLeafStep(
     }
   }
 
-  const stepHost = captured
-    ? normalizeHost(captured.app)
-    : psTarget
-      ? psTarget.host
-      : withinTarget
-        ? withinTarget.host
-        : undefined;
+  const capturedRealHost = captured
+    ? resolveStepRealHost({
+        app: captured.app,
+        url: captured.url ? restoreText(captured.url, restoreMap) : undefined,
+      })
+    : undefined;
+  const psTargetHost =
+    psTarget && !isPlaceholderHost(psTarget.host) ? psTarget.host : undefined;
+  const withinTargetHost =
+    withinTarget && !isPlaceholderHost(withinTarget.host)
+      ? withinTarget.host
+      : undefined;
+  const stepHost = capturedRealHost ?? psTargetHost ?? withinTargetHost;
   const stepUrl = captured?.url ? normalizeUrlHost(restoreText(captured.url, restoreMap)) : undefined;
 
   const optionalPart = raw.optional !== undefined ? { optional: raw.optional } : {};
@@ -1617,15 +1651,15 @@ function resolveLeafStep(
       const seenHostnames = new Set<string>();
       for (const s of ctx.indexedSteps) {
         if (s.app) {
-          seenHostnames.add(normalizeHost(s.app));
+          const norm = normalizeHost(s.app);
+          if (!isPlaceholderHost(norm)) {
+            seenHostnames.add(norm);
+          }
         }
         if (s.url) {
-          try {
-            seenHostnames.add(
-              normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname),
-            );
-          } catch {
-            // ignore invalid captured URL
+          const urlHost = hostnameFromUrl(restoreText(s.url, restoreMap));
+          if (urlHost) {
+            seenHostnames.add(urlHost);
           }
         }
       }
@@ -1653,15 +1687,10 @@ function resolveLeafStep(
         }
         const match = ctx.indexedSteps.find((s) => {
           if (!s.url) return false;
-          if (normalizeHost(s.app) === targetHost) return true;
-          try {
-            return (
-              normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname) ===
-              targetHost
-            );
-          } catch {
-            return false;
-          }
+          return (
+            resolveStepRealHost(s) === targetHost ||
+            hostnameFromUrl(restoreText(s.url, restoreMap)) === targetHost
+          );
         });
         return match?.url
           ? normalizeUrlHost(restoreText(match.url, restoreMap))
@@ -1670,14 +1699,9 @@ function resolveLeafStep(
 
       const rawUrl = raw.url?.trim() ? raw.url.trim() : undefined;
       const restoredRawUrl = rawUrl ? restoreText(rawUrl, restoreMap) : undefined;
-      let rawUrlHost: string | undefined;
-      if (restoredRawUrl) {
-        try {
-          rawUrlHost = normalizeHost(new URL(restoredRawUrl).hostname);
-        } catch {
-          // ignore invalid URL when inferring host
-        }
-      }
+      const rawUrlHost = restoredRawUrl
+        ? hostnameFromUrl(restoredRawUrl)
+        : undefined;
       const rawUrlSeen =
         rawUrlHost !== undefined && seenHostnames.has(rawUrlHost);
 
@@ -1705,13 +1729,15 @@ function resolveLeafStep(
         return null;
       }
 
-      const targetHost =
-        rawUrlHost ??
-        (raw.host?.trim()
-          ? normalizeHost(raw.host)
-          : captured?.app
-            ? normalizeHost(captured.app)
-            : undefined);
+      let targetHost = rawUrlHost;
+      if (!targetHost && raw.host?.trim()) {
+        const norm = normalizeHost(raw.host);
+        if (!isPlaceholderHost(norm)) targetHost = norm;
+      }
+      if (!targetHost && captured?.app) {
+        const norm = normalizeHost(captured.app);
+        if (!isPlaceholderHost(norm)) targetHost = norm;
+      }
       const matchingHostUrl = targetHost
         ? findMatchingHostUrl(targetHost)
         : undefined;
@@ -1721,9 +1747,14 @@ function resolveLeafStep(
       if (!candidateUrl) {
         if (raw.host?.trim()) {
           const rawHostTrimmed = raw.host.trim();
-          const host = normalizeHost(rawHostTrimmed.replace(/:\d+$/, ""));
-          if (!seenHostnames.has(host)) return null;
-          const switchUrl = stepUrl ?? findMatchingHostUrl(host, rawHostTrimmed);
+          const rawNavHost = normalizeHost(rawHostTrimmed.replace(/:\d+$/, ""));
+          const host = !isPlaceholderHost(rawNavHost) ? rawNavHost : stepHost;
+          if (!host || isPlaceholderHost(host) || !seenHostnames.has(host)) {
+            return null;
+          }
+          const switchUrl =
+            (stepUrl && hostnameFromUrl(stepUrl) === host ? stepUrl : undefined) ??
+            findMatchingHostUrl(host, rawHostTrimmed);
           return {
             step: {
               action: "switchTab",
@@ -1758,88 +1789,176 @@ function resolveLeafStep(
       };
     }
     case "switchTab": {
-      const restoredRawUrl = raw.url?.trim()
-        ? restoreText(raw.url.trim(), restoreMap)
+      const rawHostTrimmed = raw.host?.trim() ?? "";
+      const rawHostWithPort =
+        rawHostTrimmed && !rawHostTrimmed.includes("://")
+          ? rawHostTrimmed.split("/")[0] ?? ""
+          : undefined;
+      const candidateFromRawHost = (() => {
+        if (!rawHostTrimmed) return undefined;
+        if (rawHostTrimmed.includes("://")) {
+          return hostnameFromUrl(rawHostTrimmed);
+        }
+        const hostOnly = (rawHostWithPort ?? "").replace(/:\d+$/, "");
+        const norm = normalizeHost(hostOnly);
+        return isPlaceholderHost(norm) ? undefined : norm;
+      })();
+
+      const rawUrlRestored = raw.url?.trim()
+        ? normalizeUrlHost(restoreText(raw.url.trim(), restoreMap))
         : undefined;
-      let rawHost = raw.host?.trim() || "";
-      if (!rawHost && restoredRawUrl) {
-        try {
-          rawHost = new URL(restoredRawUrl).hostname;
-        } catch {
-          rawHost = restoredRawUrl;
-        }
-      }
-      if (!rawHost) {
-        rawHost = captured?.app ?? "";
-        if (!rawHost && captured?.url) {
-          try {
-            rawHost = new URL(restoreText(captured.url, restoreMap)).hostname;
-          } catch {
-            // ignore invalid captured URL
-          }
-        }
-      }
-      if (!rawHost.trim()) return null;
-      const host = normalizeHost(rawHost.replace(/:\d+$/, ""));
-      const capturedUrl = captured?.url
-        ? normalizeUrlHost(restoreText(captured.url, restoreMap))
+      const candidateFromRawUrl = hostnameFromUrl(rawUrlRestored);
+
+      const capturedUrlRestored = captured?.url?.trim()
+        ? normalizeUrlHost(restoreText(captured.url.trim(), restoreMap))
         : undefined;
-      const matchingStep = ctx.indexedSteps.find((s) => {
-        if (!s.url) return false;
-        if (rawHost.includes(":")) {
-          try {
-            if (
-              normalizeHost(new URL(restoreText(s.url, restoreMap)).host) ===
-              normalizeHost(rawHost)
-            ) {
-              return true;
-            }
-          } catch {
-            // ignore
-          }
-        }
-        if (normalizeHost(s.app) === host) return true;
-        try {
-          return (
-            normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname) ===
-            host
+      const candidateFromCapturedUrl = hostnameFromUrl(capturedUrlRestored);
+
+      const candidateFromCapturedApp = (() => {
+        if (!captured?.app) return undefined;
+        const norm = normalizeHost(captured.app);
+        return isPlaceholderHost(norm) ? undefined : norm;
+      })();
+
+      const hintStep =
+        nextHintStep?.stepIndex !== undefined &&
+        nextHintStep.stepIndex >= 0 &&
+        nextHintStep.stepIndex < ctx.indexedSteps.length
+          ? ctx.indexedSteps[nextHintStep.stepIndex]
+          : undefined;
+      const hintUrlRestored = hintStep?.url?.trim()
+        ? normalizeUrlHost(restoreText(hintStep.url.trim(), restoreMap))
+        : undefined;
+      const hintHost =
+        (hintStep
+          ? resolveStepRealHost({
+              app: hintStep.app,
+              url: hintUrlRestored,
+            })
+          : undefined) ??
+        (nextHintStep?.targetId
+          ? (() => {
+              const t = ctx.targets.get(nextHintStep.targetId!);
+              return t && !isPlaceholderHost(t.host) ? t.host : undefined;
+            })()
+          : undefined);
+
+      const directHost =
+        candidateFromRawHost ??
+        candidateFromRawUrl ??
+        candidateFromCapturedUrl ??
+        candidateFromCapturedApp;
+
+      let matchedStep: EnrichedStep | undefined;
+      if (directHost) {
+        const portMatchedStep =
+          rawHostWithPort && rawHostWithPort.includes(":")
+            ? (() => {
+                const exactPortHost = normalizeHost(rawHostWithPort);
+                const byTabSwitch = ctx.indexedSteps.find((s) => {
+                  if (s.action !== "tab_switch" || !s.url) return false;
+                  try {
+                    return (
+                      normalizeHost(new URL(restoreText(s.url, restoreMap)).host) ===
+                      exactPortHost
+                    );
+                  } catch {
+                    return false;
+                  }
+                });
+                if (byTabSwitch) return byTabSwitch;
+                return ctx.indexedSteps.find((s) => {
+                  if (!s.url) return false;
+                  try {
+                    return (
+                      normalizeHost(new URL(restoreText(s.url, restoreMap)).host) ===
+                      exactPortHost
+                    );
+                  } catch {
+                    return false;
+                  }
+                });
+              })()
+            : undefined;
+        matchedStep =
+          portMatchedStep ??
+          (hintStep &&
+          resolveStepRealHost(hintStep) === directHost &&
+          hintStep.url
+            ? hintStep
+            : undefined) ??
+          ctx.indexedSteps.find(
+            (s) =>
+              s.action === "tab_switch" &&
+              resolveStepRealHost(s) === directHost &&
+              Boolean(s.url),
+          ) ??
+          ctx.indexedSteps.find(
+            (s) => resolveStepRealHost(s) === directHost && Boolean(s.url),
           );
-        } catch {
-          return false;
-        }
-      });
-      const matchingHostUrl = matchingStep?.url
-        ? normalizeUrlHost(restoreText(matchingStep.url, restoreMap))
-        : undefined;
-      const fallbackUrl = capturedUrl ?? matchingHostUrl;
-      let switchUrl: string | undefined;
-      if (restoredRawUrl) {
-        let rawUrlHostMatches = false;
-        try {
-          rawUrlHostMatches =
-            normalizeHost(new URL(restoredRawUrl).hostname) === host;
-        } catch {
-          rawUrlHostMatches = false;
-        }
-        if (capturedUrl && !rawUrlHostMatches) {
-          switchUrl = capturedUrl;
-        } else {
-          switchUrl = normalizeUrlHost(
-            mergeCapturedNavigateUrl(restoredRawUrl, fallbackUrl),
+      } else if (hintHost) {
+        matchedStep =
+          (hintStep && hintStep.url ? hintStep : undefined) ??
+          ctx.indexedSteps.find(
+            (s) =>
+              s.action === "tab_switch" &&
+              resolveStepRealHost(s) === hintHost &&
+              Boolean(s.url),
+          ) ??
+          ctx.indexedSteps.find(
+            (s) => resolveStepRealHost(s) === hintHost && Boolean(s.url),
           );
-        }
       } else {
-        switchUrl = fallbackUrl;
+        matchedStep =
+          ctx.indexedSteps.find(
+            (s) => s.action === "tab_switch" && resolveStepRealHost(s) !== undefined,
+          ) ??
+          ctx.indexedSteps.find((s) => resolveStepRealHost(s) !== undefined);
       }
+
+      const finalHost =
+        directHost ??
+        hintHost ??
+        (matchedStep ? resolveStepRealHost(matchedStep) : undefined);
+      if (!finalHost || isPlaceholderHost(finalHost)) {
+        return null;
+      }
+
+      const matchedUrlRestored = matchedStep?.url?.trim()
+        ? normalizeUrlHost(restoreText(matchedStep.url.trim(), restoreMap))
+        : undefined;
+
+      const fallbackUrl =
+        (capturedUrlRestored && hostnameFromUrl(capturedUrlRestored) === finalHost
+          ? capturedUrlRestored
+          : undefined) ??
+        (hintUrlRestored && hostnameFromUrl(hintUrlRestored) === finalHost
+          ? hintUrlRestored
+          : undefined) ??
+        (matchedUrlRestored && hostnameFromUrl(matchedUrlRestored) === finalHost
+          ? matchedUrlRestored
+          : undefined);
+
+      let resolvedUrl: string | undefined;
+      if (capturedUrlRestored && hostnameFromUrl(capturedUrlRestored) === finalHost) {
+        resolvedUrl = capturedUrlRestored;
+      } else if (rawUrlRestored && hostnameFromUrl(rawUrlRestored) === finalHost) {
+        resolvedUrl = normalizeUrlHost(
+          mergeCapturedNavigateUrl(rawUrlRestored, fallbackUrl),
+        );
+      } else {
+        resolvedUrl = fallbackUrl;
+      }
+
       return {
         step: {
           action: "switchTab",
-          host,
-          ...(switchUrl ? { url: switchUrl } : {}),
+          host: finalHost,
+          ...(resolvedUrl ? { url: resolvedUrl } : {}),
           ...optionalPart,
         },
-        host,
-        url: switchUrl ?? stepUrl,
+        host: finalHost,
+        url: resolvedUrl ?? stepUrl,
       };
     }
     case "key": {
@@ -1917,7 +2036,7 @@ function resolveSteps(
         for (const itemId of explicitItemIds) {
           const item = ctx.items.get(itemId);
           if (item) {
-            recordLocation(item.host);
+            recordLocation(!isPlaceholderHost(item.host) ? item.host : undefined);
             const restoredRow: Record<string, string> = {};
             for (const [k, v] of Object.entries(item.fields)) {
               restoredRow[k] = restoreText(v, restoreMap);
@@ -1932,7 +2051,7 @@ function resolveSteps(
         const key = stripParamBraces(raw.items);
         const list = ctx.lists.get(key);
         if (list && list.items.length > 0) {
-          recordLocation(list.host);
+          recordLocation(!isPlaceholderHost(list.host) ? list.host : undefined);
           resolvedItems = list.items.map((item) => {
             const restoredRow: Record<string, string> = {};
             for (const [k, v] of Object.entries(item.fields)) {
@@ -1974,19 +2093,31 @@ function resolveSteps(
       }
 
       const nestedSteps: CompiledStep[] = [];
-      for (const child of childRawSteps) {
+      for (let j = 0; j < childRawSteps.length; j++) {
+        const child = childRawSteps[j];
+        const nextChild = childRawSteps
+          .slice(j + 1)
+          .find((s) => s.action !== "switchTab");
         const resolved = resolveLeafStep(
           child,
           ctx,
           stabilityCounts,
           restoreMap,
           true,
+          nextChild,
           loopItemKeys,
           fallbackItemKey,
         );
-        if (!resolved) return null;
+        if (!resolved) {
+          if (child.action === "switchTab") continue;
+          return null;
+        }
         recordLocation(resolved.host, resolved.url);
         nestedSteps.push(resolved.step);
+      }
+
+      if (nestedSteps.length === 0) {
+        return null;
       }
 
       out.push({
@@ -2001,14 +2132,23 @@ function resolveSteps(
       continue;
     }
 
+    const nextTop = rawSteps
+      .slice(idx + 1)
+      .find((s) => s.action !== "switchTab" && s.action !== "forEach") as
+      | ModelLeafStep
+      | undefined;
     const resolved = resolveLeafStep(
       raw as ModelLeafStep,
       ctx,
       stabilityCounts,
       restoreMap,
       false,
+      nextTop,
     );
-    if (!resolved) return null;
+    if (!resolved) {
+      if (raw.action === "switchTab") continue;
+      return null;
+    }
     recordLocation(resolved.host, resolved.url);
     out.push(resolved.step);
   }
@@ -2130,7 +2270,11 @@ export async function compileWorkflow(
   const gemini = createCompileGeminiClient(ctx, opts);
 
   const distinctApps = Array.from(
-    new Set(indexedSteps.map((s) => normalizeHost(s.app)).filter(Boolean)),
+    new Set(
+      indexedSteps
+        .map((s) => resolveStepRealHost(s))
+        .filter((h): h is string => Boolean(h)),
+    ),
   );
   const irisDigest: Record<string, unknown> = {
     sourceApp: distinctApps[0] ?? "",
@@ -2141,7 +2285,7 @@ export async function compileWorkflow(
       const rawLabel = s.label ?? inferLabelFromTarget(s.target);
       return {
         action: s.action,
-        app: normalizeHost(s.app),
+        app: resolveStepRealHost(s) ?? normalizeHost(s.app),
         ...(rawLabel ? { label: scrubText(rawLabel) } : {}),
       };
     }),
@@ -2180,38 +2324,53 @@ export async function compileWorkflow(
     return null;
   }
 
-  const fallbackFirst = indexedSteps.find((s) => s.url) ?? indexedSteps[0];
-  const startHost = normalizeHost(
-    resolved.firstHost ?? fallbackFirst.app,
+  const firstRealStep = indexedSteps.find((s) => resolveStepRealHost(s) !== undefined);
+  const startHost =
+    (resolved.firstHost && !isPlaceholderHost(resolved.firstHost)
+      ? resolved.firstHost
+      : undefined) ??
+    (firstRealStep ? resolveStepRealHost(firstRealStep) : undefined);
+
+  const matchingHostStep = startHost
+    ? indexedSteps.find((s) => resolveStepRealHost(s) === startHost && s.url)
+    : undefined;
+  const fallbackUrlStep = indexedSteps.find(
+    (s) => s.url && hostnameFromUrl(s.url) !== undefined,
   );
-  const matchingHostStep = indexedSteps.find(
-    (s) => normalizeHost(s.app) === startHost && s.url,
-  );
+  const candidateStartUrl = matchingHostStep?.url
+    ? normalizeUrlHost(restoreText(matchingHostStep.url, restoreMap))
+    : resolved.firstUrl
+      ? resolved.firstUrl
+      : fallbackUrlStep?.url
+        ? normalizeUrlHost(restoreText(fallbackUrlStep.url, restoreMap))
+        : undefined;
   const rawStartUrl =
-    matchingHostStep?.url
-      ? normalizeUrlHost(restoreText(matchingHostStep.url, restoreMap))
-      : resolved.firstUrl
-        ? resolved.firstUrl
-        : fallbackFirst.url
-          ? normalizeUrlHost(restoreText(fallbackFirst.url, restoreMap))
-          : undefined;
+    candidateStartUrl && hostnameFromUrl(candidateStartUrl) !== undefined
+      ? candidateStartUrl
+      : undefined;
 
   const steps = [...resolved.steps];
-  const startSwitchStep: CompiledStep = {
-    action: "switchTab",
-    host: startHost,
-    ...(rawStartUrl ? { url: rawStartUrl } : {}),
-  };
-  if (steps[0]?.action !== "switchTab") {
-    steps.unshift(startSwitchStep);
-  } else if (steps[0].host !== startHost) {
-    steps.unshift(startSwitchStep);
-  } else if (!steps[0].url && rawStartUrl) {
-    steps[0] = { ...steps[0], url: rawStartUrl };
+  if (startHost) {
+    const startSwitchStep: CompiledStep = {
+      action: "switchTab",
+      host: startHost,
+      ...(rawStartUrl ? { url: rawStartUrl } : {}),
+    };
+    if (steps[0]?.action !== "switchTab") {
+      steps.unshift(startSwitchStep);
+    } else if (steps[0].host !== startHost) {
+      steps.unshift(startSwitchStep);
+    } else if (!steps[0].url && rawStartUrl) {
+      steps[0] = { ...steps[0], url: rawStartUrl };
+    }
   }
 
-  const appsSet = new Set<string>([startHost, ...resolved.hosts]);
-  const apps = Array.from(appsSet).filter(Boolean);
+  const appsSet = new Set<string>(
+    [startHost, ...resolved.hosts].filter(
+      (h): h is string => typeof h === "string" && !isPlaceholderHost(h),
+    ),
+  );
+  const apps = Array.from(appsSet);
 
   const params: CompiledParam[] = modelOut.params.map((p) => {
     const restoredDesc =
@@ -2356,16 +2515,23 @@ export async function compileWorkflow(
   for (const e of sourceEntries) {
     if (e.url) {
       try {
-        seenHosts.add(
-          normalizeHost(new URL(restoreText(e.url, restoreMap)).host),
-        );
-        continue;
+        const parsed = new URL(restoreText(e.url, restoreMap));
+        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+          const urlHost = normalizeHost(parsed.host);
+          if (!isPlaceholderHost(urlHost)) {
+            seenHosts.add(urlHost);
+          }
+          continue;
+        }
       } catch {
         // fall back to app if URL is invalid
       }
     }
     if (e.app) {
-      seenHosts.add(normalizeHost(e.app));
+      const appHost = normalizeHost(e.app);
+      if (!isPlaceholderHost(appHost)) {
+        seenHosts.add(appHost);
+      }
     }
   }
 

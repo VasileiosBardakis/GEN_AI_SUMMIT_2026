@@ -282,6 +282,14 @@ export const CompiledWorkflowSchema: z.ZodType<CompiledWorkflow> = z.object({
   stats: CompiledWorkflowStatsSchema,
 });
 
+const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
+
+export function isPlaceholderHost(host: string): boolean {
+  const trimmed = host.trim().toLowerCase();
+  const hostname = trimmed.split(":")[0] ?? "";
+  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
+}
+
 export function normalizeHost(host: string): string {
   return host.trim().toLowerCase();
 }
@@ -462,6 +470,9 @@ function checkSteps(
       if (step.host.includes("://") || step.host.includes("/")) {
         return `switchTab.host must be a hostname without scheme/path at ${stepPath}`;
       }
+      if (isPlaceholderHost(step.host)) {
+        return `Invalid placeholder switchTab host "${step.host}" at ${stepPath}`;
+      }
       if (step.host !== normalizeHost(step.host)) {
         return `Unnormalized switchTab host "${step.host}" at ${stepPath}`;
       }
@@ -481,6 +492,8 @@ function checkSteps(
       if (step.url !== undefined) {
         const urlErr = checkUrlHost(step.url, `${stepPath}.url`, seenUrlHosts);
         if (urlErr) return urlErr;
+        const tmplErr = checkTemplateStrings(step.url, bindings, `${stepPath}.url`);
+        if (tmplErr) return tmplErr;
       }
     }
 

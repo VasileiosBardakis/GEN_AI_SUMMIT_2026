@@ -820,6 +820,35 @@ describe("Brain v2 compiler and validator", () => {
       }).ok,
     ).toBe(false);
 
+    // Placeholder hosts rejected
+    for (const badHost of ["browser", "unknown", "local-page"]) {
+      expect(
+        validateCompiledWorkflow({
+          ...base,
+          steps: [{ action: "switchTab", host: badHost }],
+        }).ok,
+      ).toBe(false);
+    }
+
+    // switchTab with optional url accepted when normalized
+    expect(
+      validateCompiledWorkflow({
+        ...base,
+        steps: [
+          {
+            action: "switchTab",
+            host: "localhost",
+            url: "http://localhost:4173/erp.html",
+          },
+          {
+            action: "fill",
+            target: [{ kind: "testid", value: "q" }],
+            value: "{{query}}",
+          },
+        ],
+      }).ok,
+    ).toBe(true);
+
     // Step cap
     expect(validateCompiledWorkflow(base, { maxSteps: 1 }).ok).toBe(false);
 
@@ -855,6 +884,164 @@ describe("Brain v2 compiler and validator", () => {
         }).ok,
       ).toBe(false);
     }
+  });
+
+  it("resolves real host + url for switchTab when events use localhost/127.0.0.1 or 'browser' app fallback, and omits switchTab when only placeholder exists", async () => {
+    const events: Event[] = [1, 2].flatMap((row) => [
+      {
+        v: 1 as const,
+        id: `c-${row}`,
+        ts: row * 10_000 + 100,
+        session: "s_loopback_browser",
+        source: "browser" as const,
+        app: "browser",
+        url: "http://localhost:4173/portal.html",
+        type: "copy" as const,
+        target: {
+          tag: "span",
+          locators: [{ kind: "testid" as const, value: `portal-id-${row}` }],
+        },
+        value: `INV-${row}`,
+      },
+      {
+        v: 1 as const,
+        id: `ts-${row}`,
+        ts: row * 10_000 + 200,
+        session: "s_loopback_browser",
+        source: "browser" as const,
+        app: "browser",
+        url: "http://127.0.0.1:4173/erp.html",
+        type: "tab_switch" as const,
+      },
+      {
+        v: 1 as const,
+        id: `p-${row}`,
+        ts: row * 10_000 + 300,
+        session: "s_loopback_browser",
+        source: "browser" as const,
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/erp.html",
+        type: "paste" as const,
+        target: {
+          tag: "input",
+          locators: [{ kind: "testid" as const, value: "erp-id" }],
+        },
+        value: `INV-${row}`,
+      },
+      {
+        v: 1 as const,
+        id: `s-${row}`,
+        ts: row * 10_000 + 400,
+        session: "s_loopback_browser",
+        source: "browser" as const,
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/erp.html",
+        type: "click" as const,
+        target: {
+          tag: "button",
+          locators: [{ kind: "testid" as const, value: "save-btn" }],
+        },
+      },
+    ]);
+
+    const { client } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Copy invoice to ERP",
+      reason: "Copies invoice ID from portal to ERP",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "readText", stepIndex: 0, bind: "invoiceId" },
+        { action: "switchTab", host: "browser", stepIndex: 1 },
+        { action: "fill", stepIndex: 2, value: "{{invoiceId}}" },
+        { action: "click", stepIndex: 3 },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events, repeatCount: 2 },
+      {
+        gemini: client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(wf).not.toBeNull();
+    expect(wf!.apps).toEqual(["localhost", "127.0.0.1"]);
+    expect(wf!.startUrl).toBe("http://localhost:4173/portal.html");
+    expect(wf!.steps[0]).toEqual({
+      action: "switchTab",
+      host: "localhost",
+      url: "http://localhost:4173/portal.html",
+    });
+    expect(wf!.steps[2]).toEqual({
+      action: "switchTab",
+      host: "127.0.0.1",
+      url: "http://127.0.0.1:4173/erp.html",
+    });
+
+    // When events only have placeholder app ("browser") and no URL, omit prepending switchTab and drop placeholder switchTab
+    const placeholderOnlyEvents: Event[] = [1, 2].flatMap((row) => [
+      {
+        v: 1 as const,
+        id: `ph-fill-${row}`,
+        ts: row * 10_000 + 100,
+        session: "s_placeholder_only",
+        source: "browser" as const,
+        app: "browser",
+        type: "input" as const,
+        target: {
+          tag: "input",
+          locators: [{ kind: "testid" as const, value: "field-a" }],
+        },
+        value: `val-${row}`,
+      },
+      {
+        v: 1 as const,
+        id: `ph-click-${row}`,
+        ts: row * 10_000 + 200,
+        session: "s_placeholder_only",
+        source: "browser" as const,
+        app: "local-page",
+        type: "click" as const,
+        target: {
+          tag: "button",
+          locators: [{ kind: "testid" as const, value: "btn-ok" }],
+        },
+      },
+    ]);
+
+    const { client: phClient } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Fill and confirm",
+      reason: "Fills field and clicks OK",
+      risk: "low",
+      runMode: "save_only",
+      params: [{ name: "val", example: "val-1" }],
+      steps: [
+        { action: "switchTab", host: "browser" },
+        { action: "fill", stepIndex: 0, value: "{{val}}" },
+        { action: "click", stepIndex: 1 },
+      ],
+    });
+
+    const phWf = await compileWorkflow(
+      { events: placeholderOnlyEvents, repeatCount: 2 },
+      {
+        gemini: phClient,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(phWf).not.toBeNull();
+    expect(phWf!.apps).toEqual([]);
+    expect(phWf!.steps.some((s) => s.action === "switchTab")).toBe(false);
+    expect(phWf!.steps.map((s) => s.action)).toEqual(["fill", "click"]);
   });
 
   it("compiles a 3-repeat form trace with repeated Help click + excursion without navigate or extra click", async () => {

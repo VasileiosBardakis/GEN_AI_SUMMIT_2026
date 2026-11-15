@@ -11,12 +11,15 @@ import {
   fetchLatestScript,
   handleHandsCommand,
   handleRuntimeMessage,
+  normalizeLoopbackHost,
   pollHandsBridgeOnce,
   recordEvent,
   resolveTargetTabId,
   runActionScript,
+  scoreTabUrlMatch,
   stopHandsRun,
   substitute,
+  tabMatchesHost,
 } from "../src/background.ts";
 import { precheckStepLocators } from "../src/content.ts";
 import { executeStep, type V2DomStep } from "../src/hands/execute.ts";
@@ -1084,6 +1087,102 @@ describe("GEN-69: M2 Hands v2", () => {
     });
     expect(divFillRes.ok).toBe(false);
     expect(divFillRes.error).toBe("Target is not fillable");
+  });
+
+  it("switchTab with host='127.0.0.1' and url='http://127.0.0.1:4173/erp.html' keeps 127.0.0.1 distinct from localhost, activates http://127.0.0.1:4173/erp.html over http://localhost:4173/portal.html, and replays fill on row 4", async () => {
+    expect(normalizeLoopbackHost("127.0.0.1")).toBe("127.0.0.1");
+    expect(normalizeLoopbackHost("127.0.0.1:4173")).toBe("127.0.0.1:4173");
+    expect(normalizeLoopbackHost("localhost:4173")).toBe("localhost:4173");
+    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "localhost")).toBe(false);
+    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "127.0.0.1")).toBe(true);
+    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "127.0.0.1:4173")).toBe(true);
+    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "127.0.0.1:5173")).toBe(false);
+    expect(
+      scoreTabUrlMatch("http://127.0.0.1:4173/erp.html", "http://localhost:4173/erp.html"),
+    ).toBe(0);
+    expect(
+      scoreTabUrlMatch("http://127.0.0.1:4173/erp.html", "http://127.0.0.1:4173/erp.html"),
+    ).toBe(4);
+    expect(
+      scoreTabUrlMatch("http://localhost:4173/portal.html", "http://localhost:4173/erp.html"),
+    ).toBe(0);
+
+    const query = vi.fn(async () => [
+      {
+        id: 10,
+        url: "http://localhost:4173/portal.html",
+        windowId: 1,
+        active: true,
+        lastAccessed: 999,
+      },
+      {
+        id: 20,
+        url: "http://127.0.0.1:4173/erp.html",
+        windowId: 1,
+        active: false,
+        lastAccessed: 100,
+      },
+    ]);
+    const updateTab = vi.fn(async (tabId: number) => ({ id: tabId }));
+    const updateWindow = vi.fn(async () => ({}));
+    const executeScript = vi.fn(
+      async ({ target, args }: { target: { tabId: number }; args: [V2DomStep] }) => [
+        {
+          frameId: 0,
+          result: { ok: true, url: `tab:${target.tabId}`, value: JSON.stringify(args[0]) },
+        },
+      ],
+    );
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: { query, update: updateTab },
+      windows: { update: updateWindow },
+      scripting: { executeScript },
+    };
+
+    const results = await runActionScript(10, {
+      steps: [
+        {
+          action: "forEach",
+          items: [{ invoiceId: "INV-2026-004", vendor: "Northwind Freight" }],
+          steps: [
+            {
+              action: "switchTab",
+              host: "127.0.0.1",
+              url: "http://127.0.0.1:4173/erp.html",
+            },
+            {
+              action: "fill",
+              target: { kind: "testid", value: "erp-invoice-id" },
+              value: "{{invoiceId}}",
+            },
+            {
+              action: "fill",
+              target: { kind: "testid", value: "erp-vendor" },
+              value: "{{vendor}}",
+            },
+          ],
+        },
+      ],
+    } as unknown as ActionScript);
+
+    expect(updateTab).toHaveBeenCalledWith(20, { active: true });
+    expect(executeScript).toHaveBeenCalledTimes(2);
+    expect(executeScript.mock.calls[0]?.[0].target.tabId).toBe(20);
+    expect(executeScript.mock.calls[0]?.[0].args[0]).toMatchObject({
+      action: "fill",
+      value: "INV-2026-004",
+    });
+    expect(executeScript.mock.calls[1]?.[0].target.tabId).toBe(20);
+    expect(executeScript.mock.calls[1]?.[0].args[0]).toMatchObject({
+      action: "fill",
+      value: "Northwind Freight",
+    });
+    expect(results[0]).toMatchObject({
+      ok: true,
+      tab: "127.0.0.1",
+      url: "http://127.0.0.1:4173/erp.html",
+    });
   });
 
   it("skips tabs.update and waitForTabLoad on navigate when tabs.get returns a matching URL (scoreTabUrlMatch >= 3)", async () => {

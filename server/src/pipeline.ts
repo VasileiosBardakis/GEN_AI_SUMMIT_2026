@@ -726,6 +726,81 @@ export function isSelectStep(step: Step, events?: Event[]): boolean {
   return false;
 }
 
+const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
+
+function isPlaceholderHost(host?: string): boolean {
+  if (!host) return true;
+  const trimmed = host.trim().toLowerCase();
+  const hostname = trimmed.split(":")[0] ?? "";
+  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
+}
+
+function resolveEventHost(ev?: Event): string | undefined {
+  if (!ev) return undefined;
+  if (ev.app && !isPlaceholderHost(ev.app)) {
+    return ev.app.trim();
+  }
+  if (ev.url) {
+    try {
+      const parsed = new URL(ev.url);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        const host = parsed.hostname.trim().toLowerCase();
+        if (!isPlaceholderHost(host)) return host;
+      }
+    } catch {
+      // ignore invalid URL
+    }
+  }
+  return undefined;
+}
+
+function resolveWorkflowHosts(
+  workflow: Workflow,
+  events?: Event[],
+): { sourceHost?: string; destHost?: string } {
+  const nonNav = events?.filter((e) => e.type !== "nav") ?? [];
+  const pool = nonNav.length > 0 ? nonNav : (events ?? []);
+  const copyHost = pool
+    .filter((e) => e.type === "copy")
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+  const firstPoolHost = pool
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+  const firstAllHost = (events ?? [])
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+
+  const destWriteHost = [...pool]
+    .reverse()
+    .filter(
+      (e) =>
+        e.type === "paste" ||
+        e.type === "input" ||
+        e.type === "change" ||
+        e.type === "submit",
+    )
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+  const lastPoolHost = [...pool]
+    .reverse()
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+  const lastAllHost = [...(events ?? [])]
+    .reverse()
+    .map((e) => resolveEventHost(e))
+    .find((h): h is string => Boolean(h));
+
+  const sourceHost = !isPlaceholderHost(workflow.sourceApp)
+    ? workflow.sourceApp.trim()
+    : (copyHost ?? firstPoolHost ?? firstAllHost);
+  const destHost = !isPlaceholderHost(workflow.destApp)
+    ? workflow.destApp.trim()
+    : (destWriteHost ?? lastPoolHost ?? lastAllHost ?? sourceHost);
+
+  return { sourceHost, destHost };
+}
+
 export function buildSolutionText(
   verdict: Verdict,
   workflow?: Workflow,
@@ -748,24 +823,29 @@ export function buildSolutionText(
       }
     }
 
+    const { sourceHost, destHost } = resolveWorkflowHosts(workflow, events);
+    const hasValidSource = Boolean(sourceHost && !isPlaceholderHost(sourceHost));
+    const hasValidDest = Boolean(destHost && !isPlaceholderHost(destHost));
+
     const copiedParams = new Set<string>();
     const isCrossHost = Boolean(
-      workflow.sourceApp &&
-        workflow.destApp &&
-        workflow.sourceApp !== workflow.destApp,
+      hasValidSource &&
+        hasValidDest &&
+        sourceHost !== destHost,
     );
     const hasCopySteps = workflow.steps.some((s) => s.action === "copy");
     let sawCopy = false;
     let insertedSwitchTab = false;
     const rawLines: string[] = [];
 
-    if (workflow.sourceApp && (hasCopySteps || isCrossHost)) {
-      rawLines.push(`switchTab host="${workflow.sourceApp}"`);
+    if (hasValidSource && (hasCopySteps || isCrossHost)) {
+      rawLines.push(`switchTab host="${sourceHost}"`);
     }
 
     for (const step of workflow.steps) {
       if (
         isCrossHost &&
+        hasValidDest &&
         !insertedSwitchTab &&
         sawCopy &&
         (copiedParams.size > 0 || hasCopySteps) &&
@@ -773,7 +853,7 @@ export function buildSolutionText(
           step.action === "paste" ||
           step.action === "click")
       ) {
-        rawLines.push(`switchTab host="${workflow.destApp}"`);
+        rawLines.push(`switchTab host="${destHost}"`);
         insertedSwitchTab = true;
       }
 
@@ -834,8 +914,8 @@ export function buildSolutionText(
 
     const lines = rawLines.map((line, idx) => `${idx + 1}. ${line}`);
     const header = isCrossHost
-      ? `Read values on ${workflow.sourceApp}, switch to ${workflow.destApp}, and fill on ${workflow.destApp}:`
-      : `Execute the workflow "${workflow.name}" on ${workflow.destApp}:`;
+      ? `Read values on ${sourceHost}, switch to ${destHost}, and fill on ${destHost}:`
+      : `Execute the workflow "${workflow.name}" on ${destHost ?? sourceHost ?? workflow.destApp}:`;
     return `${header}\n${lines.join("\n")}`;
   }
 
@@ -851,8 +931,16 @@ type PipelineItem = {
 };
 
 function resolvePrimaryApp(events?: Event[]): string {
-  const nonNav = events?.find((e) => e.type !== "nav");
-  return nonNav?.app ?? events?.[0]?.app ?? "browser";
+  const nonNav = events?.filter((e) => e.type !== "nav") ?? [];
+  for (const ev of nonNav) {
+    const host = resolveEventHost(ev);
+    if (host) return host;
+  }
+  for (const ev of events ?? []) {
+    const host = resolveEventHost(ev);
+    if (host) return host;
+  }
+  return nonNav[0]?.app ?? events?.[0]?.app ?? "browser";
 }
 
 function snippetToCandidate(

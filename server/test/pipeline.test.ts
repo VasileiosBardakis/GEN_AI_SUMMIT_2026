@@ -801,6 +801,79 @@ describe("pipeline unit & config tests", () => {
     expect(solution).not.toContain('select <select> testid="note-input"');
   });
 
+  it("buildSolutionText resolves real hosts from events and never emits switchTab host='browser', 'unknown', or 'local-page'", () => {
+    for (const placeholder of ["browser", "unknown", "local-page"]) {
+      const wfWithPlaceholder: Workflow = {
+        id: `wf_${placeholder}`,
+        name: "Placeholder flow",
+        sourceApp: placeholder,
+        destApp: placeholder,
+        steps: [
+          {
+            action: "copy",
+            target: [{ kind: "testid", value: "portal-id" }],
+            value: { param: "id" },
+          },
+          {
+            action: "paste",
+            target: [{ kind: "testid", value: "erp-id" }],
+            value: { param: "id" },
+          },
+          {
+            action: "click",
+            target: [{ kind: "testid", value: "save-btn" }],
+          },
+        ],
+        params: [{ name: "id", example: "INV-1" }],
+        instances: [],
+      };
+
+      // Without events having real hosts, omit switchTab host="browser" / "unknown" / "local-page"
+      const noHostSolution = buildSolutionText("rung2", wfWithPlaceholder);
+      expect(noHostSolution).not.toBeNull();
+      expect(noHostSolution).not.toContain(`switchTab host="${placeholder}"`);
+      expect(noHostSolution).not.toContain("switchTab");
+
+      // With events having real URLs despite placeholder app, resolve real hosts
+      const eventsWithUrls: Event[] = [
+        {
+          v: 1,
+          id: "ev-copy",
+          ts: 1000,
+          session: "sess_real",
+          source: "browser",
+          app: placeholder,
+          url: "http://localhost:4173/portal.html",
+          type: "copy",
+          target: { locators: [{ kind: "testid", value: "portal-id" }] },
+          value: "INV-1",
+        },
+        {
+          v: 1,
+          id: "ev-paste",
+          ts: 2000,
+          session: "sess_real",
+          source: "browser",
+          app: placeholder,
+          url: "http://127.0.0.1:4173/erp.html",
+          type: "paste",
+          target: { locators: [{ kind: "testid", value: "erp-id" }] },
+          value: "INV-1",
+        },
+      ];
+      const resolvedSolution = buildSolutionText(
+        "rung2",
+        wfWithPlaceholder,
+        undefined,
+        eventsWithUrls,
+      );
+      expect(resolvedSolution).not.toBeNull();
+      expect(resolvedSolution).toContain('switchTab host="localhost"');
+      expect(resolvedSolution).toContain('switchTab host="127.0.0.1"');
+      expect(resolvedSolution).not.toContain(`host="${placeholder}"`);
+    }
+  });
+
   it("runPipeline passes events to buildSolutionText so implementor receives select <select> for dropdowns", async () => {
     const baseTs = 1_700_000_000_000;
     const events: Event[] = [0, 1, 2].flatMap((i) => [
