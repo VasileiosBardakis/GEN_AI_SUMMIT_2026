@@ -61,6 +61,7 @@ export interface DeciderProposalInput {
   name: string;
   solution: string;
   script: ActionScript;
+  videoUrl?: string;
   pauseBeforeSubmit?: boolean;
   runMode?: "run" | "save_only";
   params?: SuggestionParam[];
@@ -232,6 +233,10 @@ export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion 
   const pauseNotice =
     input.pauseNotice?.trim() ||
     (pauseBeforeSubmit ? "Pauses before submit — you click the final button." : undefined);
+  const videoUrl =
+    !isSingleInsert && !isFlowTip && typeof input.videoUrl === "string" && input.videoUrl.trim().length > 0
+      ? input.videoUrl.trim()
+      : undefined;
   const primaryLabel =
     input.primaryLabel?.trim() ||
     (runMode === "save_only" ? "Save skill" : undefined);
@@ -274,6 +279,7 @@ export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion 
     detail: collapsePreview(solution, 140),
     ...(solution ? { solution } : {}),
     meta: isFlowTip ? "Flow tip" : `${stepLabel} · ${metaSuffix}`,
+    ...(videoUrl ? { videoUrl } : {}),
     ...(pauseBeforeSubmit !== undefined ? { pauseBeforeSubmit } : {}),
     ...(runMode !== undefined ? { runMode } : {}),
     ...(params && params.length > 0 ? { params } : {}),

@@ -104,6 +104,47 @@ describe("propose flow tips", () => {
     expect(decisions).toBe(1);
   });
 
+  it("shows each shortcut once across sessions until the server/proposer restarts", async () => {
+    const excludeSeen: Array<string[] | undefined> = [];
+    let decisions = 0;
+    const makeProposer = () =>
+      createProposer({
+        readSessionEvents: async () => repeatedCutEvents(),
+        compileV2: async () => null,
+        suggestFlowTip: async (_events, exclude) => {
+          excludeSeen.push(exclude);
+          const first = excludeSeen.length === 1;
+          return first
+            ? { tip: "Press Ctrl+C to copy.", keys: ["Ctrl+C"], why: "Copy repeated." }
+            : { tip: "Use Ctrl + C instead of right-click.", keys: ["Ctrl", "C"], why: "Copy repeated." };
+        },
+        requestDecision: async () => {
+          decisions += 1;
+          return { ok: true, decision: "approved" };
+        },
+        runScript: async () => ({ ok: true }),
+        debounceMs: 0,
+      });
+
+    const p1 = makeProposer();
+    p1.onEvents("s1");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    p1.onEvents("s2");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    p1.close();
+
+    expect(decisions).toBe(1);
+    expect(excludeSeen).toEqual([undefined, ["Ctrl+C"]]);
+
+    // Simulated server restart (new proposer instance) clears shown tips
+    const p2 = makeProposer();
+    p2.onEvents("s3");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    p2.close();
+
+    expect(decisions).toBe(2);
+  });
+
   it("does not call the model before a pattern actually repeats", async () => {
     let suggestions = 0;
     const proposer = createProposer({

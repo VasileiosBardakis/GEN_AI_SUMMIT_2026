@@ -20,7 +20,7 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "dist/replay-demo.mp4",
+        "dist/replay-demo.webm",
         "dist/fonts/Geist-Variable.woff2",
         "dist/fonts/GeistMono-Variable.woff2"
       ],
