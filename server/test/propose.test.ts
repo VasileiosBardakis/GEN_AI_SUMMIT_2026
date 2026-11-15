@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Event } from "@gen/shared";
 import { EventSchema } from "@gen/shared/schema.ts";
 import { createServer } from "../src/app.ts";
+import { buildLibraryEntryFromScript } from "../src/hands/implementor.ts";
 import type { GeminiClient } from "../src/llm/gemini.ts";
 import { createProposer } from "../src/propose.ts";
 import { compileWorkflow, type CompiledWorkflow } from "../src/v2/index.ts";
@@ -430,5 +431,163 @@ describe("proposer Iris-gated pipeline (GEN-114)", () => {
     });
     expect(decideSnipCalls).toEqual([{ runMode: "run_remaining" }]);
     pSnip.close();
+  });
+
+  it("GEN-127: complete-cycle prompt, Iris same-task dedup before offer, and no re-compile while popup unanswered", async () => {
+    // 1. Compile prompt instructs Gemini to output one complete cycle (never mid-cycle)
+    const prompts: string[] = [];
+    const mockGemini: GeminiClient = {
+      async generateText() {
+        throw new Error("unexpected");
+      },
+      async generateJson<T>(prompt: string, schema: Parameters<GeminiClient["generateJson"]>[1]) {
+        prompts.push(prompt);
+        const parsed = schema.safeParse({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Submit portal entry",
+          reason: "Submits entry",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [{ action: "click", stepIndex: 1 }],
+        });
+        if (!parsed.success) throw new Error("invalid mock");
+        return parsed.data as T;
+      },
+    };
+    await compileWorkflow(
+      { events: twoStepEvents },
+      { gemini: mockGemini, iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }) },
+    );
+    expect(prompts[0]).toContain("ONE complete cycle");
+    expect(prompts[0]).toContain("natural start");
+    expect(prompts[0]).toContain("NEVER start or end mid-cycle");
+
+    // 2. Iris same-task dedup skips offer/save and falls back when Iris returns null or throws
+    const existingLib = {
+      ...buildLibraryEntryFromScript({
+        name: "Saved portal task",
+        kind: "workflow",
+        solution: "Existing task",
+        script: {
+          name: "Saved portal task",
+          steps: [{ action: "click", target: [{ kind: "testid", value: "other-btn" }] }],
+        },
+        context: { app: "portal.local", url: "http://portal.local/other" },
+      }),
+      id: "lib_existing_portal",
+    };
+
+    const skipLogs: string[] = [];
+    const decideSkipped = vi.fn(async () => ({ ok: true, decision: "approved" as const }));
+    const saveSkipped = vi.fn(async () => ({ shouldRun: false }));
+    const pSame = createProposer({
+      readSessionEvents: async () => twoStepEvents,
+      readLibrary: async () => [existingLib],
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      judgeSameTask: async () => ({ sameTask: true }),
+      compileV2: async () => makeCompiledStub(),
+      requestDecision: decideSkipped,
+      onApproved: saveSkipped,
+      runScript: async () => ({ ok: true }),
+      log: (line) => skipLogs.push(line),
+    });
+    pSame.onEvents("sess_same_task");
+    await vi.waitFor(() => {
+      expect(
+        skipLogs.some((l) => l.includes("[propose:v2] Copy invoice to ERP -> same as lib_existing_portal, skipped")),
+      ).toBe(true);
+    });
+    expect(decideSkipped).not.toHaveBeenCalled();
+    expect(saveSkipped).not.toHaveBeenCalled();
+    pSame.close();
+
+    // Fallback on null/error Iris same-task check -> still offers
+    const decideFallback = vi.fn(async () => ({ ok: true, decision: "dismissed" as const }));
+    const pFallback = createProposer({
+      readSessionEvents: async () => twoStepEvents,
+      readLibrary: async () => [existingLib],
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      judgeSameTask: async () => {
+        throw new Error("iris timeout");
+      },
+      compileV2: async () => makeCompiledStub(),
+      requestDecision: decideFallback,
+      runScript: async () => ({ ok: true }),
+    });
+    pFallback.onEvents("sess_same_fallback");
+    await vi.waitFor(() => {
+      expect(decideFallback).toHaveBeenCalledTimes(1);
+    });
+    pFallback.close();
+
+    // 3. Once a workflow has been offered for a host, do not compile again until popup is answered
+    let compileCount = 0;
+    const pLock = createProposer({
+      readSessionEvents: async () => twoStepEvents,
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: async () => {
+        compileCount += 1;
+        return {
+          ...makeCompiledStub(),
+          name: `Offer #${compileCount}`,
+          steps: [
+            { action: "switchTab", host: "portal.local", url: "http://portal.local/form" },
+            { action: "click", target: [{ kind: "testid", value: `btn-${compileCount}` }] },
+          ],
+        };
+      },
+      requestDecision: async () => ({
+        ok: false,
+        error: "Timed out waiting for user decision",
+      }),
+      runScript: async () => ({ ok: true }),
+    });
+    pLock.onEvents("sess_offer_lock");
+    await vi.waitFor(() => {
+      expect(compileCount).toBe(1);
+    });
+    await new Promise((r) => setTimeout(r, 25));
+    // Triggering more events in same session on same host after unanswered timeout must NOT compile again
+    pLock.onEvents("sess_offer_lock");
+    await new Promise((r) => setTimeout(r, 25));
+    expect(compileCount).toBe(1);
+    pLock.close();
+
+    // Also verify answering ("dismissed") allows compiling a new offer in the same session
+    let answeredCompileCount = 0;
+    let answeredDecideCount = 0;
+    const pUnlock = createProposer({
+      readSessionEvents: async () => twoStepEvents,
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: async () => {
+        answeredCompileCount += 1;
+        return {
+          ...makeCompiledStub(),
+          name: `Offer #${answeredCompileCount}`,
+          steps: [
+            { action: "switchTab", host: "portal.local", url: "http://portal.local/form" },
+            { action: "click", target: [{ kind: "testid", value: `btn-${answeredCompileCount}` }] },
+          ],
+        };
+      },
+      requestDecision: async () => {
+        answeredDecideCount += 1;
+        return { ok: true, decision: "dismissed" };
+      },
+      runScript: async () => ({ ok: true }),
+    });
+    pUnlock.onEvents("sess_offer_unlock");
+    await vi.waitFor(() => {
+      expect(answeredDecideCount).toBe(1);
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    pUnlock.onEvents("sess_offer_unlock");
+    await vi.waitFor(() => {
+      expect(answeredCompileCount).toBe(2);
+    });
+    pUnlock.close();
   });
 });

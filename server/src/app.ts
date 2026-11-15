@@ -42,7 +42,11 @@ import {
   type GeminiClient,
   type GeminiClientOptions,
 } from "./llm/gemini.ts";
-import { judgeWorkflowIris, type IrisJudgeOptions } from "./llm/iris.ts";
+import {
+  judgeSameTaskIris,
+  judgeWorkflowIris,
+  type IrisJudgeOptions,
+} from "./llm/iris.ts";
 import {
   collectFlatSteps,
   createProposer,
@@ -632,6 +636,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
                 digest,
                 typeof opts.iris === "object" ? opts.iris : undefined,
               ),
+        judgeSameTask: (comparison) =>
+          judgeSameTaskIris(
+            comparison,
+            opts.iris && typeof opts.iris === "object"
+              ? opts.iris
+              : typeof opts.iris === "function"
+                ? { apiKey: "", envPath: "/nonexistent/oumi/env" }
+                : undefined,
+          ),
         compileV2: (input, compileOpts) =>
           compileWorkflow(input, {
             gemini: opts.gemini,

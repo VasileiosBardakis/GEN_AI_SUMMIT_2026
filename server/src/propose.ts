@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 import type { Event, Finding, Verdict } from "@gen/shared";
-import { hostnameFromUrl, resolveEventHost } from "./common/host.ts";
+import {
+  hostnameFromUrl,
+  isPlaceholderHost,
+  normalizeHost as normalizeHostWithOpts,
+  resolveEventHost,
+} from "./common/host.ts";
 import { normalizeText } from "./common/target.ts";
 import {
   buildLibraryEntryFromScript,
@@ -10,7 +15,7 @@ import {
 } from "./hands/implementor.ts";
 import { canonicalStepCount, findMatchingLibraryEntry } from "./hands/library.ts";
 import { toLocatorList, type ActionScript, type LibraryEntry } from "./hands/types.ts";
-import type { WorkflowIrisJudgment } from "./llm/iris.ts";
+import type { SameTaskIrisJudgment, WorkflowIrisJudgment } from "./llm/iris.ts";
 import {
   compiledWorkflowToActionScript,
   compiledWorkflowToFinding,
@@ -93,6 +98,9 @@ export type ProposerDeps = {
   readSessionEvents: (sessionId: string) => Promise<Event[]>;
   readLibrary?: () => Promise<LibraryEntry[]>;
   judgeIris?: (digest: Record<string, unknown>) => Promise<WorkflowIrisJudgment | null>;
+  judgeSameTask?: (
+    comparison: Record<string, unknown>,
+  ) => Promise<SameTaskIrisJudgment | null>;
   compileV2: (
     input: CompileInput,
     opts?: { irisJudgment?: WorkflowIrisJudgment | null },
@@ -281,6 +289,140 @@ function extractSiteHost(
   return fallbackApp ? normalizeHost(fallbackApp) : "";
 }
 
+function addNormalizedHost(out: Set<string>, raw?: string): void {
+  if (!raw) return;
+  const h = normalizeHostWithOpts(raw, { collapseLoopback: true });
+  if (h && !isPlaceholderHost(h)) {
+    out.add(h);
+  }
+}
+
+function collectWorkflowHosts(
+  site: string,
+  workflow: CompiledWorkflow,
+  script: ActionScript,
+): Set<string> {
+  const hosts = new Set<string>();
+  addNormalizedHost(hosts, site);
+  for (const app of workflow.apps) {
+    addNormalizedHost(hosts, app);
+  }
+  addNormalizedHost(hosts, hostnameFromUrl(workflow.startUrl, { collapseLoopback: true }));
+  for (const step of collectFlatSteps(script.steps)) {
+    if (step.action === "switchTab" && step.host) {
+      addNormalizedHost(hosts, step.host);
+    } else if (step.action === "navigate" && step.url) {
+      addNormalizedHost(hosts, hostnameFromUrl(step.url, { collapseLoopback: true }));
+    }
+  }
+  return hosts;
+}
+
+function collectLibraryEntryHosts(entry: LibraryEntry): Set<string> {
+  const hosts = new Set<string>();
+  for (const app of entry.eyes.scope.apps) {
+    addNormalizedHost(hosts, app);
+  }
+  for (const pat of entry.eyes.scope.urlPatterns) {
+    if (/^https?:\/\//i.test(pat)) {
+      addNormalizedHost(hosts, hostnameFromUrl(pat, { collapseLoopback: true }));
+    }
+  }
+  if (entry.startSignature) {
+    const firstPart = entry.startSignature.split("|")[0]?.trim();
+    if (firstPart && (firstPart.includes(".") || firstPart === "localhost")) {
+      addNormalizedHost(hosts, firstPart);
+    }
+  }
+  for (const step of collectFlatSteps(entry.script.steps)) {
+    if (step.action === "switchTab" && step.host) {
+      addNormalizedHost(hosts, step.host);
+    } else if (step.action === "navigate" && step.url) {
+      addNormalizedHost(hosts, hostnameFromUrl(step.url, { collapseLoopback: true }));
+    }
+  }
+  return hosts;
+}
+
+function hasHostOverlap(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size === 0 || b.size === 0) return false;
+  for (const h of a) {
+    if (b.has(h)) return true;
+  }
+  return false;
+}
+
+function resolveLatestSessionHost(
+  steps: readonly { app?: string; url?: string }[],
+  events: readonly Event[],
+): string {
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const step = steps[i];
+    if (!step) continue;
+    const h = resolveEventHost(step, { preferUrl: true, collapseLoopback: true });
+    if (h && !isPlaceholderHost(h)) return h;
+  }
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i];
+    if (!ev) continue;
+    const h = resolveEventHost(ev, { preferUrl: true, collapseLoopback: true });
+    if (h && !isPlaceholderHost(h)) return h;
+  }
+  return "";
+}
+
+function firstTargetLabel(target: unknown): string {
+  if (!target) return "";
+  const locs = toLocatorList(target as Parameters<typeof toLocatorList>[0]);
+  const preferred =
+    locs.find((l) => l.kind === "aria") ??
+    locs.find((l) => l.kind === "text") ??
+    locs.find((l) => l.kind === "testid") ??
+    locs[0];
+  return preferred?.value ?? "";
+}
+
+function summarizeScriptSteps(steps: readonly ActionScript["steps"][number][]): string[] {
+  const out: string[] = [];
+  for (const step of steps) {
+    if (step.action === "forEach") {
+      out.push(`forEach(${summarizeScriptSteps(step.steps).join(" -> ")})`);
+      continue;
+    }
+    const label = "target" in step ? firstTargetLabel(step.target) : "";
+    switch (step.action) {
+      case "switchTab":
+        out.push(`switchTab(${step.host})`);
+        break;
+      case "navigate":
+        out.push(`navigate(${step.url})`);
+        break;
+      case "readText":
+      case "readValue":
+        out.push(`${step.action}(${label} -> ${step.bind})`);
+        break;
+      case "fill":
+      case "insertText":
+      case "select":
+        out.push(`${step.action}(${label || "focused"}, ${step.value})`);
+        break;
+      case "click":
+        out.push(`click(${label})`);
+        break;
+      case "pressKey":
+        out.push(`pressKey(${step.key})`);
+        break;
+      case "extractList":
+        out.push(`extractList(${label} -> ${step.bind})`);
+        break;
+      default:
+        out.push(step.action);
+        break;
+    }
+  }
+  return out;
+}
+
 export function createProposer(deps: ProposerDeps): Proposer {
   const now = deps.now ?? (() => Date.now());
 
@@ -305,6 +447,8 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
   const proposedKeys = new Set<string>();
   const neverFlowTipKeys = new Set<string>();
+  const pendingOfferSessionHosts = new Set<string>();
+  const activeOfferHosts = new Map<string, number>();
   const inFlightSessions = new Set<string>();
   const pendingRerunSessions = new Set<string>();
   const shownFlowTipLabels: string[] = [];
@@ -319,15 +463,74 @@ export function createProposer(deps: ProposerDeps): Proposer {
     script: ActionScript,
     workflow: CompiledWorkflow,
     decisionMeta?: ProposerDecisionMeta,
+    existingEntries?: readonly LibraryEntry[],
   ): Promise<void> {
     const name = finding.title.trim() || script.name?.trim() || "Proposed automation";
     const solution = finding.why.trim() || name;
+
+    if (workflow.kind === "workflow" && deps.judgeSameTask) {
+      const libraryEntries =
+        existingEntries ??
+        (deps.readLibrary ? await deps.readLibrary().catch(() => []) : []);
+      const candidateHosts = collectWorkflowHosts(site, workflow, script);
+      const sameHostEntries = libraryEntries.filter(
+        (entry) =>
+          entry.kind === "workflow" &&
+          hasHostOverlap(candidateHosts, collectLibraryEntryHosts(entry)),
+      );
+      if (sameHostEntries.length > 0) {
+        const candidateSummary = {
+          name,
+          reason: solution,
+          host: site,
+          steps: summarizeScriptSteps(script.steps),
+        };
+        const judgments = await Promise.all(
+          sameHostEntries.map((entry) =>
+            deps
+              .judgeSameTask!({
+                host: site,
+                candidate: candidateSummary,
+                existing: {
+                  id: entry.id,
+                  name: entry.name,
+                  description: entry.description,
+                  steps: summarizeScriptSteps(entry.script.steps),
+                },
+              })
+              .catch(() => null),
+          ),
+        );
+        const matchedIdx = judgments.findIndex((j) => j?.sameTask === true);
+        if (matchedIdx >= 0) {
+          const matchedEntry = sameHostEntries[matchedIdx]!;
+          safeLog(`[propose:v2] ${name} -> same as ${matchedEntry.id}, skipped`);
+          return;
+        }
+      }
+    }
+
     let shouldRun =
       script.runMode === "run_remaining" || workflow.kind === "snippet";
     const decideScript: ActionScript =
       shouldRun && script.runMode === "save_only"
         ? { ...script, runMode: "run_remaining" }
         : script;
+
+    const offerHosts =
+      workflow.kind === "workflow"
+        ? Array.from(collectWorkflowHosts(site, workflow, script))
+        : [];
+    for (const h of offerHosts) {
+      pendingOfferSessionHosts.add(`${sessionId}::${h}`);
+      activeOfferHosts.set(h, (activeOfferHosts.get(h) ?? 0) + 1);
+    }
+    const clearOfferPending = (answered: boolean): void => {
+      if (!answered) return;
+      for (const h of offerHosts) {
+        pendingOfferSessionHosts.delete(`${sessionId}::${h}`);
+      }
+    };
 
     safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} offered`);
     let outcome: HandsOutcome;
@@ -344,17 +547,29 @@ export function createProposer(deps: ProposerDeps): Proposer {
       safeLog(`[propose:v2] ${name} -> error: ${message}`);
       emitStageLog({ stage: "decide", session: sessionId, site, decision: "error", error: message, name });
       return;
+    } finally {
+      for (const h of offerHosts) {
+        const nextCount = (activeOfferHosts.get(h) ?? 0) - 1;
+        if (nextCount > 0) {
+          activeOfferHosts.set(h, nextCount);
+        } else {
+          activeOfferHosts.delete(h);
+        }
+      }
     }
 
     if (closed) return;
 
     if (!outcome.ok || outcome.decision !== "approved") {
       const isTimeout = !outcome.ok && /timed?\s*out/i.test(outcome.error ?? "");
+      clearOfferPending(!isTimeout);
       const decision = outcome.decision === "dismissed" ? "dismissed" : isTimeout ? "timeout" : "dismissed";
       safeLog(`[propose:v2] ${name} -> ${decision}`);
       emitStageLog({ stage: "decide", session: sessionId, site, decision, name });
       return;
     }
+
+    clearOfferPending(true);
 
     safeLog(`[propose:v2] ${name} -> approved`);
     emitStageLog({ stage: "decide", session: sessionId, site, decision: "approved", name });
@@ -508,6 +723,18 @@ export function createProposer(deps: ProposerDeps): Proposer {
       return;
     }
 
+    const latestHost = resolveLatestSessionHost(windowedSteps, windowedEvents);
+    if (
+      latestHost &&
+      (pendingOfferSessionHosts.has(`${sessionId}::${latestHost}`) ||
+        (activeOfferHosts.get(latestHost) ?? 0) > 0)
+    ) {
+      safeLog(
+        `[propose:v2] skipped compile for ${sessionId} host=${latestHost} (awaiting popup answer)`,
+      );
+      return;
+    }
+
     emitStageLog({
       stage: "detect",
       session: sessionId,
@@ -579,8 +806,9 @@ export function createProposer(deps: ProposerDeps): Proposer {
       return;
     }
 
+    let existingEntries: LibraryEntry[] = [];
     if (deps.readLibrary) {
-      const existingEntries = await deps.readLibrary().catch(() => []);
+      existingEntries = await deps.readLibrary().catch(() => []);
       if (existingEntries.length > 0) {
         const context: ImplementContext = {
           ...(compiled.apps[0] ? { app: compiled.apps[0] } : {}),
@@ -682,7 +910,15 @@ export function createProposer(deps: ProposerDeps): Proposer {
           }
         : undefined;
 
-    await proposeV2Finding(sessionId, site, finding, script, compiled, decisionMeta);
+    await proposeV2Finding(
+      sessionId,
+      site,
+      finding,
+      script,
+      compiled,
+      decisionMeta,
+      existingEntries,
+    );
   }
 
   function runSession(sessionId: string): void {
