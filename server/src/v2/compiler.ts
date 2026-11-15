@@ -2255,6 +2255,19 @@ function resolveSteps(
     );
     if (!resolved) {
       if (raw.action === "switchTab") continue;
+      // A click scoped only to a container has no element to act on; skip it
+      // and keep the rest of the workflow.
+      if (
+        raw.action === "click" &&
+        raw.withinId &&
+        raw.stepIndex === undefined &&
+        !raw.targetId
+      ) {
+        console.log(
+          `[v2/compiler] skipped click with only withinId=${raw.withinId} (no stepIndex/targetId)`,
+        );
+        continue;
+      }
       logRejectedStep(raw, describeLeafRejection(raw as ModelLeafStep, ctx));
       return null;
     }

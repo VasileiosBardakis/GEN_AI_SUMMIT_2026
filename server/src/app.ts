@@ -48,11 +48,14 @@ import {
 } from "./llm/iris.ts";
 import {
   collectFlatSteps,
+  collectLibraryEntryHosts,
   createProposer,
+  hasHostOverlap,
   type HandsDecision,
   type HandsOutcome,
   type StageLogEvent,
 } from "./propose.ts";
+import { hostnameFromUrl } from "./common/host.ts";
 import { buildCombinedReport, buildReport } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
 import { suggestFlowTip } from "./tips.ts";
@@ -1204,6 +1207,18 @@ export function createServer(opts: CreateServerOptions): http.Server {
             .matchEventsWithIris(events, entries, { irisOpts })
             .then((matched) => {
               if (!matched) return;
+              // A recall must happen on a site the entry's steps actually use.
+              const eventHost = hostnameFromUrl(matched.event.url ?? "", {
+                collapseLoopback: true,
+              });
+              const entryHosts = collectLibraryEntryHosts(matched.entry);
+              if (
+                eventHost &&
+                entryHosts.size > 0 &&
+                !hasHostOverlap(new Set([eventHost]), entryHosts)
+              ) {
+                return;
+              }
               if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
                 if (commandQueue.some((c) => c.id === activeLibraryDecide!.commandId)) {
                   cancelCommand(activeLibraryDecide.commandId, "Superseded");
