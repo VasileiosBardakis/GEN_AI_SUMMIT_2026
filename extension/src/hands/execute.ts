@@ -563,11 +563,13 @@ export async function executeStep(
     allowSemanticFallback: boolean,
   ): { element: Element | null; hiddenCandidate: Element | null } {
     let firstHidden: Element | null = null;
+    let sawAmbiguous = false;
     for (const locator of locators) {
       const found = resolveAllForLocator(locator, root);
       const visible = found.filter(isVisible);
       if (visible.length > 1) {
-        throw new Error("Ambiguous target");
+        sawAmbiguous = true;
+        continue;
       }
       if (visible.length === 1) {
         return { element: visible[0], hiddenCandidate: null };
@@ -575,6 +577,10 @@ export async function executeStep(
       if (!firstHidden && found.length === 1) {
         firstHidden = found[0];
       }
+    }
+
+    if (sawAmbiguous) {
+      throw new Error("Ambiguous target");
     }
 
     if (allowSemanticFallback) {
@@ -665,7 +671,7 @@ export async function executeStep(
   async function resolveStepTarget(): Promise<Element | null> {
     const locators = toLocatorList(step.target, step.targets);
     const withinLocators = toLocatorList(step.within);
-    const defaultTimeout = step.action === "waitFor" ? 5000 : 500;
+    const defaultTimeout = step.action === "waitFor" ? 5000 : step.optional ? 500 : 2000;
     const timeoutMs = step.timeoutMs ?? defaultTimeout;
     const deadline = Date.now() + timeoutMs;
 
@@ -925,12 +931,15 @@ export async function executeStep(
   }
 
   function click(element: Element): void {
+    const MouseCtor = typeof MouseEvent === "function" ? MouseEvent : Event;
+    element.dispatchEvent(new MouseCtor("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    element.dispatchEvent(new MouseCtor("mouseup", { bubbles: true, cancelable: true, button: 0 }));
+    if (element.isConnected === false) return;
     if (typeof (element as HTMLElement).click === "function") {
       (element as HTMLElement).click();
       return;
     }
-    const MouseCtor = typeof MouseEvent === "function" ? MouseEvent : Event;
-    element.dispatchEvent(new MouseCtor("click", { bubbles: true, cancelable: true }));
+    element.dispatchEvent(new MouseCtor("click", { bubbles: true, cancelable: true, button: 0 }));
   }
 
   function selectOption(rawElement: Element, value: string): void {

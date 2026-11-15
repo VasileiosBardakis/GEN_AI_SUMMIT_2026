@@ -10,6 +10,7 @@ import {
 import { canonicalStepCount, findMatchingLibraryEntry } from "./hands/library.ts";
 import { toLocatorList, type ActionScript, type LibraryEntry } from "./hands/types.ts";
 import {
+  candidateCovers,
   compiledWorkflowToActionScript,
   compiledWorkflowToFinding,
   pickPrimaryCandidate,
@@ -22,6 +23,7 @@ import {
   resolveRepeatCount,
   type CompileInput,
   type CompiledWorkflow,
+  type PatternCandidate,
   type PatternInstance,
   type V2Action,
 } from "./v2/index.ts";
@@ -321,7 +323,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
   };
 
   const proposedKeys = new Set<string>();
-  const proposedSignaturesBySession = new Map<string, Set<string>>();
+  const proposedCandidatesBySession = new Map<string, PatternCandidate[]>();
   const rep2Cache = new Map<string, Rep2CacheEntry>();
   const lastSitePopupAt = new Map<string, number>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -486,9 +488,14 @@ export function createProposer(deps: ProposerDeps): Proposer {
     const candidates = detectRepeatedCandidates(steps, { minRepeats: precompileAt });
     if (candidates.length === 0) return;
 
-    const proposedSigs = proposedSignaturesBySession.get(sessionId);
-    const unproposed = proposedSigs
-      ? candidates.filter((c) => !proposedSigs.has(c.signature))
+    const proposedCands = proposedCandidatesBySession.get(sessionId);
+    const unproposed = proposedCands
+      ? candidates.filter(
+          (c) =>
+            !proposedCands.some(
+              (p) => p.signature === c.signature || candidateCovers(p, c),
+            ),
+        )
       : candidates;
     const candidate = pickPrimaryCandidate(unproposed, repeatCount);
     if (!candidate) return;
@@ -665,12 +672,12 @@ export function createProposer(deps: ProposerDeps): Proposer {
         const matched = findMatchingLibraryEntry(existingEntries, candidateWithSig);
         if (matched) {
           proposedKeys.add(sessionScopedKey);
-          let sigSet = proposedSignaturesBySession.get(sessionId);
-          if (!sigSet) {
-            sigSet = new Set<string>();
-            proposedSignaturesBySession.set(sessionId, sigSet);
+          let candList = proposedCandidatesBySession.get(sessionId);
+          if (!candList) {
+            candList = [];
+            proposedCandidatesBySession.set(sessionId, candList);
           }
-          sigSet.add(candidate.signature);
+          candList.push(candidate);
 
           const isUpgrade =
             canonicalStepCount(script) > canonicalStepCount(matched.script);
@@ -756,12 +763,12 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
     const decidedAt = now();
     proposedKeys.add(sessionScopedKey);
-    let sigSet = proposedSignaturesBySession.get(sessionId);
-    if (!sigSet) {
-      sigSet = new Set<string>();
-      proposedSignaturesBySession.set(sessionId, sigSet);
+    let candList = proposedCandidatesBySession.get(sessionId);
+    if (!candList) {
+      candList = [];
+      proposedCandidatesBySession.set(sessionId, candList);
     }
-    sigSet.add(candidate.signature);
+    candList.push(candidate);
     if (willShowPopup && site) {
       lastSitePopupAt.set(site, decidedAt);
     }
