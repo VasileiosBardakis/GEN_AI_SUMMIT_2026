@@ -1,7 +1,7 @@
 import type { Event, Locator } from "@gen/shared";
 import { z } from "../../../shared/node_modules/zod/index.js";
 import { hostnameFromUrl, resolveEventHost } from "../common/host.ts";
-import { dedupeLocators, EMAIL_RE, PHONE_RE } from "../common/target.ts";
+import { dedupeLocators } from "../common/target.ts";
 import {
   createGeminiClient,
   DEFAULT_GEMINI_MODEL,
@@ -74,13 +74,6 @@ export function resolveCompileModel(): string {
 }
 const MAX_PROMPT_STEPS = 60;
 const MAX_SUMMARY_CHARS = 4096;
-
-const REDACTED_MARKER_RE = /\[REDACTED:([A-Z0-9_]+)(?:#([^\]]+))?\]/g;
-const CARD_RE = /\b(?:\d[ -]*?){13,19}\b/g;
-const FOUR_BY_FOUR_CARD_RE = /^\d{4}(?:[ -]\d{4}){3}$/;
-const PII_TOKEN_RE = /__PII_[A-Za-z0-9_]+__/;
-const ANY_REDACTED_RE = /\[REDACTED:/i;
-const PLACEHOLDER_EMAIL_RE = /<email>/i;
 
 const MODEL_LEAF_ACTIONS = [
   "click",
@@ -374,124 +367,6 @@ function stripParamBraces(name: string): string {
   return trimmed;
 }
 
-function luhnCheck(digitsOnly: string): boolean {
-  if (digitsOnly.length < 13 || digitsOnly.length > 19) return false;
-  let sum = 0;
-  let shouldDouble = false;
-  for (let i = digitsOnly.length - 1; i >= 0; i--) {
-    const digitRaw = digitsOnly.charCodeAt(i) - 48;
-    if (digitRaw < 0 || digitRaw > 9) return false;
-    let digit = digitRaw;
-    if (shouldDouble) {
-      digit *= 2;
-      if (digit > 9) digit -= 9;
-    }
-    sum += digit;
-    shouldDouble = !shouldDouble;
-  }
-  return sum % 10 === 0;
-}
-
-function createPromptScrubber(piiMap: PiiMap): {
-  scrubText: (raw: string) => string;
-  restoreMap: Map<string, string>;
-  unmappedHashByToken: Map<string, string>;
-} {
-  const restoreMap = new Map<string, string>();
-  const unmappedHashByToken = new Map<string, string>();
-  const rawToToken = new Map<string, string>();
-  const redactedToToken = new Map<string, string>();
-  const typeCounters = new Map<string, number>();
-
-  for (const [key, realVal] of piiMap.entries()) {
-    restoreMap.set(key, realVal);
-    const piiMatch = /^__PII_([A-Z0-9_]+)_(\d+)__$/.exec(key);
-    if (piiMatch) {
-      const kind = piiMatch[1];
-      const idx = Number(piiMatch[2]);
-      typeCounters.set(kind, Math.max(typeCounters.get(kind) ?? 0, idx));
-      if (!rawToToken.has(realVal)) {
-        rawToToken.set(realVal, key);
-      }
-    }
-  }
-
-  function nextToken(kind: string): string {
-    const upper = kind.toUpperCase();
-    const next = (typeCounters.get(upper) ?? 0) + 1;
-    typeCounters.set(upper, next);
-    return `__PII_${upper}_${next}__`;
-  }
-
-  function scrubText(raw: string): string {
-    let out = raw.replace(REDACTED_MARKER_RE, (full, kind: string, hash?: string) => {
-      const existing = redactedToToken.get(full);
-      if (existing) return existing;
-      const token = nextToken(kind || "REDACTED");
-      redactedToToken.set(full, token);
-      const localReal = piiMap.get(full);
-      if (localReal !== undefined) {
-        restoreMap.set(token, localReal);
-      } else if (hash && hash.trim()) {
-        unmappedHashByToken.set(token, hash.trim());
-      }
-      return token;
-    });
-
-    out = out.replace(EMAIL_RE, (email) => {
-      const existing = rawToToken.get(email);
-      if (existing) return existing;
-      const token = nextToken("EMAIL");
-      rawToToken.set(email, token);
-      restoreMap.set(token, email);
-      return token;
-    });
-
-    out = out.replace(CARD_RE, (card) => {
-      const digits = card.replace(/\D/g, "");
-      if (!luhnCheck(digits) && !FOUR_BY_FOUR_CARD_RE.test(card)) {
-        return card;
-      }
-      const existing = rawToToken.get(card);
-      if (existing) return existing;
-      const token = nextToken("CARD");
-      rawToToken.set(card, token);
-      restoreMap.set(token, card);
-      return token;
-    });
-
-    out = out.replace(PHONE_RE, (phone) => {
-      const existing = rawToToken.get(phone);
-      if (existing) return existing;
-      const token = nextToken("PHONE");
-      rawToToken.set(phone, token);
-      restoreMap.set(token, phone);
-      return token;
-    });
-
-    return out;
-  }
-
-  return { scrubText, restoreMap, unmappedHashByToken };
-}
-
-function scrubUnknown(value: unknown, scrubText: (s: string) => string): unknown {
-  if (typeof value === "string") {
-    return scrubText(value);
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => scrubUnknown(item, scrubText));
-  }
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) {
-      out[k] = scrubUnknown(v, scrubText);
-    }
-    return out;
-  }
-  return value;
-}
-
 function enrichSteps(steps: V2Step[], events?: Event[]): EnrichedStep[] {
   if (!events || events.length === 0) {
     return steps.map((step) => ({
@@ -609,7 +484,6 @@ function parseSummaryLocators(raw: unknown): Locator[] {
 
 function extractPageSummaryData(
   steps: EnrichedStep[],
-  scrubText: (s: string) => string,
 ): {
   targets: Map<string, PageSummaryTarget>;
   lists: Map<string, PageSummaryList>;
@@ -625,7 +499,7 @@ function extractPageSummaryData(
   for (const step of steps) {
     if (step.rawPageSummary === undefined) continue;
     const host = resolveStepRealHost(step) ?? normalizeHost(step.app);
-    const scrubbed = scrubUnknown(step.rawPageSummary, scrubText);
+    const scrubbed = step.rawPageSummary;
 
     if (typeof scrubbed === "string") {
       const firstLine = scrubbed.split(/\r?\n/)[0]?.trim() ?? "";
@@ -1097,10 +971,7 @@ function extractPageSummaryData(
   return { targets, lists, items, sourceMetaByContainerId, summaryViews };
 }
 
-function buildCompilePrompt(
-  ctx: PromptContext,
-  scrubText: (s: string) => string,
-): string {
+function buildCompilePrompt(ctx: PromptContext): string {
   const seenUrlForApp = new Set<string>();
   const stepLines = ctx.indexedSteps.map((step, idx) => {
     const app = resolveStepRealHost(step) ?? normalizeHost(step.app);
@@ -1110,11 +981,11 @@ function buildCompilePrompt(
       app,
     };
     const label = step.label ?? inferLabelFromTarget(step.target);
-    if (label) entry.label = scrubText(label);
+    if (label) entry.label = label;
     if (step.role) entry.role = step.role;
     if (step.tag) entry.tag = step.tag;
     if (step.target && step.target.length > 0) entry.hasTarget = true;
-    if (step.value !== undefined) entry.value = scrubText(step.value);
+    if (step.value !== undefined) entry.value = step.value;
     if (step.key !== undefined) entry.key = step.key;
     if (
       step.url !== undefined &&
@@ -1123,10 +994,10 @@ function buildCompilePrompt(
         !seenUrlForApp.has(app))
     ) {
       seenUrlForApp.add(app);
-      entry.url = normalizeUrlHost(scrubText(step.url));
+      entry.url = normalizeUrlHost(step.url);
     }
     if (step.container) {
-      entry.container = scrubUnknown(step.container, scrubText);
+      entry.container = step.container;
     }
     return JSON.stringify(entry);
   });
@@ -1172,7 +1043,7 @@ function buildCompilePrompt(
     "1. Never write CSS/DOM selectors. Every UI step (`click`, `fill`, `select`, `readText`, `readValue`, `extractList`, `waitFor`, `key`, `submit`) must reference a `stepIndex` from Steps or an exact `targetId` from PageSummary Targets.",
     "2. Output one clean generalized workflow repetition; drop one-off stray clicks or irrelevant side excursions.",
     "3. Keep all distinct form inputs and submit keys (e.g. `Enter`).",
-    "4. Parameterize user-supplied variables in `params[]` and `\"{{paramName}}\"`. Use `readText`/`readValue` with `bind` and `\"{{varName}}\"` for values copied across steps or tabs. Preserve `__PII_*__` tokens verbatim.",
+    "4. Parameterize user-supplied variables in `params[]` and `\"{{paramName}}\"`. Use `readText`/`readValue` with `bind` and `\"{{varName}}\"` for values copied across steps or tabs.",
     "5. `switchTab` uses `stepIndex` or `host` (hostname only). Any `navigate` must preserve the full URL (scheme, host, port, path).",
     "6. Use `forEach` with `runMode: \"run_remaining\"` and `itemIds` only when PageSummary Lists contains unprocessed items; scope row-level steps with `withinId` and `withinTextParam`. Otherwise set `runMode: \"save_only\"` with flat steps.",
     "7. Set `offerAt2: true` when clearly generalizable at 2 repeats; `risk: \"high\"` for irreversible external actions; `suggest: false` only if one-off.",
@@ -1241,24 +1112,6 @@ function selectCapturedLocators(
     .map((entry) => entry.loc);
 }
 
-function restoreText(raw: string, restoreMap: ReadonlyMap<string, string>): string {
-  let out = raw;
-  for (const [token, realVal] of restoreMap.entries()) {
-    if (out.includes(token)) {
-      out = out.split(token).join(realVal);
-    }
-  }
-  return out;
-}
-
-function hasAnyPiiMarker(value: string): boolean {
-  return (
-    PLACEHOLDER_EMAIL_RE.test(value) ||
-    ANY_REDACTED_RE.test(value) ||
-    PII_TOKEN_RE.test(value)
-  );
-}
-
 type LoopLeafContext = {
   itemKeys?: ReadonlySet<string>;
   fallbackItemKey?: string;
@@ -1282,7 +1135,6 @@ function findUniqueColumnByText(
 function findUrlForHost(
   steps: readonly EnrichedStep[],
   host: string,
-  restoreMap: ReadonlyMap<string, string>,
   exactHostWithPort?: string,
 ): string | undefined {
   if (exactHostWithPort && exactHostWithPort.includes(":")) {
@@ -1291,7 +1143,7 @@ function findUrlForHost(
       steps.find((s) => {
         if (s.action !== "tab_switch" || !s.url) return false;
         try {
-          return normalizeHost(new URL(restoreText(s.url, restoreMap)).host) === exactNormalized;
+          return normalizeHost(new URL(s.url).host) === exactNormalized;
         } catch {
           return false;
         }
@@ -1299,13 +1151,13 @@ function findUrlForHost(
       steps.find((s) => {
         if (!s.url) return false;
         try {
-          return normalizeHost(new URL(restoreText(s.url, restoreMap)).host) === exactNormalized;
+          return normalizeHost(new URL(s.url).host) === exactNormalized;
         } catch {
           return false;
         }
       });
     if (portMatch?.url) {
-      return normalizeUrlHost(restoreText(portMatch.url, restoreMap));
+      return normalizeUrlHost(portMatch.url);
     }
   }
   const match =
@@ -1313,16 +1165,14 @@ function findUrlForHost(
       (s) => s.action === "tab_switch" && resolveStepRealHost(s) === host && Boolean(s.url),
     ) ??
     steps.find((s) => resolveStepRealHost(s) === host && Boolean(s.url));
-  return match?.url ? normalizeUrlHost(restoreText(match.url, restoreMap)) : undefined;
+  return match?.url ? normalizeUrlHost(match.url) : undefined;
 }
 
 function resolveLeafStep(
   raw: ModelLeafStep,
   ctx: PromptContext,
   stabilityCounts: ReadonlyMap<string, number>,
-  restoreMap: ReadonlyMap<string, string>,
   inLoop: boolean,
-  nextHintStep?: ModelLeafStep,
   loopContext?: LoopLeafContext,
 ): { step: CompiledLeafStep; host?: string; url?: string } | null {
   const captured =
@@ -1334,10 +1184,7 @@ function resolveLeafStep(
 
   const psTarget = raw.targetId ? ctx.targets.get(raw.targetId) : undefined;
   const capturedRealHost = captured
-    ? resolveStepRealHost({
-        app: captured.app,
-        url: captured.url ? restoreText(captured.url, restoreMap) : undefined,
-      })
+    ? resolveStepRealHost({ app: captured.app, url: captured.url })
     : undefined;
 
   let effectiveWithinId = raw.withinId;
@@ -1407,9 +1254,7 @@ function resolveLeafStep(
   ) {
     const srcMeta = ctx.sourceMetaByContainerId.get(effectiveWithinId);
     if (srcMeta) {
-      const capturedVal = captured.value
-        ? restoreText(captured.value, restoreMap).trim()
-        : "";
+      const capturedVal = captured.value ? captured.value.trim() : "";
       const matchedCol =
         (capturedVal ? findUniqueColumnByText(srcMeta.columns, capturedVal) : undefined) ??
         (captured.target
@@ -1434,14 +1279,11 @@ function resolveLeafStep(
       ? withinTarget.host
       : undefined;
   const stepHost = capturedRealHost ?? psTargetHost ?? withinTargetHost;
-  const stepUrl = captured?.url
-    ? normalizeUrlHost(restoreText(captured.url, restoreMap))
-    : undefined;
+  const stepUrl = captured?.url ? normalizeUrlHost(captured.url) : undefined;
 
   const optionalPart = raw.optional !== undefined ? { optional: raw.optional } : {};
   const withinPart = dedupedWithin.length > 0 ? { within: dedupedWithin } : {};
-  const restoredValue =
-    raw.value !== undefined ? restoreText(raw.value, restoreMap) : undefined;
+  const valueProp = raw.value;
 
   switch (raw.action) {
     case "click": {
@@ -1454,9 +1296,7 @@ function resolveLeafStep(
     }
     case "fill": {
       if (dedupedTarget.length === 0) return null;
-      const val =
-        restoredValue ??
-        (captured?.value !== undefined ? restoreText(captured.value, restoreMap) : "");
+      const val = valueProp ?? captured?.value ?? "";
       return {
         step: {
           action: "fill",
@@ -1470,9 +1310,7 @@ function resolveLeafStep(
       };
     }
     case "insertText": {
-      const val =
-        restoredValue ??
-        (captured?.value !== undefined ? restoreText(captured.value, restoreMap) : "");
+      const val = valueProp ?? captured?.value ?? "";
       return {
         step: {
           action: "insertText",
@@ -1487,9 +1325,7 @@ function resolveLeafStep(
     }
     case "select": {
       if (dedupedTarget.length === 0) return null;
-      const val =
-        restoredValue ??
-        (captured?.value !== undefined ? restoreText(captured.value, restoreMap) : "");
+      const val = valueProp ?? captured?.value ?? "";
       return {
         step: {
           action: "select",
@@ -1554,22 +1390,20 @@ function resolveLeafStep(
           if (!isPlaceholderHost(norm)) seenHostnames.add(norm);
         }
         if (s.url) {
-          const urlHost = hostnameFromUrl(restoreText(s.url, restoreMap));
+          const urlHost = hostnameFromUrl(s.url);
           if (urlHost) seenHostnames.add(urlHost);
         }
       }
 
       const rawUrl = raw.url?.trim() ? raw.url.trim() : undefined;
-      const restoredRawUrl = rawUrl ? restoreText(rawUrl, restoreMap) : undefined;
-      const rawUrlHost = restoredRawUrl ? hostnameFromUrl(restoredRawUrl) : undefined;
+      const rawUrlHost = rawUrl ? hostnameFromUrl(rawUrl) : undefined;
       const rawUrlSeen = rawUrlHost !== undefined && seenHostnames.has(rawUrlHost);
 
       if (captured?.url) {
-        const restoredCapturedUrl = restoreText(captured.url, restoreMap);
         const mergedUrl =
-          restoredRawUrl && rawUrlSeen
-            ? mergeCapturedNavigateUrl(restoredRawUrl, restoredCapturedUrl)
-            : restoredCapturedUrl;
+          rawUrl && rawUrlSeen
+            ? mergeCapturedNavigateUrl(rawUrl, captured.url)
+            : captured.url;
         const normalized = normalizeUrlHost(mergedUrl);
         return {
           step: { action: "navigate", url: normalized, ...optionalPart },
@@ -1578,7 +1412,7 @@ function resolveLeafStep(
         };
       }
 
-      if (restoredRawUrl && !rawUrlSeen) {
+      if (rawUrl && !rawUrlSeen) {
         return null;
       }
 
@@ -1591,10 +1425,10 @@ function resolveLeafStep(
           ? normalizeHost(captured.app)
           : undefined);
       const matchingHostUrl = targetHost
-        ? findUrlForHost(ctx.indexedSteps, targetHost, restoreMap)
+        ? findUrlForHost(ctx.indexedSteps, targetHost)
         : undefined;
-      const candidateUrl = restoredRawUrl
-        ? mergeCapturedNavigateUrl(restoredRawUrl, matchingHostUrl)
+      const candidateUrl = rawUrl
+        ? mergeCapturedNavigateUrl(rawUrl, matchingHostUrl)
         : matchingHostUrl;
       if (!candidateUrl) return null;
 
@@ -1626,58 +1460,32 @@ function resolveLeafStep(
               return isPlaceholderHost(norm) ? undefined : norm;
             })()
         : undefined;
-      const rawUrlRestored = raw.url?.trim()
-        ? normalizeUrlHost(restoreText(raw.url.trim(), restoreMap))
+      const rawUrlNorm = raw.url?.trim() ? normalizeUrlHost(raw.url.trim()) : undefined;
+      const capturedUrlNorm = captured?.url?.trim()
+        ? normalizeUrlHost(captured.url.trim())
         : undefined;
-      const capturedUrlRestored = captured?.url?.trim()
-        ? normalizeUrlHost(restoreText(captured.url.trim(), restoreMap))
-        : undefined;
-      const hostFromCapturedApp =
-        captured?.app && !isPlaceholderHost(normalizeHost(captured.app))
-          ? normalizeHost(captured.app)
-          : undefined;
-      const hintStep =
-        nextHintStep?.stepIndex !== undefined &&
-        nextHintStep.stepIndex >= 0 &&
-        nextHintStep.stepIndex < ctx.indexedSteps.length
-          ? ctx.indexedSteps[nextHintStep.stepIndex]
-          : undefined;
-      const hintUrlRestored = hintStep?.url?.trim()
-        ? normalizeUrlHost(restoreText(hintStep.url.trim(), restoreMap))
-        : undefined;
-      const hintHost =
-        (hintStep ? resolveStepRealHost({ app: hintStep.app, url: hintUrlRestored }) : undefined) ??
-        (nextHintStep?.targetId
-          ? (() => {
-              const t = ctx.targets.get(nextHintStep.targetId!);
-              return t && !isPlaceholderHost(t.host) ? t.host : undefined;
-            })()
-          : undefined);
 
       const finalHost =
         hostFromRaw ??
-        hostnameFromUrl(rawUrlRestored) ??
-        hostnameFromUrl(capturedUrlRestored) ??
-        hostFromCapturedApp ??
-        hintHost;
+        hostnameFromUrl(rawUrlNorm) ??
+        (captured
+          ? resolveStepRealHost({ app: captured.app, url: capturedUrlNorm })
+          : undefined);
       if (!finalHost || isPlaceholderHost(finalHost)) {
         return null;
       }
 
       const fallbackUrl =
-        (capturedUrlRestored && hostnameFromUrl(capturedUrlRestored) === finalHost
-          ? capturedUrlRestored
+        (capturedUrlNorm && hostnameFromUrl(capturedUrlNorm) === finalHost
+          ? capturedUrlNorm
           : undefined) ??
-        (hintUrlRestored && hostnameFromUrl(hintUrlRestored) === finalHost
-          ? hintUrlRestored
-          : undefined) ??
-        findUrlForHost(ctx.indexedSteps, finalHost, restoreMap, rawHostWithPort);
+        findUrlForHost(ctx.indexedSteps, finalHost, rawHostWithPort);
 
       const resolvedUrl =
-        capturedUrlRestored && hostnameFromUrl(capturedUrlRestored) === finalHost
-          ? capturedUrlRestored
-          : rawUrlRestored && hostnameFromUrl(rawUrlRestored) === finalHost
-            ? normalizeUrlHost(mergeCapturedNavigateUrl(rawUrlRestored, fallbackUrl))
+        capturedUrlNorm && hostnameFromUrl(capturedUrlNorm) === finalHost
+          ? capturedUrlNorm
+          : rawUrlNorm && hostnameFromUrl(rawUrlNorm) === finalHost
+            ? normalizeUrlHost(mergeCapturedNavigateUrl(rawUrlNorm, fallbackUrl))
             : fallbackUrl;
 
       return {
@@ -1724,7 +1532,6 @@ function resolveSteps(
   rawSteps: readonly ModelStep[],
   ctx: PromptContext,
   stabilityCounts: ReadonlyMap<string, number>,
-  restoreMap: ReadonlyMap<string, string>,
 ): {
   steps: CompiledStep[];
   hosts: string[];
@@ -1746,20 +1553,11 @@ function resolveSteps(
     }
   };
 
-  for (let idx = 0; idx < rawSteps.length; idx++) {
-    const raw = rawSteps[idx];
+  for (const raw of rawSteps) {
     if (raw.action === "forEach") {
       let resolvedItems: string | Record<string, string>[] | undefined;
 
-      const explicitItemIds =
-        raw.itemIds && raw.itemIds.length > 0
-          ? raw.itemIds
-          : raw.items && raw.items.trim()
-            ? raw.items
-                .split(",")
-                .map((part) => stripParamBraces(part))
-                .filter((part) => ctx.items.has(part))
-            : [];
+      const explicitItemIds = raw.itemIds && raw.itemIds.length > 0 ? raw.itemIds : [];
 
       if (explicitItemIds.length > 0) {
         const rows: Record<string, string>[] = [];
@@ -1767,11 +1565,7 @@ function resolveSteps(
           const item = ctx.items.get(itemId);
           if (item) {
             recordLocation(!isPlaceholderHost(item.host) ? item.host : undefined);
-            const restoredRow: Record<string, string> = {};
-            for (const [k, v] of Object.entries(item.fields)) {
-              restoredRow[k] = restoreText(v, restoreMap);
-            }
-            rows.push(restoredRow);
+            rows.push({ ...item.fields });
           }
         }
         if (rows.length > 0) {
@@ -1782,13 +1576,7 @@ function resolveSteps(
         const list = ctx.lists.get(key);
         if (list && list.items.length > 0) {
           recordLocation(!isPlaceholderHost(list.host) ? list.host : undefined);
-          resolvedItems = list.items.map((item) => {
-            const restoredRow: Record<string, string> = {};
-            for (const [k, v] of Object.entries(item.fields)) {
-              restoredRow[k] = restoreText(v, restoreMap);
-            }
-            return restoredRow;
-          });
+          resolvedItems = list.items.map((item) => ({ ...item.fields }));
         } else if (key) {
           resolvedItems = key;
         }
@@ -1814,18 +1602,12 @@ function resolveSteps(
       }
 
       const nestedSteps: CompiledStep[] = [];
-      for (let j = 0; j < childRawSteps.length; j++) {
-        const child = childRawSteps[j];
-        const nextChild = childRawSteps
-          .slice(j + 1)
-          .find((s) => s.action !== "switchTab");
+      for (const child of childRawSteps) {
         const resolved = resolveLeafStep(
           child,
           ctx,
           stabilityCounts,
-          restoreMap,
           true,
-          nextChild,
           { itemKeys: loopItemKeys, fallbackItemKey },
         );
         if (!resolved) {
@@ -1849,18 +1631,11 @@ function resolveSteps(
       continue;
     }
 
-    const nextTop = rawSteps
-      .slice(idx + 1)
-      .find((s) => s.action !== "switchTab" && s.action !== "forEach") as
-      | ModelLeafStep
-      | undefined;
     const resolved = resolveLeafStep(
       raw as ModelLeafStep,
       ctx,
       stabilityCounts,
-      restoreMap,
       false,
-      nextTop,
     );
     if (!resolved) {
       if (raw.action === "switchTab") continue;
@@ -1873,52 +1648,19 @@ function resolveSteps(
   return { steps: out, hosts, firstHost, firstUrl };
 }
 
-function countCompiledExecutions(
-  steps: readonly CompiledStep[],
-  repetitions: number,
-): { leafCount: number; replayExecutions: number } {
-  let leafCount = 0;
-  let replayExecutions = 0;
-  for (const step of steps) {
-    if (step.action === "forEach") {
-      const inner = countCompiledExecutions(step.steps, 1);
-      leafCount += inner.leafCount;
-      const iterCount = Array.isArray(step.items)
-        ? step.items.length
-        : Math.max(1, repetitions);
-      replayExecutions += inner.replayExecutions * iterCount;
-    } else {
-      leafCount += 1;
-      replayExecutions += 1;
-    }
-  }
-  return { leafCount, replayExecutions };
-}
-
 function computeStats(
   allSteps: readonly V2Step[],
-  compiledSteps: readonly CompiledStep[],
   repetitions: number,
 ): CompiledWorkflowStats {
-  const { leafCount, replayExecutions } = countCompiledExecutions(
-    compiledSteps,
-    repetitions,
-  );
   const episodes = splitEpisodes([...allSteps]);
   let observedSeconds = 0;
   for (const ep of episodes) {
     observedSeconds += Math.max(0, (ep.endTs - ep.startTs) / 1000);
   }
 
-  const floorManual = Math.max(1, repetitions * Math.max(1, leafCount) * 1.5);
-  const manualSeconds = Number(Math.max(floorManual, observedSeconds).toFixed(2));
-  const rawReplay = Math.max(0.5, replayExecutions * 0.35);
-  const replaySeconds = Number(
-    Math.min(manualSeconds * 0.5, rawReplay).toFixed(2),
-  );
-  const minutesPerWeek = Number(
-    ((Math.max(0, manualSeconds - replaySeconds) * 5) / 60).toFixed(2),
-  );
+  const manualSeconds = Number(observedSeconds.toFixed(2));
+  const replaySeconds = 0;
+  const minutesPerWeek = Number((manualSeconds / 60).toFixed(2));
 
   return {
     repetitions,
@@ -1946,11 +1688,10 @@ export async function compileWorkflow(
   input: CompileInput,
   opts?: CompileOptions,
 ): Promise<CompiledWorkflow | null> {
-  const piiMap: PiiMap = new Map(input.piiMap ?? []);
   const rawSteps: V2Step[] = input.steps
     ? input.steps
     : input.events
-      ? eventsToSteps(input.events, piiMap).steps
+      ? eventsToSteps(input.events).steps
       : [];
 
   if (rawSteps.length === 0) {
@@ -1971,8 +1712,7 @@ export async function compileWorkflow(
     Math.trunc(input.repeatCount ?? inferredRepeats),
   );
 
-  const { scrubText, restoreMap, unmappedHashByToken } = createPromptScrubber(piiMap);
-  const summaryData = extractPageSummaryData(enrichedAll, scrubText);
+  const summaryData = extractPageSummaryData(enrichedAll);
 
   const ctx: PromptContext = {
     allSteps: enrichedAll,
@@ -1981,7 +1721,7 @@ export async function compileWorkflow(
     repeatCount,
   };
 
-  const prompt = buildCompilePrompt(ctx, scrubText);
+  const prompt = buildCompilePrompt(ctx);
   const gemini = createCompileGeminiClient(opts);
 
   const distinctApps = Array.from(
@@ -2001,7 +1741,7 @@ export async function compileWorkflow(
       return {
         action: s.action,
         app: resolveStepRealHost(s) ?? normalizeHost(s.app),
-        ...(rawLabel ? { label: scrubText(rawLabel) } : {}),
+        ...(rawLabel ? { label: rawLabel } : {}),
       };
     }),
   };
@@ -2029,12 +1769,7 @@ export async function compileWorkflow(
   }
 
   const stabilityCounts = buildLocatorStabilityCounts(indexedSteps);
-  const resolved = resolveSteps(
-    modelOut.steps,
-    ctx,
-    stabilityCounts,
-    restoreMap,
-  );
+  const resolved = resolveSteps(modelOut.steps, ctx, stabilityCounts);
   if (!resolved || resolved.steps.length === 0) {
     return null;
   }
@@ -2049,16 +1784,11 @@ export async function compileWorkflow(
   const matchingHostStep = startHost
     ? indexedSteps.find((s) => resolveStepRealHost(s) === startHost && s.url)
     : undefined;
-  const fallbackUrlStep = indexedSteps.find(
-    (s) => s.url && hostnameFromUrl(s.url) !== undefined,
-  );
   const candidateStartUrl = matchingHostStep?.url
-    ? normalizeUrlHost(restoreText(matchingHostStep.url, restoreMap))
-    : resolved.firstUrl
+    ? normalizeUrlHost(matchingHostStep.url)
+    : resolved.firstUrl && (!startHost || hostnameFromUrl(resolved.firstUrl) === startHost)
       ? resolved.firstUrl
-      : fallbackUrlStep?.url
-        ? normalizeUrlHost(restoreText(fallbackUrlStep.url, restoreMap))
-        : undefined;
+      : undefined;
   const rawStartUrl =
     candidateStartUrl && hostnameFromUrl(candidateStartUrl) !== undefined
       ? candidateStartUrl
@@ -2087,132 +1817,21 @@ export async function compileWorkflow(
   );
   const apps = Array.from(appsSet);
 
-  const params: CompiledParam[] = modelOut.params.map((p) => {
-    const restoredDesc =
-      p.description !== undefined
-        ? restoreText(p.description, restoreMap)
-        : undefined;
-    const restoredExample =
-      p.example !== undefined
-        ? restoreText(p.example, restoreMap)
-        : undefined;
-    const exampleTokenMatch =
-      restoredExample !== undefined
-        ? /(__PII_[A-Z0-9_]+__)/.exec(restoredExample)
-        : null;
-    const piiHash = exampleTokenMatch
-      ? unmappedHashByToken.get(exampleTokenMatch[1])
-      : undefined;
-    return {
-      name: stripParamBraces(p.name),
-      ...(restoredDesc && !hasAnyPiiMarker(restoredDesc)
-        ? { description: restoredDesc }
-        : {}),
-      ...(restoredExample && !hasAnyPiiMarker(restoredExample)
-        ? { example: restoredExample }
-        : {}),
-      ...(piiHash ? { piiHash } : {}),
-    };
-  });
-
-  // Backfill missing param examples or piiHash from referenced captured steps, and bind any unmapped __PII_*__ tokens
-  const paramByName = new Map<string, CompiledParam>();
-  for (const param of params) {
-    paramByName.set(param.name, param);
-  }
-
-  const rawLeafPairs: Array<{ stepIndex?: number; value?: string }> = [];
-  for (const rawStep of modelOut.steps) {
-    if (rawStep.action === "forEach" && Array.isArray(rawStep.steps)) {
-      for (const nested of rawStep.steps) {
-        rawLeafPairs.push({ stepIndex: nested.stepIndex, value: nested.value });
-      }
-    } else {
-      rawLeafPairs.push({ stepIndex: rawStep.stepIndex, value: rawStep.value });
-    }
-  }
-  for (const rawRef of rawLeafPairs) {
-    if (
-      rawRef.stepIndex === undefined ||
-      rawRef.stepIndex < 0 ||
-      rawRef.stepIndex >= ctx.indexedSteps.length ||
-      typeof rawRef.value !== "string"
-    ) {
-      continue;
-    }
-    const tmplMatch = /^\{\{\s*([^}]+?)\s*\}\}$/.exec(rawRef.value.trim());
-    if (!tmplMatch) continue;
-    const param = paramByName.get(tmplMatch[1]);
-    if (!param || param.example !== undefined || param.piiHash !== undefined) continue;
-    const capturedVal = ctx.indexedSteps[rawRef.stepIndex]?.value;
-    if (typeof capturedVal !== "string" || capturedVal.length === 0) continue;
-    const restoredCaptured = restoreText(scrubText(capturedVal), restoreMap);
-    const piiTokMatch = /(__PII_[A-Z0-9_]+__)/.exec(restoredCaptured);
-    if (piiTokMatch) {
-      const hash = unmappedHashByToken.get(piiTokMatch[1]);
-      if (hash) param.piiHash = hash;
-    } else if (!hasAnyPiiMarker(restoredCaptured)) {
-      param.example = restoredCaptured;
-    }
-  }
-
-  const ensureParamForUnmappedToken = (token: string, hash: string): string => {
-    for (const existing of params) {
-      if (existing.piiHash === hash) return existing.name;
-    }
-    const baseName = token
-      .replace(/^__/, "")
-      .replace(/__$/, "")
-      .toLowerCase();
-    let candidateName = baseName;
-    let suffix = 1;
-    while (paramByName.has(candidateName)) {
-      suffix += 1;
-      candidateName = `${baseName}_${suffix}`;
-    }
-    const created: CompiledParam = { name: candidateName, piiHash: hash };
-    params.push(created);
-    paramByName.set(candidateName, created);
-    return candidateName;
-  };
-
-  const bindUnmappedInSteps = (stepList: CompiledStep[]): void => {
-    for (const s of stepList) {
-      if (s.action === "forEach") {
-        bindUnmappedInSteps(s.steps);
-        continue;
-      }
-      if ("value" in s && typeof s.value === "string" && unmappedHashByToken.size > 0) {
-        s.value = s.value.replace(/(__PII_[A-Z0-9_]+__)/g, (tok) => {
-          const hash = unmappedHashByToken.get(tok);
-          if (!hash) return tok;
-          const pName = ensureParamForUnmappedToken(tok, hash);
-          return `{{${pName}}}`;
-        });
-      }
-    }
-  };
-  bindUnmappedInSteps(steps);
-
-  const sanitizeDisplayText = (raw: string): string => {
-    let out = restoreText(raw, restoreMap).trim();
-    for (const tok of unmappedHashByToken.keys()) {
-      if (out.includes(tok)) {
-        out = out.split(tok).join("private value");
-      }
-    }
-    return out;
-  };
+  const params: CompiledParam[] = modelOut.params.map((p) => ({
+    name: stripParamBraces(p.name),
+    ...(p.description !== undefined ? { description: p.description } : {}),
+    ...(p.example !== undefined ? { example: p.example } : {}),
+  }));
 
   const pauseBeforeSubmit =
     irisResult?.pauseBeforeSubmit === true || modelOut.risk === "high";
 
-  const stats = computeStats(rawSteps, steps, repeatCount);
+  const stats = computeStats(rawSteps, repeatCount);
 
   const candidate: CompiledWorkflow = {
     kind: modelOut.kind,
-    name: sanitizeDisplayText(modelOut.name),
-    reason: sanitizeDisplayText(modelOut.reason),
+    name: modelOut.name.trim(),
+    reason: modelOut.reason.trim(),
     risk: modelOut.risk,
     offerAt2: modelOut.offerAt2,
     runMode: modelOut.runMode,
@@ -2230,7 +1849,7 @@ export async function compileWorkflow(
   for (const e of sourceEntries) {
     if (e.url) {
       try {
-        const parsed = new URL(restoreText(e.url, restoreMap));
+        const parsed = new URL(e.url);
         if (parsed.protocol === "http:" || parsed.protocol === "https:") {
           const urlHost = normalizeHost(parsed.host);
           if (!isPlaceholderHost(urlHost)) {

@@ -4,7 +4,6 @@ import type { ActionScript, BindingValue, Locator, ScriptParam, StepResult } fro
 import type { Event } from "@gen/shared";
 import type { LibraryEntry } from "@gen/shared/schema.ts";
 import { rememberLocalPii, restoreLocalPiiText, sanitizeUrl } from "./privacy.ts";
-import { createSuggestionEngine, type SuggestionEngine, type TextCluster } from "./suggestion.ts";
 import {
   createDefaultOptimizations,
   LIBRARY_STORAGE_KEY,
@@ -245,7 +244,6 @@ function getChromeApi(): ChromeApi | undefined {
 
 const chromeApi = getChromeApi();
 
-const TEXT_CLUSTERS_STORAGE_KEY = "eyes_text_clusters_v1";
 const LOCAL_PII_STORAGE_KEY = "eyes_local_pii_v1";
 export const BROWSER_SESSION_ID = "sess_browser_" + Math.random().toString(36).slice(2, 10);
 
@@ -312,36 +310,6 @@ export function stopHandsRun(): void {
 
 let cachedLibrary: OptimizationItem[] | null = null;
 const serverEntriesById = new Map<string, LibraryEntry>();
-let persistentSuggestionEngine: SuggestionEngine | null = null;
-let suggestionEngineInit: Promise<SuggestionEngine> | null = null;
-
-async function getPersistentSuggestionEngine(): Promise<SuggestionEngine> {
-  if (persistentSuggestionEngine) return persistentSuggestionEngine;
-  if (suggestionEngineInit) return suggestionEngineInit;
-  suggestionEngineInit = (async () => {
-    let initialTextClusters: TextCluster[] = [];
-    try {
-      const stored = await getChromeApi()?.storage?.local?.get(TEXT_CLUSTERS_STORAGE_KEY);
-      const raw = stored?.[TEXT_CLUSTERS_STORAGE_KEY];
-      if (Array.isArray(raw)) {
-        initialTextClusters = raw as TextCluster[];
-      }
-    } catch {
-      // ignore storage read error
-    }
-    persistentSuggestionEngine = createSuggestionEngine({
-      minTextLength: 6,
-      initialTextClusters,
-      onTextClustersChange: (clusters) => {
-        void getChromeApi()?.storage?.local
-          ?.set({ [TEXT_CLUSTERS_STORAGE_KEY]: clusters })
-          .catch(() => {});
-      },
-    });
-    return persistentSuggestionEngine;
-  })();
-  return suggestionEngineInit;
-}
 
 async function readLocalLibraryRaw(): Promise<OptimizationItem[]> {
   if (cachedLibrary) return cachedLibrary;
@@ -506,19 +474,6 @@ export function handleRuntimeMessage(
     recordEvent(stampedEvent);
     sendResponse({ ok: true });
     return false;
-  }
-  if (msg?.kind === "EYES_RECORD_TEXT" && typeof msg.value === "string") {
-    const value = msg.value;
-    const appHost = typeof msg.appHost === "string" ? msg.appHost : "browser";
-    const scopeKey = typeof msg.scopeKey === "string" ? msg.scopeKey : "";
-    const fullScope = `${appHost}::${scopeKey}`;
-    void getPersistentSuggestionEngine()
-      .then((engine) => {
-        const suggestion = engine.recordText(value, fullScope);
-        sendResponse({ ok: true, suggestion });
-      })
-      .catch(() => sendResponse({ ok: false }));
-    return true;
   }
   if (msg?.kind === "EYES_GET_LIBRARY") {
     void loadLibrary(true).then((items) => sendResponse({ ok: true, items }));

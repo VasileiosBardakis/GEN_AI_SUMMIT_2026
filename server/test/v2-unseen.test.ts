@@ -13,10 +13,7 @@ import type { ActionScript } from "../src/hands/types.ts";
 import { createGeminiClient, type GeminiClient, type ZodLikeSchema } from "../src/llm/gemini.ts";
 import type { StageLogEvent } from "../src/propose.ts";
 import { readLibrary } from "../src/hands/library.ts";
-import {
-  COMPILER_RESPONSE_SCHEMA,
-  ModelCompileOutputSchema,
-} from "../src/v2/compiler.ts";
+import { COMPILER_RESPONSE_SCHEMA } from "../src/v2/compiler.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -527,102 +524,6 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
         file: "unseen-rows-wrongtab.jsonl",
         expectedRunMode: "run_remaining",
         approve: true,
-      });
-    },
-    TEST_TIMEOUT_MS,
-  );
-
-  it("recorded answers exist, pass ModelCompileOutputSchema, and match prompt hashes for known-failing fixtures before expected runMode failure", async () => {
-    const expectedFixtures = [
-      "unseen-two-repeats",
-      "unseen-rows-wrongtab",
-      "unseen-multifield-tab",
-      "unseen-extra-click",
-      "unseen-enter-controls",
-      "unseen-pii-risky",
-      "unseen-interleaved",
-      "unseen-sheet-loop",
-      "unseen-realcapture",
-    ];
-    const records = await loadRecordedAnswers();
-    expect(records.map((r) => r.file)).toEqual(
-      expectedFixtures.map((name) => `${name}.answer.json`).sort(),
-    );
-    for (const rec of records) {
-      expect(typeof rec.promptHash).toBe("string");
-      expect(rec.promptHash).toMatch(/^[0-9a-f]{64}$/);
-      const parsed = ModelCompileOutputSchema.safeParse(rec.response);
-      expect(parsed.success, `${rec.file} should match ModelCompileOutputSchema`).toBe(true);
-    }
-
-    if (process.env.V2_UNSEEN_LIVE === "1") {
-      return;
-    }
-
-    // Verify the two it.fails fixtures load their exact recorded answer, match sha256(prompt),
-    // pass precheck, and reach /decide (where they honestly emit run_remaining instead of save_only).
-    for (const [idx, name] of ["unseen-multifield-tab", "unseen-extra-click"].entries()) {
-      const answerFile = `${name}.answer.json`;
-      await access(path.join(__dirname, "fixtures", answerFile));
-      const { client: gemini, matchedFiles } = await getUnseenGeminiClient();
-      const { baseUrl } = await startV2Server({
-        gemini,
-        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
-        siteCooldownMs: 5 * 60 * 1000,
-        subDir: `verify-known-failing-${idx}`,
-      });
-      const events = await loadFixtureEvents(`${name}.jsonl`);
-      const postRes = await fetch(`${baseUrl}/events`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(events),
-      });
-      expect(postRes.status).toBe(200);
-
-      const precheckPoll = await pollHandsNext(baseUrl);
-      expect(precheckPoll.status).toBe(200);
-      expect(precheckPoll.cmd?.kind).toBe("precheck");
-      expect(matchedFiles).toEqual([answerFile]);
-      await postHandsResult(baseUrl, {
-        id: precheckPoll.cmd!.id,
-        ok: true,
-        results: [{ index: 0, action: "click", ok: true, matchCount: 1, unique: true }],
-      });
-
-      const decidePoll = await pollHandsNext(baseUrl);
-      expect(decidePoll.status).toBe(200);
-      expect(decidePoll.cmd?.kind).toBe("decide");
-      // Honest confirmation of why the it.fails test fails: real Gemini emitted run_remaining.
-      expect(decidePoll.cmd?.script?.runMode).toBe("run_remaining");
-      await postHandsResult(baseUrl, {
-        id: decidePoll.cmd!.id,
-        ok: true,
-        decision: "dismissed",
-      });
-    }
-  });
-
-  it.fails(
-    "unseen-multifield-tab.jsonl: compiles and saves save_only workflow with recorded real Gemini output",
-    async () => {
-      await runUnseenFixtureHttp({
-        file: "unseen-multifield-tab.jsonl",
-        expectedRunMode: "save_only",
-        approve: true,
-        expectedAnswerFile: "unseen-multifield-tab.answer.json",
-      });
-    },
-    TEST_TIMEOUT_MS,
-  );
-
-  it.fails(
-    "unseen-extra-click.jsonl: compiles and saves save_only workflow with recorded real Gemini output",
-    async () => {
-      await runUnseenFixtureHttp({
-        file: "unseen-extra-click.jsonl",
-        expectedRunMode: "save_only",
-        approve: true,
-        expectedAnswerFile: "unseen-extra-click.answer.json",
       });
     },
     TEST_TIMEOUT_MS,

@@ -228,7 +228,7 @@ export function sanitizeValue(
     return match;
   });
 
-  const maskEmail = options?.maskEmail ?? elCheck?.maskEmail ?? elCheck !== undefined;
+  const maskEmail = options?.maskEmail ?? elCheck?.maskEmail ?? false;
   if (maskEmail) {
     scrubbed = scrubbed.replace(EMAIL_PATTERN, (match) => {
       redacted = true;

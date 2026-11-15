@@ -8,7 +8,7 @@ import {
   sanitizeUrl,
   sanitizeValue,
 } from "./privacy.ts";
-import { buildDeciderSuggestion, createSuggestionEngine } from "./suggestion.ts";
+import { buildDeciderSuggestion } from "./suggestion.ts";
 import type { Suggestion, SuggestionParam } from "./suggestion.ts";
 import { suggestionToOptimization } from "./library.ts";
 import { DEFAULT_SERVER_URL, escapeHtml, renderFlowNodes } from "./utils.ts";
@@ -84,23 +84,6 @@ const SUGGESTION_HOST_ID = "__eyes_suggestion_host__";
 const WATCH_BAR_HOST_ID = "__eyes_watch_bar__";
 const WATCH_HIGHLIGHT_ID = "__eyes_watch_highlight__";
 
-function extensionAssetUrl(assetPath: string): string | undefined {
-  const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
-    | { runtime?: { id?: string; getURL?: (path: string) => string } }
-    | undefined;
-  if (chromeGlobal?.runtime?.id && typeof chromeGlobal.runtime.getURL === "function") {
-    return chromeGlobal.runtime.getURL(assetPath);
-  }
-  return undefined;
-}
-
-const suggestionEngine = createSuggestionEngine({
-  minTextLength: 6,
-  clickReplayUrl:
-    extensionAssetUrl("dist/replay-demo.mp4") ?? getConfig().clickReplayUrl,
-});
-const committedTextByElement = new WeakMap<HTMLElement, string>();
-const lastNonEmptyByElement = new WeakMap<HTMLElement, string>();
 let lastSuggestionShownAt = 0;
 let activePopupDismiss: (() => void) | null = null;
 
@@ -1170,117 +1153,6 @@ export function showSuggestion(
   document.documentElement.appendChild(host);
 }
 
-function clearCommittedTextIfChanged(
-  element: HTMLElement | null,
-  rawValue: string | undefined,
-  privacyCheck: ReturnType<typeof inspectElementPrivacy>
-): void {
-  if (!element) return;
-  const committed = committedTextByElement.get(element);
-  if (committed === undefined) return;
-  const { value } = sanitizeValue(rawValue ?? "", privacyCheck);
-  if (value !== committed) {
-    committedTextByElement.delete(element);
-  }
-}
-
-function autoSaveRepeatedSnippet(element: HTMLElement, suggestion: Suggestion): void {
-  const snippetText = (suggestion.snippetText ?? suggestion.preview).trim();
-  if (!snippetText) return;
-
-  const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
-  const shortPreview =
-    snippetText.length > 34 ? `${snippetText.slice(0, 34).trim()}...` : snippetText;
-  const name = `Insert "${shortPreview}"`;
-  const solution = `Insert '${snippetText}' into the currently focused field.`;
-  const script: ActionScript = {
-    name,
-    steps: [{ action: "insertText", value: snippetText }],
-  };
-
-  const { target } = extractTarget(element);
-  const locators = (target?.locators ?? [])
-    .filter(
-      (loc): loc is { kind: "testid" | "aria" | "css" | "text"; value: string } =>
-        loc.kind === "testid" || loc.kind === "aria" || loc.kind === "css" || loc.kind === "text"
-    )
-    .sort((a, b) => {
-      const rank = (k: string): number =>
-        k === "testid" ? 0 : k === "css" ? 1 : k === "aria" ? 2 : 3;
-      return rank(a.kind) - rank(b.kind);
-    });
-  const cleanUrl =
-    typeof location !== "undefined" ? sanitizeUrl(location.href).url : undefined;
-
-  console.log("[eyes-snippet] learned", name, "on", locators[0]?.value ?? target?.tag);
-
-  sendLibraryMessage({
-    kind: "EYES_AUTO_SAVE_LIBRARY",
-    name,
-    solution,
-    script,
-    context: {
-      app: appHost,
-      ...(cleanUrl ? { url: cleanUrl } : {}),
-      ...(typeof document !== "undefined" && document.title ? { title: document.title } : {}),
-      ...(target?.label ? { targetLabel: target.label } : {}),
-      ...(target?.role ? { targetRole: target.role } : {}),
-      ...(locators.length > 0 ? { locators } : {}),
-    },
-  });
-}
-
-function recordCommittedText(
-  element: HTMLElement | null,
-  rawValue: string | undefined,
-  privacyCheck: ReturnType<typeof inspectElementPrivacy>,
-  force = false
-): void {
-  if ((window as { __EYES_SUPPRESS_SYNTHETIC__?: boolean }).__EYES_SUPPRESS_SYNTHETIC__) return;
-  if (!element || !rawValue) return;
-
-  const { value, privacy } = sanitizeValue(rawValue, privacyCheck);
-  if (!value || privacy.redacted) return;
-
-  if (!force && committedTextByElement.get(element) === value) return;
-  committedTextByElement.set(element, value);
-  lastNonEmptyByElement.set(element, value);
-
-  const { target } = extractTarget(element);
-  const scopeKey =
-    target?.locators.find((l) => l.kind === "testid" || l.kind === "css")?.value ??
-    target?.label ??
-    "";
-  const appHost = typeof location !== "undefined" ? location.hostname || "local-page" : "local-page";
-  const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
-    | {
-        runtime?: {
-          id?: string;
-          sendMessage?: (msg: unknown, cb?: (res?: { ok?: boolean; suggestion?: Suggestion | null }) => void) => void;
-        };
-      }
-    | undefined;
-  if (chromeGlobal?.runtime?.id && typeof chromeGlobal.runtime.sendMessage === "function") {
-    try {
-      chromeGlobal.runtime.sendMessage(
-        { kind: "EYES_RECORD_TEXT", value, scopeKey, appHost },
-        (res) => {
-          if (res?.suggestion) {
-            autoSaveRepeatedSnippet(element, res.suggestion);
-          }
-        }
-      );
-      return;
-    } catch {
-      // fall back to per-tab suggestion engine
-    }
-  }
-  const detected = suggestionEngine.recordText(value, scopeKey);
-  if (detected) {
-    autoSaveRepeatedSnippet(element, detected);
-  }
-}
-
 function getElementValue(el: HTMLElement | null): string | undefined {
   if (!el) return undefined;
   if (
@@ -1724,17 +1596,6 @@ export function setupEventListeners(): void {
 
       const privacyCheck = inspectElementPrivacy(targetEl);
       const currentVal = getElementValue(targetEl) ?? "";
-      if (currentVal.trim().length > 0) {
-        clearCommittedTextIfChanged(targetEl, currentVal, privacyCheck);
-        lastNonEmptyByElement.set(targetEl, currentVal);
-      } else {
-        const prevNonEmpty = lastNonEmptyByElement.get(targetEl);
-        if (prevNonEmpty && prevNonEmpty.trim().length > 0) {
-          recordCommittedText(targetEl, prevNonEmpty, privacyCheck);
-        }
-        lastNonEmptyByElement.delete(targetEl);
-        committedTextByElement.delete(targetEl);
-      }
       if (getConfig().mode === "semantic") return;
       const durationMs = sess ? Math.max(1, Date.now() - sess.startedAt) : 1;
       const keystrokeCount = sess ? sess.keystrokeCount : 0;
@@ -1825,9 +1686,6 @@ export function setupEventListeners(): void {
           inputTypeAttr: targetEl.getAttribute("type") || undefined,
         },
       });
-      if (!isCheckable && !isSelectEl) {
-        recordCommittedText(targetEl, currentVal, privacyCheck);
-      }
     },
     true
   );
@@ -1839,12 +1697,6 @@ export function setupEventListeners(): void {
       const targetEl = e.target instanceof HTMLElement ? e.target : null;
       if (targetEl) {
         const currentVal = getElementValue(targetEl) ?? "";
-        clearCommittedTextIfChanged(targetEl, currentVal, inspectElementPrivacy(targetEl));
-        if (currentVal.trim().length > 0) {
-          lastNonEmptyByElement.set(targetEl, currentVal);
-        } else {
-          lastNonEmptyByElement.delete(targetEl);
-        }
         typingSessions.set(targetEl, {
           el: targetEl,
           startedAt: Date.now(),
@@ -1895,7 +1747,6 @@ export function setupEventListeners(): void {
               inputTypeAttr: targetEl.getAttribute("type") || undefined,
             },
           });
-          recordCommittedText(targetEl, currentVal, privacyCheck);
         }
         typingSessions.delete(targetEl);
         return;
@@ -1922,9 +1773,6 @@ export function setupEventListeners(): void {
             }
           : undefined,
       });
-      if (targetEl && sess && (currentVal !== sess.initialValue || sess.keystrokeCount > 0)) {
-        recordCommittedText(targetEl, currentVal, privacyCheck);
-      }
       if (targetEl) typingSessions.delete(targetEl);
     },
     true
@@ -2056,7 +1904,6 @@ export function setupEventListeners(): void {
           textHash: privacy.valueHash,
         }
       );
-      recordCommittedText(pasteEl, cleanText, elCheck, true);
     },
     true
   );
@@ -2067,10 +1914,6 @@ export function setupEventListeners(): void {
   document.addEventListener(
     "submit",
     (e: SubmitEvent) => {
-      const activeEl = resolveEditableField(getDeepActiveElement());
-      if (activeEl && (!(e.target instanceof Node) || e.target.contains(activeEl))) {
-        recordCommittedText(activeEl, getElementValue(activeEl), inspectElementPrivacy(activeEl));
-      }
       emit("submit", e.target);
     },
     true
@@ -2079,14 +1922,6 @@ export function setupEventListeners(): void {
   document.addEventListener(
     "reset",
     (e: globalThis.Event) => {
-      if (e.target instanceof HTMLFormElement) {
-        for (const el of Array.from(e.target.elements)) {
-          if (el instanceof HTMLElement) {
-            committedTextByElement.delete(el);
-            lastNonEmptyByElement.delete(el);
-          }
-        }
-      }
       emit("reset", e.target);
     },
     true

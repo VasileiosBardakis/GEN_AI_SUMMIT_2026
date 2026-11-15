@@ -8,7 +8,6 @@ import {
   buildLibraryEntryFromScript,
   buildStartSignature,
   implementForLibrary,
-  implementSolution,
   type ImplementContext,
   type StartSignature,
 } from "./hands/implementor.ts";
@@ -32,7 +31,6 @@ import {
   type GeminiClientOptions,
 } from "./llm/gemini.ts";
 import type { IrisJudgeOptions } from "./llm/iris.ts";
-import { normalizeText } from "./common/target.ts";
 import {
   collectFlatSteps,
   createProposer,
@@ -40,13 +38,11 @@ import {
   type HandsOutcome,
   type StageLogEvent,
 } from "./propose.ts";
-import { buildCombinedReport, buildReport, resolvePipeline } from "./report.ts";
+import { buildCombinedReport, buildReport } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
 import { appendEvents, listSessions, readEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
 import { compileWorkflow, type IrisWorkflowJudge } from "./v2/index.ts";
-
-const RECENT_SESSION_WINDOW_MS = 30 * 60 * 1000;
 
 function setCorsHeaders(res: http.ServerResponse): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -85,7 +81,6 @@ function hasAllCachedScripts(
 export type CreateServerOptions = {
   tracesDir: string;
   dataDir?: string;
-  pipeline?: "v1" | "v2";
   implement?: (solution: string, opts?: { name?: string }) => Promise<ActionScript>;
   gemini?: GeminiClient | GeminiClientOptions;
   iris?: IrisJudgeOptions | IrisWorkflowJudge;
@@ -129,7 +124,7 @@ function countFlatScriptSteps(steps: ActionScript["steps"]): number {
 }
 
 export function createServer(opts: CreateServerOptions): http.Server {
-  const pipeline = resolvePipeline(opts.pipeline);
+  const pipeline = "v2" as const;
   const dataDir = opts.dataDir ?? path.resolve(opts.tracesDir, "..", "data");
   const modelName = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
   const stageLogEnvEnabled =
@@ -147,10 +142,6 @@ export function createServer(opts: CreateServerOptions): http.Server {
   let latestScript: ActionScript | null = null;
   const scriptsByFindingId = new Map<string, ActionScript>();
   const reportCache = new Map<string, Report>();
-  const liveSessions = new Set<string>();
-  const implement =
-    opts.implement ??
-    ((solution: string, o?: { name?: string }) => implementSolution(solution, o));
   const compileLibraryEntry = async (
     solution: string,
     o?: { name?: string; context?: ImplementContext },
@@ -373,69 +364,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
     }
   }
 
-  async function filterAlreadySavedSnippets(
-    findings: Report["findings"],
-  ): Promise<Report["findings"]> {
-    const libraryEntries = await readLibrary(dataDir).catch(() => []);
-    if (libraryEntries.length === 0) return findings;
-    const savedNorms = new Set<string>();
-    for (const entry of libraryEntries) {
-      if (entry.status !== "active" || entry.kind !== "snippet") continue;
-      const step = entry.script.steps[0];
-      if (step?.action === "insertText" && typeof step.value === "string") {
-        savedNorms.add(normalizeText(step.value));
-      }
-    }
-    if (savedNorms.size === 0) return findings;
-    return findings.filter((f) => {
-      if (f.verdict !== "rung1") return true;
-      const script = scriptsByFindingId.get(f.id);
-      const step = script?.steps[0];
-      if (
-        script?.steps.length === 1 &&
-        step?.action === "insertText" &&
-        typeof step.value === "string"
-      ) {
-        if (savedNorms.has(normalizeText(step.value))) return false;
-      }
-      return true;
-    });
-  }
-
   const autoPropose = opts.autoPropose ?? process.env.BRAIN_AUTO_PROPOSE !== "0";
   const proposer = autoPropose
     ? createProposer({
-        pipeline,
-        runReport: async (sessionId) => {
-          const reportOpts = {
-            pipeline,
-            dataDir,
-            llm: true,
-            gemini: opts.gemini,
-            iris: opts.iris,
-            implement,
-            scriptStore: scriptsByFindingId,
-          };
-          const targetSessions =
-            liveSessions.size > 0 ? [...liveSessions] : [sessionId];
-          if (targetSessions.length <= 1) {
-            const targetSession = targetSessions[0] ?? sessionId;
-            const events = await readEvents(opts.tracesDir, targetSession);
-            const report = await buildReport(targetSession, events, reportOpts);
-            return {
-              findings: await filterAlreadySavedSnippets(report.findings),
-              scripts: scriptsByFindingId,
-            };
-          }
-          const allEvents = await Promise.all(
-            targetSessions.map((s) => readEvents(opts.tracesDir, s)),
-          );
-          const report = await buildCombinedReport(allEvents, reportOpts);
-          return {
-            findings: await filterAlreadySavedSnippets(report.findings),
-            scripts: scriptsByFindingId,
-          };
-        },
         readSessionEvents: (sessionId) => readEvents(opts.tracesDir, sessionId),
         compileV2: (input) =>
           compileWorkflow(input, { gemini: opts.gemini, iris: opts.iris }),
@@ -582,12 +513,10 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const llmParam = url.searchParams.get("llm");
         const llm = llmParam !== "0" && llmParam !== "false";
         const reportOpts = {
-          pipeline,
           dataDir,
           llm,
           gemini: opts.gemini,
           iris: opts.iris,
-          implement,
           scriptStore: scriptsByFindingId,
         };
         let report: unknown;
@@ -602,11 +531,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
           }
           report = await buildReport(sessionParam, events, reportOpts);
         } else {
-          const sessions = await listSessions(opts.tracesDir);
-          const targetSessions =
-            pipeline === "v2"
-              ? sessions
-              : sessions.filter((s) => s.mtimeMs >= Date.now() - RECENT_SESSION_WINDOW_MS);
+          const targetSessions = await listSessions(opts.tracesDir);
           const sessionEvents = await Promise.all(
             targetSessions.map((s) => readEvents(opts.tracesDir, s.session)),
           );
@@ -655,23 +580,6 @@ export function createServer(opts: CreateServerOptions): http.Server {
         const scrubbed = validation.events.length - events.filter((e) => original.has(e)).length;
 
         await appendEvents(opts.tracesDir, events);
-        if (
-          pipeline !== "v2" &&
-          events.some((e) => e.type === "nav" && e.meta?.subType === "page_load")
-        ) {
-          for (let i = commandQueue.length - 1; i >= 0; i--) {
-            if (commandQueue[i]?.kind === "decide") {
-              const stale = commandQueue.splice(i, 1)[0];
-              if (stale) {
-                waiters.get(stale.id)?.({ ok: false, error: "Page navigated before decision" });
-              }
-            }
-          }
-          if (activeLibraryDecide) {
-            cancelCommand(activeLibraryDecide.commandId, "Page navigated before decision");
-            activeLibraryDecide = null;
-          }
-        }
         for (const evt of events) {
           if (evt.type === "focus" || evt.type === "click") {
             const visitedKey = extractEditableTargetKey(evt);
@@ -680,42 +588,16 @@ export function createServer(opts: CreateServerOptions): http.Server {
         }
         const entries = await readLibrary(dataDir).catch(() => []);
         if (entries.length > 0) {
-          if (pipeline === "v2") {
-            const irisOpts: IrisJudgeOptions | undefined =
-              opts.iris && typeof opts.iris === "object"
-                ? opts.iris
-                : typeof opts.iris === "function"
-                  ? { apiKey: "", envPath: "/nonexistent/oumi/env" }
-                  : undefined;
-            void recallMatcher
-              .matchEventsWithIris(events, entries, { irisOpts })
-              .then((matched) => {
-                if (!matched) return;
-                if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
-                  if (commandQueue.some((c) => c.id === activeLibraryDecide!.commandId)) {
-                    cancelCommand(activeLibraryDecide.commandId, "Superseded");
-                  }
-                  activeLibraryDecide = null;
-                }
-                if (!activeLibraryDecide) {
-                  console.log(
-                    `[server] half-detected library match id=${matched.entry.id} name="${matched.entry.name}" -> /decide`,
-                  );
-                  emitStageLog?.({
-                    stage: "recall_match",
-                    session: matched.event.session,
-                    ts: opts.now ? opts.now() : Date.now(),
-                    entryId: matched.entry.id,
-                    name: matched.entry.name,
-                    borderline: matched.borderline,
-                  });
-                  void triggerLibraryRecall(matched.entry, matched.event);
-                }
-              })
-              .catch(() => {});
-          } else {
-            const matched = recallMatcher.matchEventsWithEvent(events, entries);
-            if (matched) {
+          const irisOpts: IrisJudgeOptions | undefined =
+            opts.iris && typeof opts.iris === "object"
+              ? opts.iris
+              : typeof opts.iris === "function"
+                ? { apiKey: "", envPath: "/nonexistent/oumi/env" }
+                : undefined;
+          void recallMatcher
+            .matchEventsWithIris(events, entries, { irisOpts })
+            .then((matched) => {
+              if (!matched) return;
               if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
                 if (commandQueue.some((c) => c.id === activeLibraryDecide!.commandId)) {
                   cancelCommand(activeLibraryDecide.commandId, "Superseded");
@@ -726,18 +608,21 @@ export function createServer(opts: CreateServerOptions): http.Server {
                 console.log(
                   `[server] half-detected library match id=${matched.entry.id} name="${matched.entry.name}" -> /decide`,
                 );
+                emitStageLog?.({
+                  stage: "recall_match",
+                  session: matched.event.session,
+                  ts: opts.now ? opts.now() : Date.now(),
+                  entryId: matched.entry.id,
+                  name: matched.entry.name,
+                  borderline: matched.borderline,
+                });
                 void triggerLibraryRecall(matched.entry, matched.event);
               }
-            }
-          }
+            })
+            .catch(() => {});
         }
         sendJson(res, 200, { ok: true, n: events.length, scrubbed });
         const sessionIds = new Set(events.map((e) => e.session));
-        if (pipeline !== "v2") {
-          for (const sessionId of sessionIds) {
-            liveSessions.add(sessionId);
-          }
-        }
         if (proposer) {
           for (const sessionId of sessionIds) {
             proposer.onEvents(sessionId);

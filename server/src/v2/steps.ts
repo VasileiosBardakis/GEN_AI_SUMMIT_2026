@@ -1,11 +1,5 @@
 import type { Event, Locator, Step } from "@gen/shared";
-import {
-  EMAIL_RE,
-  formatTarget,
-  PHONE_RE,
-  REDACTED_RE,
-  targetKey,
-} from "../common/target.ts";
+import { formatTarget, targetKey } from "../common/target.ts";
 
 export type V2Action = Step["action"] | "tab_switch" | "key";
 
@@ -36,70 +30,12 @@ const INCLUDED_TYPES = new Set<Event["type"]>([
   "key",
 ]);
 
-function createScrubber(map: PiiMap): (raw: string) => string {
-  const rawToEmailToken = new Map<string, string>();
-  const rawToPhoneToken = new Map<string, string>();
-  let maxEmailIndex = 0;
-  let maxPhoneIndex = 0;
-
-  for (const [token, raw] of map.entries()) {
-    const emailMatch = /^__PII_EMAIL_(\d+)__$/.exec(token);
-    if (emailMatch) {
-      maxEmailIndex = Math.max(maxEmailIndex, Number(emailMatch[1]));
-      if (!rawToEmailToken.has(raw)) {
-        rawToEmailToken.set(raw, token);
-      }
-      continue;
-    }
-    const phoneMatch = /^__PII_PHONE_(\d+)__$/.exec(token);
-    if (phoneMatch) {
-      maxPhoneIndex = Math.max(maxPhoneIndex, Number(phoneMatch[1]));
-      if (!rawToPhoneToken.has(raw)) {
-        rawToPhoneToken.set(raw, token);
-      }
-    }
-  }
-
-  return (raw: string): string => {
-    const redacted: string[] = [];
-    const shielded = raw.replace(REDACTED_RE, (token) => {
-      redacted.push(token);
-      return `\uE000${redacted.length - 1}\uE000`;
-    });
-
-    const withEmails = shielded.replace(EMAIL_RE, (email) => {
-      const existing = rawToEmailToken.get(email);
-      if (existing) return existing;
-      maxEmailIndex += 1;
-      const token = `__PII_EMAIL_${maxEmailIndex}__`;
-      rawToEmailToken.set(email, token);
-      map.set(token, email);
-      return token;
-    });
-
-    const withPhones = withEmails.replace(PHONE_RE, (phone) => {
-      const existing = rawToPhoneToken.get(phone);
-      if (existing) return existing;
-      maxPhoneIndex += 1;
-      const token = `__PII_PHONE_${maxPhoneIndex}__`;
-      rawToPhoneToken.set(phone, token);
-      map.set(token, phone);
-      return token;
-    });
-
-    return withPhones.replace(
-      /\uE000(\d+)\uE000/g,
-      (_match: string, index: string) => redacted[Number(index)] ?? "",
-    );
-  };
-}
-
 export function eventsToSteps(
   events: Event[],
   piiMap?: PiiMap,
 ): { steps: V2Step[]; piiMap: PiiMap } {
   const map: PiiMap = piiMap ?? new Map<string, string>();
-  const scrubPii = createScrubber(map);
+  const scrubPii = (raw: string): string => raw;
 
   const steps: V2Step[] = [];
   let lastTargetKey = "";

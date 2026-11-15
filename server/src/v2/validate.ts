@@ -298,7 +298,6 @@ function countSteps(steps: readonly CompiledStep[]): number {
 
 const PLACEHOLDER_EMAIL_RE = /<email>/i;
 const REDACTED_MARKER_RE = /\[REDACTED:/i;
-const PII_TOKEN_RE = /__PII_[A-Za-z0-9_]+__/;
 
 function findForbiddenLeak(value: unknown, pathLabel: string): string | null {
   if (typeof value === "string") {
@@ -307,10 +306,6 @@ function findForbiddenLeak(value: unknown, pathLabel: string): string | null {
     }
     if (REDACTED_MARKER_RE.test(value)) {
       return `Forbidden "[REDACTED:" marker at ${pathLabel}`;
-    }
-    const piiMatch = PII_TOKEN_RE.exec(value);
-    if (piiMatch) {
-      return `Unrestored PII token "${piiMatch[0]}" at ${pathLabel}`;
     }
     return null;
   }

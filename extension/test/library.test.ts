@@ -8,10 +8,7 @@ import {
   libraryEntryToOptimization,
   mergeServerAndLocalOptimizations,
   recordOptimizationRun,
-  suggestionToOptimization,
-  upsertOptimizationItem,
 } from "../src/library.ts";
-import { createSuggestionEngine } from "../src/suggestion.ts";
 
 describe("optimization library helpers", () => {
   it("formats durations and relative timestamps in user-friendly units", () => {
@@ -78,21 +75,7 @@ describe("optimization library helpers", () => {
     expect(updated[0].lastRunAt).toBe(2_000_000);
   });
 
-  it("converts suggestions and findings without debug codes", () => {
-    const engine = createSuggestionEngine();
-    const msg = "Hi, thanks for your order. It ships Friday and tracking will follow shortly.";
-    engine.recordText(msg);
-    engine.recordText(msg);
-    const suggestion = engine.recordText(msg)!;
-
-    const item = suggestionToOptimization(suggestion, { app: "mail.example.com" });
-    expect(item.kind).toBe("snippet");
-    expect(item.snippetText).toBe(msg);
-    expect(item.timeSavedPerRunSec).toBeGreaterThanOrEqual(8);
-
-    const existing = upsertOptimizationItem([], item);
-    expect(existing).toHaveLength(1);
-
+  it("converts findings without debug codes", () => {
     const convertedFinding = findingToOptimization({
       id: "snip_1234",
       verdict: "rung1",

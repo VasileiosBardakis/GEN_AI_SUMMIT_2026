@@ -44,35 +44,27 @@ describe("Eyes Layer-1 privacy & schema validation", () => {
     expect(res.value).not.toContain("sk-live-9876543210abcdef123456");
   });
 
-  it("masks standalone and inline email addresses while preserving valueHash and piiTypes", () => {
+  it("leaves plain email addresses unmasked by default and masks when maskEmail: true", () => {
     const standalone = "alice@example.com";
-    const standaloneRes = sanitizeValue(standalone, {
+    const defaultRes = sanitizeValue(standalone, {
       isSensitiveField: false,
       autofillEligible: true,
       autocompleteAttr: "email",
     });
+    expect(defaultRes.privacy.redacted).toBe(false);
+    expect(defaultRes.value).toBe(standalone);
 
-    expect(standaloneRes.privacy.redacted).toBe(true);
-    expect(standaloneRes.privacy.reason).toBe("pii_pattern");
-    expect(standaloneRes.privacy.piiTypes).toContain("email");
-    expect(standaloneRes.privacy.valueHash).toBe(hashValue(standalone));
-    expect(standaloneRes.value).toBe(`[REDACTED:EMAIL#${hashValue(standalone)}]`);
-    expect(standaloneRes.value).toMatch(/^\[REDACTED:EMAIL#h_[0-9a-f]+\]$/);
-    expect(standaloneRes.value).not.toContain("alice@example.com");
-
-    const inline = "Contact alice@example.com for invoice";
-    const inlineRes = sanitizeValue(inline, {
-      isSensitiveField: false,
-      autofillEligible: false,
-    });
-
-    expect(inlineRes.privacy.redacted).toBe(true);
-    expect(inlineRes.privacy.reason).toBe("pii_pattern");
-    expect(inlineRes.privacy.piiTypes).toContain("email");
-    expect(inlineRes.privacy.valueHash).toBe(hashValue(inline));
-    expect(inlineRes.value).toBe(`Contact [REDACTED:EMAIL#${hashValue(standalone)}] for invoice`);
-    expect(inlineRes.value).toContain("[REDACTED:EMAIL#h_");
-    expect(inlineRes.value).not.toContain("alice@example.com");
+    const maskedRes = sanitizeValue(
+      standalone,
+      {
+        isSensitiveField: false,
+        autofillEligible: true,
+        autocompleteAttr: "email",
+      },
+      { maskEmail: true },
+    );
+    expect(maskedRes.privacy.redacted).toBe(true);
+    expect(maskedRes.value).toBe(`[REDACTED:EMAIL#${hashValue(standalone)}]`);
   });
 
   it("sanitizes sensitive OAuth and token parameters in URLs", () => {
@@ -112,14 +104,18 @@ describe("Eyes Layer-1 privacy & schema validation", () => {
     expect(parsed.success).toBe(true);
   });
 
-  it("records and restores local PII values by hash without leaking raw email", () => {
+  it("records and restores local PII values by hash when maskEmail is enabled", () => {
     clearLocalPiiMap();
     const rawEmail = "private.sender@corp.example";
-    const { value, privacy } = sanitizeValue(rawEmail, {
-      isSensitiveField: false,
-      autofillEligible: true,
-      autocompleteAttr: "email",
-    });
+    const { value, privacy } = sanitizeValue(
+      rawEmail,
+      {
+        isSensitiveField: false,
+        autofillEligible: true,
+        autocompleteAttr: "email",
+      },
+      { maskEmail: true },
+    );
 
     expect(privacy.redacted).toBe(true);
     expect(privacy.valueHash).toBeDefined();

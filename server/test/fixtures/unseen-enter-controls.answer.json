@@ -18,7 +18,7 @@
       {
         "action": "readText",
         "stepIndex": 1,
-        "value": "ticketId"
+        "bind": "ticketId"
       },
       {
         "action": "switchTab",

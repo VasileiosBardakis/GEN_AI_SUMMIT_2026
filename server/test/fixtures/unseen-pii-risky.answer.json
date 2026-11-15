@@ -18,12 +18,12 @@
       {
         "action": "readText",
         "stepIndex": 1,
-        "value": "WIRE-REF-VAL"
+        "bind": "wireRef"
       },
       {
         "action": "readText",
         "stepIndex": 2,
-        "value": "EMAIL-VAL"
+        "bind": "beneficiaryEmail"
       },
       {
         "action": "switchTab",
@@ -32,12 +32,12 @@
       {
         "action": "fill",
         "stepIndex": 4,
-        "value": "{{WIRE-REF-VAL}}"
+        "value": "{{wireRef}}"
       },
       {
         "action": "fill",
         "stepIndex": 5,
-        "value": "{{EMAIL-VAL}}"
+        "value": "{{beneficiaryEmail}}"
       },
       {
         "action": "fill",

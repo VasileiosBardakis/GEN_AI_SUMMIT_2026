@@ -406,13 +406,10 @@ describe("Brain v2 compiler and validator", () => {
       ]);
     }
 
-    // 7. unseen-pii-risky.jsonl: local PII restored, no <email> / [REDACTED:, pauseBeforeSubmit: true
+    // 7. unseen-pii-risky.jsonl: no <email> / [REDACTED: in compiled output, pauseBeforeSubmit: true
     {
       const events = await loadFixture("unseen-pii-risky.jsonl");
-      const piiMap = new Map<string, string>([
-        ["[REDACTED:EMAIL#h_3f82a19b]", "billing@northstar.example"],
-      ]);
-      const { client, prompts } = makeMockGemini({
+      const { client } = makeMockGemini({
         suggest: true,
         offerAt2: false,
         kind: "workflow",
@@ -422,7 +419,6 @@ describe("Brain v2 compiler and validator", () => {
         runMode: "save_only",
         params: [
           { name: "wireAmount", example: "14500.00" },
-          { name: "sampleEmail", example: "__PII_EMAIL_1__" },
         ],
         steps: [
           { action: "readText", stepIndex: 1, bind: "wireRef" },
@@ -436,26 +432,18 @@ describe("Brain v2 compiler and validator", () => {
       });
 
       const wf = await compileWorkflow(
-        { events, piiMap },
+        { events },
         {
           gemini: client,
           iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: true }),
         },
       );
 
-      expect(prompts[0]).not.toContain("billing@northstar.example");
-      expect(prompts[0]).not.toContain("[REDACTED:");
-      expect(prompts[0]).toContain("__PII_EMAIL_1__");
-
       expect(wf).not.toBeNull();
       expect(wf!.pauseBeforeSubmit).toBe(true);
-      expect(wf!.params.find((p) => p.name === "sampleEmail")?.example).toBe(
-        "billing@northstar.example",
-      );
       const serialized = JSON.stringify(wf);
       expect(serialized).not.toContain("<email>");
       expect(serialized).not.toContain("[REDACTED:");
-      expect(serialized).not.toMatch(/__PII_[A-Za-z0-9_]+__/);
     }
 
     const elapsedMs = performance.now() - started;
@@ -538,193 +526,6 @@ describe("Brain v2 compiler and validator", () => {
       },
     );
     expect(withIrisNull).not.toBeNull();
-  });
-
-  it("keeps raw PII out of Gemini & Iris prompts and restores local PII from piiMap", async () => {
-    const events: Event[] = [
-      {
-        v: 1,
-        id: "1",
-        ts: 1000,
-        session: "s_pii",
-        source: "browser",
-        app: "crm.local",
-        url: "http://crm.local/contact",
-        type: "input",
-        target: {
-          tag: "input",
-          label: "Email",
-          locators: [{ kind: "testid", value: "contact-email" }],
-        },
-        value: "ana@acme.com",
-      },
-      {
-        v: 1,
-        id: "2",
-        ts: 2000,
-        session: "s_pii",
-        source: "browser",
-        app: "crm.local",
-        url: "http://crm.local/contact",
-        type: "click",
-        target: {
-          tag: "button",
-          label: "Send Invite",
-          locators: [{ kind: "testid", value: "send-invite" }],
-        },
-      },
-    ];
-
-    const seenIrisDigests: Array<Record<string, unknown>> = [];
-    const { client, prompts } = makeMockGemini({
-      suggest: true,
-      offerAt2: false,
-      kind: "workflow",
-      name: "Invite contact",
-      reason: "Fills email and sends invite",
-      risk: "high",
-      runMode: "save_only",
-      params: [],
-      steps: [
-        { action: "fill", stepIndex: 0, value: "__PII_EMAIL_1__" },
-        { action: "click", stepIndex: 1 },
-      ],
-    });
-
-    const wf = await compileWorkflow(
-      { events },
-      {
-        gemini: client,
-        iris: async (digest) => {
-          seenIrisDigests.push(digest);
-          return { worthAutomating: true, pauseBeforeSubmit: true };
-        },
-      },
-    );
-
-    expect(prompts[0]).toContain("__PII_EMAIL_1__");
-    expect(prompts[0]).not.toContain("ana@acme.com");
-    expect(JSON.stringify(seenIrisDigests)).not.toContain("ana@acme.com");
-
-    expect(wf).not.toBeNull();
-    expect(wf!.pauseBeforeSubmit).toBe(true);
-    const fillStep = wf!.steps[1];
-    expect(fillStep.action).toBe("fill");
-    if (fillStep.action === "fill") {
-      expect(fillStep.value).toBe("ana@acme.com");
-    }
-  });
-
-  it("scrubs emails, card numbers, and [REDACTED: markers in target labels, inferred labels, and container itemKeys before Gemini/Iris prompts", async () => {
-    const events: Event[] = [
-      {
-        v: 1,
-        id: "lbl-1",
-        ts: 1000,
-        session: "s_lbl_pii",
-        source: "browser",
-        app: "billing.local",
-        url: "http://billing.local/pay",
-        type: "input",
-        target: {
-          tag: "input",
-          label: "Receipt for vip@acme.example",
-          locators: [{ kind: "testid", value: "receipt-note" }],
-        },
-        value: "Invoice paid",
-        meta: {
-          container: {
-            testid: "invoice-row",
-            itemKey: "owner@acme.example",
-          },
-        },
-      },
-      {
-        v: 1,
-        id: "lbl-2",
-        ts: 2000,
-        session: "s_lbl_pii",
-        source: "browser",
-        app: "billing.local",
-        url: "http://billing.local/pay",
-        type: "click",
-        target: {
-          tag: "button",
-          locators: [
-            { kind: "aria", value: 'button[name="Pay with 4111-1111-1111-1111"]' },
-          ],
-        },
-        meta: {
-          container: {
-            testid: "card-row",
-            itemKey: "4532-1234-5678-9012",
-          },
-        },
-      },
-      {
-        v: 1,
-        id: "lbl-3",
-        ts: 3000,
-        session: "s_lbl_pii",
-        source: "browser",
-        app: "billing.local",
-        url: "http://billing.local/pay",
-        type: "click",
-        target: {
-          tag: "button",
-          label: "Confirm [REDACTED:CARD#h_99887766]",
-          locators: [{ kind: "testid", value: "confirm-pay" }],
-        },
-      },
-    ];
-
-    const seenIrisDigests: Array<Record<string, unknown>> = [];
-    const { client, prompts } = makeMockGemini({
-      suggest: true,
-      offerAt2: false,
-      kind: "workflow",
-      name: "Submit payment",
-      reason: "Fills receipt note and submits payment",
-      risk: "high",
-      runMode: "save_only",
-      params: [],
-      steps: [
-        { action: "fill", stepIndex: 0, value: "Invoice paid" },
-        { action: "click", stepIndex: 1 },
-        { action: "click", stepIndex: 2 },
-      ],
-    });
-
-    const wf = await compileWorkflow(
-      { events },
-      {
-        gemini: client,
-        iris: async (digest) => {
-          seenIrisDigests.push(digest);
-          return { worthAutomating: true, pauseBeforeSubmit: true };
-        },
-      },
-    );
-
-    expect(wf).not.toBeNull();
-
-    const prompt = prompts[0] ?? "";
-    const irisText = JSON.stringify(seenIrisDigests);
-
-    expect(prompt).not.toContain("vip@acme.example");
-    expect(prompt).not.toContain("owner@acme.example");
-    expect(prompt).not.toContain("4111-1111-1111-1111");
-    expect(prompt).not.toContain("4532-1234-5678-9012");
-    expect(prompt).not.toContain("[REDACTED:");
-    expect(prompt).toContain("__PII_EMAIL_1__");
-    expect(prompt).toContain("__PII_EMAIL_2__");
-    expect(prompt).toContain("__PII_CARD_");
-
-    expect(irisText).not.toContain("vip@acme.example");
-    expect(irisText).not.toContain("4111-1111-1111-1111");
-    expect(irisText).not.toContain("[REDACTED:");
-    expect(irisText).toContain("__PII_EMAIL_1__");
-    expect(irisText).toContain("__PII_CARD_");
   });
 
   it("forwards thinkingBudget: 0, COMPILER_RESPONSE_SCHEMA, and timeoutMs through GeminiSdk", async () => {
@@ -868,7 +669,7 @@ describe("Brain v2 compiler and validator", () => {
     ).toBe(false);
 
     // Forbidden PII placeholders / markers
-    for (const badVal of ["<email>", "[REDACTED:EMAIL#h_1234]", "__PII_EMAIL_1__"]) {
+    for (const badVal of ["<email>", "[REDACTED:EMAIL#h_1234]"]) {
       expect(
         validateCompiledWorkflow({
           ...base,
@@ -1282,7 +1083,6 @@ describe("Brain v2 compiler and validator", () => {
     let visibleCount = 4; // 2 reps first
     const decided: Array<{ name: string; script: ReturnType<typeof compiledWorkflowToActionScript> }> = [];
     const proposer = createProposer({
-      pipeline: "v2",
       debounceMs: 10,
       readSessionEvents: async () => events.slice(0, visibleCount),
       compileV2: (input) =>
@@ -1379,8 +1179,7 @@ describe("Brain v2 compiler and validator", () => {
     expect(prompts[0]).toContain("client-list");
     expect(prompts[0]).toContain("sheet-table");
     expect(prompts[0]).toContain("submit form");
-    expect(prompts[0]).not.toContain("boreal@example.com");
-    expect(prompts[0]).toContain("__PII_EMAIL_");
+    expect(prompts[0]).toContain("boreal@example.com");
 
     expect(wf).not.toBeNull();
     expect(wf!.runMode).toBe("run_remaining");
@@ -1388,7 +1187,6 @@ describe("Brain v2 compiler and validator", () => {
     expect(loop.action).toBe("forEach");
     if (loop.action === "forEach" && Array.isArray(loop.items)) {
       expect(loop.items).toHaveLength(2);
-      // Restored locally from piiMap
       expect(loop.items[0].col1).toBe("boreal@example.com");
       expect(loop.items[0].col2).toBe("RATE-3190");
       expect(loop.items[1].col1).toBe("Vanguard Marine Inc");
@@ -1436,107 +1234,6 @@ describe("Brain v2 compiler and validator", () => {
       },
     ]);
     expect(picked?.signature).toBe("click->click->copy->click->paste->fill->click");
-  });
-
-  it("binds unmapped [REDACTED:EMAIL#h_...] tokens to {{param}} with piiHash and backfills missing param examples without leaking PII", async () => {
-    const events: Event[] = [
-      {
-        v: 1,
-        id: "u-1",
-        ts: 1000,
-        session: "s_unmapped_pii",
-        source: "browser",
-        app: "wire.local",
-        url: "http://wire.local/wire",
-        type: "input",
-        target: {
-          tag: "input",
-          role: "textbox",
-          label: "Recipient Email",
-          locators: [{ kind: "testid", value: "recipient-email" }],
-        },
-        value: "[REDACTED:EMAIL#h_9a8b7c6d]",
-      },
-      {
-        v: 1,
-        id: "u-2",
-        ts: 1500,
-        session: "s_unmapped_pii",
-        source: "browser",
-        app: "wire.local",
-        url: "http://wire.local/wire",
-        type: "input",
-        target: {
-          tag: "input",
-          role: "textbox",
-          label: "Amount",
-          locators: [{ kind: "testid", value: "wire-amount" }],
-        },
-        value: "500.00",
-      },
-      {
-        v: 1,
-        id: "u-3",
-        ts: 2000,
-        session: "s_unmapped_pii",
-        source: "browser",
-        app: "wire.local",
-        url: "http://wire.local/wire",
-        type: "click",
-        target: {
-          tag: "button",
-          role: "button",
-          label: "Wire funds",
-          locators: [{ kind: "testid", value: "wire-funds-btn" }],
-        },
-      },
-    ];
-
-    // No piiMap passed -> server only has hash h_9a8b7c6d, simulating real Chrome extension local PII
-    const { client } = makeMockGemini({
-      suggest: true,
-      offerAt2: false,
-      kind: "workflow",
-      name: "Wire funds to __PII_EMAIL_1__",
-      reason: "Fills email and amount and pauses before Wire funds",
-      risk: "high",
-      runMode: "save_only",
-      params: [{ name: "wire_amount" }],
-      steps: [
-        { action: "fill", stepIndex: 0, value: "__PII_EMAIL_1__" },
-        { action: "fill", stepIndex: 1, value: "{{wire_amount}}" },
-        { action: "click", stepIndex: 2 },
-      ],
-    });
-
-    const wf = await compileWorkflow(
-      { events },
-      {
-        gemini: client,
-        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: true }),
-      },
-    );
-
-    expect(wf).not.toBeNull();
-    expect(wf!.pauseBeforeSubmit).toBe(true);
-    expect(wf!.runMode).toBe("save_only");
-    const serialized = JSON.stringify(wf);
-    expect(serialized).not.toContain("[REDACTED:");
-    expect(serialized).not.toMatch(/__PII_[A-Za-z0-9_]+__/);
-
-    const amountParam = wf!.params.find((p) => p.name === "wire_amount");
-    expect(amountParam?.example).toBe("500.00");
-
-    const piiParam = wf!.params.find((p) => p.piiHash === "h_9a8b7c6d");
-    expect(piiParam).toBeDefined();
-    const emailFill = wf!.steps[1];
-    expect(emailFill.action).toBe("fill");
-    if (emailFill.action === "fill") {
-      expect(emailFill.value).toBe(`{{${piiParam!.name}}}`);
-    }
-
-    const script = compiledWorkflowToActionScript(wf!);
-    expect(script.params).toEqual(wf!.params);
   });
 
   it("preserves port and path on navigate when model returns bare origin (with or without stepIndex) and keeps deliberate different paths with captured port", async () => {
@@ -1695,7 +1392,7 @@ describe("Brain v2 compiler and validator", () => {
       action: "navigate",
       url: "http://127.0.0.1:4173/other",
     });
-    expect(differentPathPromptCheck.prompts[0]).toContain("full URL including port and path");
+    expect(differentPathPromptCheck.prompts[0]).toContain("preserve the full URL (scheme, host, port, path)");
   });
 
   it("validateCompiledWorkflow enforces seenHosts (including port) on startUrl, navigate, switchTab, and apps", () => {

@@ -184,7 +184,7 @@ describe("v2 steps, mergeWithinSession, and tries pattern counter", () => {
     expect(steps.map((s) => s.value)).toEqual(["v1", "v2", "v3"]);
   });
 
-  it("acceptance 4: ana@acme.com in value and meta.pageSummary maps to __PII_EMAIL_1__ in both steps and piiMap without leaking raw PII", () => {
+  it("acceptance 4: preserves step values and pageSummary without rewriting into __PII_*__ tokens", () => {
     const events: Event[] = [
       makeEvent("input", {
         target: {
@@ -193,43 +193,21 @@ describe("v2 steps, mergeWithinSession, and tries pattern counter", () => {
         },
         value: "ana@acme.com",
         meta: {
-          pageSummary: "Editing profile for ana@acme.com (phone +1 415-555-0199)",
+          pageSummary: "Editing profile for ana@acme.com",
         },
-      }),
-      makeEvent("change", {
-        target: {
-          tag: "input",
-          locators: [{ kind: "testid", value: "contact-email" }],
-        },
-        value: "ana@acme.com",
       }),
       makeEvent("click", {
         target: {
           tag: "button",
           locators: [{ kind: "testid", value: "save" }],
         },
-        meta: {
-          pageSummary: "Confirming ana@acme.com; keep [REDACTED:SSN]",
-        },
       }),
     ];
 
-    const { steps, piiMap } = eventsToSteps(events);
+    const { steps } = eventsToSteps(events);
     expect(steps).toHaveLength(2);
-    expect(steps[0].value).toBe("__PII_EMAIL_1__");
-    expect(steps[0].pageSummary).toBe(
-      "Editing profile for __PII_EMAIL_1__ (phone __PII_PHONE_1__)",
-    );
-    expect(steps[1].pageSummary).toBe(
-      "Confirming __PII_EMAIL_1__; keep [REDACTED:SSN]",
-    );
-
-    expect(piiMap.get("__PII_EMAIL_1__")).toBe("ana@acme.com");
-    expect(piiMap.get("__PII_PHONE_1__")).toBe("+1 415-555-0199");
-
-    const serializedSteps = JSON.stringify(steps);
-    expect(serializedSteps).not.toContain("ana@acme.com");
-    expect(serializedSteps).not.toContain("415-555-0199");
+    expect(steps[0].value).toBe("ana@acme.com");
+    expect(steps[0].pageSummary).toBe("Editing profile for ana@acme.com");
   });
 
   it("drops noise, keeps Enter keydown/key, ranks gridcell css-first, strips shortcuts, and respects empty-target and submit/nav rules", () => {

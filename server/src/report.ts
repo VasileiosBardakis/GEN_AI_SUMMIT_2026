@@ -8,12 +8,10 @@ import {
   type ScriptLocator,
   type ScriptStep,
 } from "@gen/shared/schema.ts";
-import { normalize } from "./detect/normalize.ts";
 import type { ActionScript } from "./hands/types.ts";
 import type { GeminiClient, GeminiClientOptions } from "./llm/gemini.ts";
 import type { IrisJudgeOptions } from "./llm/iris.ts";
-import { mergeSessions, mergeWithinSession } from "./merge-sessions.ts";
-import { runPipeline } from "./pipeline.ts";
+import { mergeWithinSession } from "./merge-sessions.ts";
 import {
   compileWorkflow,
   detectRepeatedCandidates,
@@ -29,21 +27,13 @@ import {
 } from "./v2/index.ts";
 
 export interface BuildReportOptions {
-  pipeline?: "v1" | "v2";
   dataDir?: string;
   llm?: boolean;
   gemini?: GeminiClient | GeminiClientOptions;
   iris?: IrisJudgeOptions | IrisWorkflowJudge;
-  implement?: (solution: string, opts?: { name?: string }) => Promise<ActionScript>;
   scriptStore?: Map<string, ActionScript>;
   compiledStore?: Map<string, CompiledWorkflow>;
   minRepeats?: number;
-  gapMs?: number;
-}
-
-export function resolvePipeline(pipeline?: "v1" | "v2"): "v1" | "v2" {
-  // v2 is the default since 2026-11-15; set BRAIN_PIPELINE=v1 to use the old pipeline.
-  return pipeline ?? (process.env.BRAIN_PIPELINE === "v1" ? "v1" : "v2");
 }
 
 function toScriptLocators(locators: readonly Locator[] | undefined): ScriptLocator[] | undefined {
@@ -456,24 +446,7 @@ export async function buildReport(
 ): Promise<Report> {
   const options: BuildReportOptions =
     typeof opts === "string" ? { dataDir: opts } : (opts ?? {});
-  const pipeline = resolvePipeline(options.pipeline);
-  if (pipeline === "v2") {
-    const findings = await runV2ReportForEvents(events, options);
-    return ReportSchema.parse({
-      generatedAt: Date.now(),
-      session,
-      findings,
-    });
-  }
-  const steps = normalize(events);
-  const findings = await runPipeline(steps, {
-    llm: options.llm ?? true,
-    events,
-    gemini: options.gemini,
-    implement: options.implement,
-    dataDir: options.dataDir,
-    scriptStore: options.scriptStore,
-  });
+  const findings = await runV2ReportForEvents(events, options);
   return ReportSchema.parse({
     generatedAt: Date.now(),
     session,
@@ -487,48 +460,12 @@ export async function buildCombinedReport(
 ): Promise<Report> {
   const options: BuildReportOptions =
     typeof opts === "string" ? { dataDir: opts } : (opts ?? {});
-  const pipeline = resolvePipeline(options.pipeline);
   const findingIndexById = new Map<string, number>();
   const findings: Finding[] = [];
 
-  if (pipeline === "v2") {
-    const streams = mergeWithinSession(sessionEvents);
-    for (const stream of streams) {
-      const streamFindings = await runV2ReportForEvents(stream.events, options);
-      for (const finding of streamFindings) {
-        const existingIndex = findingIndexById.get(finding.id);
-        if (existingIndex === undefined) {
-          findingIndexById.set(finding.id, findings.length);
-          findings.push(finding);
-        } else if (
-          finding.stats.repetitions > findings[existingIndex].stats.repetitions
-        ) {
-          findings[existingIndex] = finding;
-        }
-      }
-    }
-    return ReportSchema.parse({
-      generatedAt: Date.now(),
-      session: "all",
-      findings,
-    });
-  }
-
-  const mergedStreams = mergeSessions(
-    sessionEvents,
-    options.gapMs !== undefined ? { gapMs: options.gapMs } : undefined,
-  );
-
-  for (const stream of mergedStreams) {
-    const steps = normalize(stream.events);
-    const streamFindings = await runPipeline(steps, {
-      llm: options.llm ?? true,
-      events: stream.events,
-      gemini: options.gemini,
-      implement: options.implement,
-      dataDir: options.dataDir,
-      scriptStore: options.scriptStore,
-    });
+  const streams = mergeWithinSession(sessionEvents);
+  for (const stream of streams) {
+    const streamFindings = await runV2ReportForEvents(stream.events, options);
     for (const finding of streamFindings) {
       const existingIndex = findingIndexById.get(finding.id);
       if (existingIndex === undefined) {
@@ -541,7 +478,6 @@ export async function buildCombinedReport(
       }
     }
   }
-
   return ReportSchema.parse({
     generatedAt: Date.now(),
     session: "all",
