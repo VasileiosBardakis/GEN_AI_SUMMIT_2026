@@ -913,17 +913,7 @@ function urlsMatchForPrecheck(stepUrl: string, openTabUrl: string): boolean {
   }
 }
 
-function stepLocatorsForPrecheck(step: {
-  target?: Locator | Locator[];
-  targets?: Locator[];
-  locators?: Locator[];
-}): Locator[] {
-  const raw: Locator[] = [];
-  if (Array.isArray(step.locators)) raw.push(...step.locators);
-  if (Array.isArray(step.target)) raw.push(...step.target);
-  else if (step.target) raw.push(step.target);
-  if (Array.isArray(step.targets)) raw.push(...step.targets);
-
+function filterPrecheckLocators(raw: Locator[]): Locator[] {
   const out: Locator[] = [];
   const seen = new Set<string>();
   for (const loc of raw) {
@@ -937,17 +927,38 @@ function stepLocatorsForPrecheck(step: {
   return out;
 }
 
+function stepLocatorsForPrecheck(step: {
+  target?: Locator | Locator[];
+  targets?: Locator[];
+  locators?: Locator[];
+}): Locator[] {
+  const raw: Locator[] = [];
+  if (Array.isArray(step.locators)) raw.push(...step.locators);
+  if (Array.isArray(step.target)) raw.push(...step.target);
+  else if (step.target) raw.push(step.target);
+  if (Array.isArray(step.targets)) raw.push(...step.targets);
+  return filterPrecheckLocators(raw);
+}
+
+function withinLocatorsForPrecheck(step: { within?: Locator | Locator[] }): Locator[] {
+  if (!step.within) return [];
+  const raw = Array.isArray(step.within) ? step.within : [step.within];
+  return filterPrecheckLocators(raw);
+}
+
 type PrecheckStepInput = V2Step & {
   index?: number;
   url?: string;
   host?: string;
   locators?: Locator[];
+  within?: Locator | Locator[];
 };
 
 type PrecheckTargetItem = {
   index: number;
   action: string;
   locators: Locator[];
+  within?: Locator[];
   step: PrecheckStepInput;
 };
 
@@ -977,12 +988,20 @@ function collectMatchingPrecheckSteps(
         continue;
       }
       if (step.action === "forEach") {
-        walk(step.steps as PrecheckStepInput[]);
+        const previewItem =
+          Array.isArray(step.items) && step.items.length > 0 ? step.items[0] : undefined;
+        const innerSteps = previewItem
+          ? (step.steps as PrecheckStepInput[]).map((child) =>
+              substitute(child, previewItem as Record<string, unknown>),
+            )
+          : (step.steps as PrecheckStepInput[]);
+        walk(innerSteps);
         continue;
       }
 
       const locators = stepLocatorsForPrecheck(step);
       if (locators.length === 0) continue;
+      const within = withinLocatorsForPrecheck(step);
 
       const effectiveUrl = step.url ?? contextUrl;
       const effectiveHost = step.host ?? contextHost;
@@ -994,7 +1013,13 @@ function collectMatchingPrecheckSteps(
       }
 
       if (matches) {
-        collected.push({ index: currentIdx, action: step.action, locators, step });
+        collected.push({
+          index: currentIdx,
+          action: step.action,
+          locators,
+          ...(within.length > 0 ? { within } : {}),
+          step,
+        });
       }
     }
   };
@@ -1181,10 +1206,16 @@ export async function handleHandsCommand(
       const targets = collectMatchingPrecheckSteps(steps, openTab.url, cmd.url);
       const results: NonNullable<typeof payload.results> = [];
       for (const item of targets) {
+        const precheckMsg = {
+          kind: "EYES_PRECHECK_STEP",
+          locators: item.locators,
+          ...(item.within && item.within.length > 0 ? { within: item.within } : {}),
+          step: item.step,
+        };
         let res = (await Promise.resolve(
           api.tabs.sendMessage(
             openTab.id,
-            { kind: "EYES_PRECHECK_STEP", locators: item.locators, step: item.step },
+            precheckMsg,
             { frameId: 0 },
           ),
         ).catch(() => undefined)) as
@@ -1205,7 +1236,7 @@ export async function handleHandsCommand(
           res = (await Promise.resolve(
             api.tabs.sendMessage(
               openTab.id,
-              { kind: "EYES_PRECHECK_STEP", locators: item.locators, step: item.step },
+              precheckMsg,
               { frameId: 0 },
             ),
           ).catch(() => undefined)) as typeof res;
