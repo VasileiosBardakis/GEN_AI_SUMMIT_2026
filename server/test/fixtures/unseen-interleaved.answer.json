@@ -1,0 +1,55 @@
+{
+  "promptHash": "468f1e01bb59e5642e2c2861447de3c4a62b70674c647caa7abe5a02ceed05b3",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Process Order Resolution",
+    "reason": "Automates the synchronization of order codes from the portal to the ERP system and updates corresponding helpdesk tickets with resolution notes.",
+    "risk": "low",
+    "runMode": "save_only",
+    "params": [
+      {
+        "name": "orderCode",
+        "example": "ORD-8101"
+      },
+      {
+        "name": "resolutionNote",
+        "example": "Issue resolved"
+      }
+    ],
+    "steps": [
+      {
+        "action": "readText",
+        "stepIndex": 1,
+        "bind": "orderCode"
+      },
+      {
+        "action": "switchTab",
+        "host": "erp.local"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 3,
+        "value": "{{orderCode}}"
+      },
+      {
+        "action": "switchTab",
+        "host": "helpdesk.local"
+      },
+      {
+        "action": "click",
+        "stepIndex": 6
+      },
+      {
+        "action": "fill",
+        "stepIndex": 7,
+        "value": "{{resolutionNote}}"
+      },
+      {
+        "action": "submit",
+        "stepIndex": 8
+      }
+    ]
+  }
+}

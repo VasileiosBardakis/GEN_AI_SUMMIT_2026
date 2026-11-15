@@ -1,0 +1,72 @@
+{
+  "promptHash": "5507c2891babffc5cf2a103dcf0215016b1fc5480ce46809ed401516f41be8db",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Process Pending Inventory Transfers",
+    "reason": "Automates the transfer of stock records from the warehouse list to the ERP inventory posting portal.",
+    "risk": "low",
+    "runMode": "run_remaining",
+    "params": [
+      {
+        "name": "sku",
+        "description": "The SKU code extracted from the transfer row."
+      },
+      {
+        "name": "bin",
+        "description": "The destination bin code extracted from the transfer row."
+      }
+    ],
+    "steps": [
+      {
+        "action": "forEach",
+        "itemIds": [
+          "item_1_2",
+          "item_1_3",
+          "item_1_4",
+          "item_1_5",
+          "item_1_6"
+        ],
+        "steps": [
+          {
+            "action": "readText",
+            "stepIndex": 1,
+            "withinId": "list_1",
+            "withinTextParam": "SKU",
+            "bind": "sku"
+          },
+          {
+            "action": "readText",
+            "stepIndex": 2,
+            "withinId": "list_1",
+            "withinTextParam": "Bin",
+            "bind": "bin"
+          },
+          {
+            "action": "switchTab",
+            "host": "erp-stock.local"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 4,
+            "value": "{{sku}}"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 5,
+            "value": "{{bin}}"
+          },
+          {
+            "action": "click",
+            "stepIndex": 6
+          },
+          {
+            "action": "switchTab",
+            "host": "warehouse.local"
+          }
+        ]
+      }
+    ]
+  }
+}

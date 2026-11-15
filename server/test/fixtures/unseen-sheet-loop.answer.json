@@ -1,0 +1,71 @@
+{
+  "promptHash": "e3df4895cbb832b947474f62de1ee77d8664a2d4646bd7a55d2ed25be772d001",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Update Client Lookup Values",
+    "reason": "Automate updating client lookup values from the sheet table to the client detail forms.",
+    "risk": "low",
+    "runMode": "run_remaining",
+    "params": [
+      {
+        "name": "clientName",
+        "description": "The name of the client to process"
+      }
+    ],
+    "steps": [
+      {
+        "action": "forEach",
+        "itemIds": [
+          "item_1_3",
+          "item_1_4"
+        ],
+        "steps": [
+          {
+            "action": "click",
+            "stepIndex": 1,
+            "withinId": "ps_1",
+            "withinTextParam": "clientName"
+          },
+          {
+            "action": "click",
+            "stepIndex": 2,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName"
+          },
+          {
+            "action": "readText",
+            "stepIndex": 3,
+            "withinId": "ps_4",
+            "withinTextParam": "clientName",
+            "bind": "lookupValue"
+          },
+          {
+            "action": "click",
+            "stepIndex": 4
+          },
+          {
+            "action": "fill",
+            "stepIndex": 5,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName",
+            "value": "{{lookupValue}}"
+          },
+          {
+            "action": "click",
+            "stepIndex": 6,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName"
+          },
+          {
+            "action": "click",
+            "stepIndex": 7,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName"
+          }
+        ]
+      }
+    ]
+  }
+}
