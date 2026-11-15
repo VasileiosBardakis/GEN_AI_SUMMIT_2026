@@ -1,0 +1,69 @@
+{
+  "promptHash": "9c38460b3a725db952d7f23a9f19d762cdb88554cee2ef7aca4fbf5dcdc0cbd9",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Process Assay Samples",
+    "reason": "Automation of repetitive LIMS assay data entry from queued notes",
+    "risk": "low",
+    "runMode": "run_remaining",
+    "params": [
+      {
+        "name": "phValue",
+        "example": "7.12"
+      },
+      {
+        "name": "condValue",
+        "example": "410"
+      },
+      {
+        "name": "turbValue",
+        "example": "0.8"
+      }
+    ],
+    "steps": [
+      {
+        "action": "navigate",
+        "url": "http://bench.local:4150/notes"
+      },
+      {
+        "action": "forEach",
+        "items": "list_1",
+        "steps": [
+          {
+            "action": "switchTab",
+            "host": "lims.local"
+          },
+          {
+            "action": "click",
+            "stepIndex": 3
+          },
+          {
+            "action": "fill",
+            "stepIndex": 4,
+            "value": "{{phValue}}"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 5,
+            "value": "{{condValue}}"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 6,
+            "value": "{{turbValue}}"
+          },
+          {
+            "action": "click",
+            "stepIndex": 7
+          },
+          {
+            "action": "switchTab",
+            "host": "bench.local"
+          }
+        ]
+      }
+    ]
+  }
+}

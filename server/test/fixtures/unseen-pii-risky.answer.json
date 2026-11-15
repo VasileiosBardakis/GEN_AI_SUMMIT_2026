@@ -1,0 +1,56 @@
+{
+  "promptHash": "1a95d329afefc73be7665830f4fa41651227b3721c4ad063676bc9717cb4ac4a",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Process Outbound Wires",
+    "reason": "Automates wire transfer entry for approved invoices from AP inbox to Treasury portal",
+    "risk": "high",
+    "runMode": "run_remaining",
+    "params": [
+      {
+        "name": "amount"
+      }
+    ],
+    "steps": [
+      {
+        "action": "navigate",
+        "url": "http://ap-inbox.local:4500/remittance"
+      },
+      {
+        "action": "readText",
+        "stepIndex": 1,
+        "bind": "wireRef"
+      },
+      {
+        "action": "readText",
+        "stepIndex": 2,
+        "bind": "beneficiaryEmail"
+      },
+      {
+        "action": "switchTab",
+        "host": "treasury.local"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 4,
+        "value": "{{wireRef}}"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 5,
+        "value": "{{beneficiaryEmail}}"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 6,
+        "value": "{{amount}}"
+      },
+      {
+        "action": "click",
+        "stepIndex": 7
+      }
+    ]
+  }
+}

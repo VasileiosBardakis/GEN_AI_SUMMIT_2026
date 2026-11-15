@@ -1,0 +1,60 @@
+{
+  "promptHash": "7295fe330f206fa1ed72680773c2ab1df237603593e5b71b9d7cf9c261f5fb57",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Ticket Triage and Routing",
+    "reason": "Automate processing of tickets from triage queue to routing dispatch console.",
+    "risk": "low",
+    "runMode": "save_only",
+    "params": [
+      {
+        "name": "priority"
+      }
+    ],
+    "steps": [
+      {
+        "action": "navigate",
+        "url": "http://intake.local:4400/triage"
+      },
+      {
+        "action": "readText",
+        "stepIndex": 1,
+        "bind": "ticketId"
+      },
+      {
+        "action": "switchTab",
+        "host": "routing.local"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 3,
+        "value": "{{ticketId}}"
+      },
+      {
+        "action": "select",
+        "stepIndex": 4,
+        "value": "{{priority}}"
+      },
+      {
+        "action": "click",
+        "stepIndex": 5
+      },
+      {
+        "action": "fill",
+        "stepIndex": 6,
+        "value": "true"
+      },
+      {
+        "action": "key",
+        "stepIndex": 7,
+        "value": "Enter"
+      },
+      {
+        "action": "submit",
+        "stepIndex": 8
+      }
+    ]
+  }
+}

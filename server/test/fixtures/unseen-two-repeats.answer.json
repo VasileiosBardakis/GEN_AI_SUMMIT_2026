@@ -1,0 +1,60 @@
+{
+  "promptHash": "f54d52df9e15efd6a1c7f85b553dde1d2727f03493b385d1dc207b496c26a569",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Process Pending Bin Transfers",
+    "reason": "Automate data migration of pending inventory transfers from warehouse system to ERP.",
+    "risk": "low",
+    "runMode": "run_remaining",
+    "params": [],
+    "steps": [
+      {
+        "action": "navigate",
+        "url": "http://warehouse.local:4300/transfers"
+      },
+      {
+        "action": "forEach",
+        "stepIndex": 0,
+        "items": "list_1",
+        "steps": [
+          {
+            "action": "readText",
+            "stepIndex": 1,
+            "bind": "SKU"
+          },
+          {
+            "action": "readText",
+            "stepIndex": 2,
+            "bind": "Bin"
+          },
+          {
+            "action": "switchTab",
+            "host": "erp-stock.local"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 4,
+            "value": "{{SKU}}",
+            "bind": "SKU"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 5,
+            "value": "{{Bin}}",
+            "bind": "Bin"
+          },
+          {
+            "action": "click",
+            "stepIndex": 6
+          },
+          {
+            "action": "switchTab",
+            "host": "warehouse.local"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "promptHash": "983a53a02f452f1839fd3e5e55339c16527c8082baf40f44a3c150fadfb5b6f7",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Process Pending Freight Declarations",
+    "reason": "Automates the repetitive task of copying waybill and weight data from the freight manifest to the customs entry form for pending declarations.",
+    "risk": "medium",
+    "runMode": "run_remaining",
+    "params": [],
+    "steps": [
+      {
+        "action": "navigate",
+        "url": "http://freight.local:4100/manifest"
+      },
+      {
+        "action": "forEach",
+        "items": "list_1",
+        "steps": [
+          {
+            "action": "readText",
+            "withinTextParam": "col1",
+            "bind": "waybill"
+          },
+          {
+            "action": "readText",
+            "withinTextParam": "col2",
+            "bind": "weight"
+          },
+          {
+            "action": "switchTab",
+            "host": "customs.local"
+          },
+          {
+            "action": "fill",
+            "targetId": "textbox",
+            "targetTextParam": "Waybill Number",
+            "value": "{{waybill}}"
+          },
+          {
+            "action": "fill",
+            "targetId": "textbox",
+            "targetTextParam": "Declared Weight",
+            "value": "{{weight}}"
+          },
+          {
+            "action": "click",
+            "targetId": "button",
+            "targetTextParam": "File Declaration"
+          },
+          {
+            "action": "switchTab",
+            "host": "freight.local"
+          }
+        ]
+      }
+    ]
+  }
+}

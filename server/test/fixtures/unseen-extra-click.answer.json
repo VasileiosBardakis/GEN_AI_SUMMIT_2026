@@ -1,0 +1,62 @@
+{
+  "promptHash": "e44ed4f4edd095336416a368be4197fd9e420f5f98fb5d814c5d7ed7f54b7338",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Process Open Claims to Ledger",
+    "reason": "Automates recording open claims from the claims queue into the ledger system.",
+    "risk": "medium",
+    "runMode": "run_remaining",
+    "params": [
+      {
+        "name": "claimId"
+      },
+      {
+        "name": "claimantRef"
+      }
+    ],
+    "steps": [
+      {
+        "action": "forEach",
+        "items": "list_1",
+        "steps": [
+          {
+            "action": "switchTab",
+            "host": "claims.local"
+          },
+          {
+            "action": "readText",
+            "stepIndex": 1,
+            "bind": "claimId"
+          },
+          {
+            "action": "readText",
+            "stepIndex": 2,
+            "bind": "claimantRef"
+          },
+          {
+            "action": "switchTab",
+            "host": "ledger.local"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 4,
+            "value": "{{claimId}}",
+            "bind": "claimId"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 5,
+            "value": "{{claimantRef}}",
+            "bind": "claimantRef"
+          },
+          {
+            "action": "click",
+            "stepIndex": 6
+          }
+        ]
+      }
+    ]
+  }
+}

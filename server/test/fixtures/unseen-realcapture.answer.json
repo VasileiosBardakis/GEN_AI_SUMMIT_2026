@@ -1,0 +1,54 @@
+{
+  "promptHash": "ed4471fde7e83df2aaec1dfb86ad4e154c8448f23326ae388c4a54c3fdaec816",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Process Pending Orders",
+    "reason": "Automates the creation of shipments by extracting order details from the pending orders list and inputting them into the dispatch system.",
+    "risk": "medium",
+    "runMode": "save_only",
+    "params": [
+      {
+        "name": "orderId"
+      },
+      {
+        "name": "customerName"
+      }
+    ],
+    "steps": [
+      {
+        "action": "navigate",
+        "url": "http://orders.local:4600/pending"
+      },
+      {
+        "action": "readText",
+        "stepIndex": 1,
+        "value": "{{orderId}} = PO-5101, PO-5102, PO-5103"
+      },
+      {
+        "action": "readText",
+        "stepIndex": 2,
+        "value": "{{customerName}} = Acme Logistics, Beacon Supply, Crest Hardware"
+      },
+      {
+        "action": "switchTab",
+        "host": "dispatch.local"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 4,
+        "value": "{{orderId}}"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 5,
+        "value": "{{customerName}}"
+      },
+      {
+        "action": "click",
+        "stepIndex": 6
+      }
+    ]
+  }
+}

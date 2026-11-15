@@ -1,0 +1,61 @@
+{
+  "promptHash": "198e6ad55d8e15d275327779ec4b78622b78a6c50c224167f47bf9bf929a95a7",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Update Client Lookup Values",
+    "reason": "Automates the lookup and update process for client sheet values.",
+    "risk": "low",
+    "runMode": "run_remaining",
+    "params": [
+      {
+        "name": "clientName"
+      },
+      {
+        "name": "lookupValue"
+      }
+    ],
+    "steps": [
+      {
+        "action": "forEach",
+        "items": "list_2",
+        "steps": [
+          {
+            "action": "click",
+            "targetId": "ps_1",
+            "withinId": "ps_1",
+            "withinTextParam": "clientName"
+          },
+          {
+            "action": "click",
+            "targetId": "ps_2"
+          },
+          {
+            "action": "readText",
+            "targetId": "ps_4",
+            "withinId": "ps_4",
+            "withinTextParam": "lookupValue"
+          },
+          {
+            "action": "click",
+            "targetId": "ps_2"
+          },
+          {
+            "action": "fill",
+            "targetId": "ps_3",
+            "value": "{{lookupValue}}"
+          },
+          {
+            "action": "click",
+            "targetId": "ps_2"
+          },
+          {
+            "action": "click",
+            "targetId": "ps_2"
+          }
+        ]
+      }
+    ]
+  }
+}
