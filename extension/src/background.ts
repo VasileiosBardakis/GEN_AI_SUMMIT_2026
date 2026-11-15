@@ -915,6 +915,7 @@ type PrecheckTargetItem = {
   action: string;
   locators: Locator[];
   within?: Locator[];
+  postInteraction?: boolean;
   step: PrecheckStepInput;
 };
 
@@ -926,6 +927,7 @@ function collectMatchingPrecheckSteps(
   const collected: PrecheckTargetItem[] = [];
   let contextUrl = initialUrl;
   let contextHost = initialUrl ? tryHostFromUrl(initialUrl) : undefined;
+  let sawStateChangeOnContext = false;
   let seqIndex = 0;
 
   const walk = (list: PrecheckStepInput[]): void => {
@@ -936,11 +938,13 @@ function collectMatchingPrecheckSteps(
       if (step.action === "navigate") {
         contextUrl = step.url;
         contextHost = tryHostFromUrl(step.url);
+        sawStateChangeOnContext = false;
         continue;
       }
       if (step.action === "switchTab") {
         contextUrl = step.url;
         contextHost = step.host ?? (step.url ? tryHostFromUrl(step.url) : undefined);
+        sawStateChangeOnContext = false;
         continue;
       }
       if (step.action === "forEach") {
@@ -952,6 +956,9 @@ function collectMatchingPrecheckSteps(
             )
           : (step.steps as PrecheckStepInput[]);
         walk(innerSteps);
+        continue;
+      }
+      if (step.optional) {
         continue;
       }
 
@@ -974,8 +981,12 @@ function collectMatchingPrecheckSteps(
           action: step.action,
           locators,
           ...(within.length > 0 ? { within } : {}),
+          ...(sawStateChangeOnContext && !step.url ? { postInteraction: true } : {}),
           step,
         });
+        if (step.action === "click" || step.action === "pressKey") {
+          sawStateChangeOnContext = true;
+        }
       }
     }
   };
@@ -1237,6 +1248,10 @@ export async function handleHandsCommand(
           ).catch(() => undefined)) as typeof res;
         }
 
+        if (item.postInteraction && (res?.matchCount ?? 0) === 0) {
+          continue;
+        }
+
         results.push({
           index: item.index,
           action: item.action,
@@ -1385,6 +1400,8 @@ export async function runActionScript(
   activeRunControl = runControl;
   let currentTabId = tabId;
   let paused = false;
+  let completed = false;
+  let stepsExecuted = 0;
   try {
     const outcome = await runStepsInternal(tabId, v2Script.steps, bindings, {}, {
       scriptName: v2Script.name,
@@ -1395,13 +1412,18 @@ export async function runActionScript(
     });
     currentTabId = outcome.currentTabId;
     paused = outcome.paused;
+    stepsExecuted = outcome.results.length;
+    completed = !paused && !runControl.aborted && stepsExecuted > 0;
     return outcome.results;
   } finally {
     if (activeRunControl === runControl) {
       activeRunControl = null;
     }
     if (!paused) {
-      await sendWatchMessage(currentTabId, { kind: "EYES_WATCH_STOP" });
+      await sendWatchMessage(currentTabId, {
+        kind: "EYES_WATCH_STOP",
+        ...(completed ? { completed: true, name: v2Script.name, stepsExecuted } : {}),
+      });
     }
   }
 }
@@ -1493,7 +1515,32 @@ type RunContext = {
   pageSummary?: unknown;
   runControl: RunControl;
   isTopLevel: boolean;
+  stepOffset?: number;
+  totalStepsOverride?: number;
+  itemLabel?: string;
 };
+
+function describeWatchStep(step: V2DomStep, itemLabel?: string): string {
+  const prefix = itemLabel ? `${itemLabel} · ` : "";
+  switch (step.action) {
+    case "click":
+      return `${prefix}Clicking target`;
+    case "fill":
+    case "insertText":
+      return `${prefix}Entering value`;
+    case "readText":
+    case "readValue":
+      return `${prefix}Reading value`;
+    case "extractList":
+      return `${prefix}Scanning list`;
+    case "select":
+      return `${prefix}Selecting option`;
+    case "pressKey":
+      return `${prefix}Pressing ${step.key ?? "Enter"}`;
+    default:
+      return `${prefix}Running step`;
+  }
+}
 
 function stepLocatorsForWatch(step: V2DomStep): Locator[] {
   const out: Locator[] = [];
@@ -1687,7 +1734,9 @@ async function runStepsInternal(
 
       if (step.action === "forEach") {
         const items = resolveForEachItems(step.items, bindings, scope, ctx.pageSummary);
-        for (const item of items) {
+        const totalLoopSteps = items.length * step.steps.length;
+        for (let itemIdx = 0; itemIdx < items.length; itemIdx += 1) {
+          const item = items[itemIdx];
           if (ctx.runControl.aborted) {
             throw new Error("Run stopped by user");
           }
@@ -1703,6 +1752,9 @@ async function runStepsInternal(
             {
               ...ctx,
               isTopLevel: false,
+              stepOffset: itemIdx * step.steps.length,
+              totalStepsOverride: totalLoopSteps,
+              itemLabel: `Row ${itemIdx + 1}/${items.length}`,
             },
           );
           results.push(...nested.results);
@@ -1715,11 +1767,22 @@ async function runStepsInternal(
       }
 
       const watchLocators = stepLocatorsForWatch(step);
+      const prevStep = stepIndex > 0 ? steps[stepIndex - 1] : undefined;
+      if (
+        prevStep?.action === "fill" &&
+        step.action === "click" &&
+        watchLocators.some((l) =>
+          /\b(?:tr|li)\b|row|gridcell|treeitem|option/i.test(l.value),
+        )
+      ) {
+        await abortableSleep(750, ctx.runControl);
+      }
       await sendWatchMessage(currentTabId, {
         kind: "EYES_WATCH_STEP",
         name: ctx.scriptName,
-        stepIndex,
-        totalSteps: steps.length,
+        stepIndex: (ctx.stepOffset ?? 0) + stepIndex,
+        totalSteps: ctx.totalStepsOverride ?? steps.length,
+        label: describeWatchStep(step, ctx.itemLabel),
         target: watchLocators[0],
         locators: watchLocators,
       });
@@ -1732,6 +1795,17 @@ async function runStepsInternal(
       if (!result.ok) {
         if (step.optional) continue;
         throw new Error(result.error ?? "Step failed");
+      }
+
+      if (
+        (step.action === "click" || step.action === "pressKey") &&
+        tabsApi?.get &&
+        tabsApi?.onUpdated
+      ) {
+        const postTab = await tabsApi.get(currentTabId).catch(() => undefined);
+        if (postTab?.status === "loading") {
+          await waitForTabLoad(currentTabId);
+        }
       }
 
       if (step.action === "readText" || step.action === "readValue") {
@@ -1786,7 +1860,10 @@ async function executeDomStep(tabId: number, step: V2DomStep): Promise<StepResul
     injections = await invokeExecuteScript();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (!message.includes("Frame with ID 0 is showing error page")) {
+    const isTransientFrameNavError =
+      message.includes("Frame with ID 0 is showing error page") ||
+      /frame was removed|no frame with id|cannot access contents of/i.test(message);
+    if (!isTransientFrameNavError) {
       throw error;
     }
     const tabsApi = api?.tabs ?? (typeof chrome !== "undefined" ? chrome.tabs : undefined);
@@ -1806,11 +1883,13 @@ async function executeDomStep(tabId: number, step: V2DomStep): Promise<StepResul
           `Tab is showing error page${urlInfo}: Frame with ID 0 is showing error page`,
         );
       }
-    } else {
+    } else if (message.includes("Frame with ID 0 is showing error page")) {
       const urlInfo = tab?.url ? ` (${tab.url})` : "";
       throw new Error(
         `Tab is showing error page${urlInfo}: Frame with ID 0 is showing error page`,
       );
+    } else {
+      throw error;
     }
   }
 

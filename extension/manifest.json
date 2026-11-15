@@ -19,7 +19,11 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["dist/replay-demo.webm"],
+      "resources": [
+        "dist/replay-demo.webm",
+        "dist/fonts/Geist-Variable.woff2",
+        "dist/fonts/GeistMono-Variable.woff2"
+      ],
       "matches": ["<all_urls>"]
     }
   ],

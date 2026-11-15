@@ -84,6 +84,7 @@ function uuid(): string {
 const SUGGESTION_HOST_ID = "__eyes_suggestion_host__";
 const WATCH_BAR_HOST_ID = "__eyes_watch_bar__";
 const WATCH_HIGHLIGHT_ID = "__eyes_watch_highlight__";
+const DONE_TOAST_HOST_ID = "__eyes_done_toast__";
 
 let lastSuggestionShownAt = 0;
 let activePopupDismiss: (() => void) | null = null;
@@ -94,8 +95,8 @@ function renderFlows(suggestion: Suggestion): string {
   const loopArc = hasLoop
     ? `
       <svg class="loop-arc" viewBox="0 0 360 16" preserveAspectRatio="none" aria-hidden="true">
-        <path d="M 318 1 C 318 12, 308 13, 294 13 L 52 13 C 40 13, 34 11, 34 3" fill="none" stroke="#B7AEA0" stroke-width="1.1" stroke-dasharray="3 2.5"/>
-        <path d="M 31 6 L 34 2 L 37 6" fill="none" stroke="#9C9385" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M 318 1 C 318 12, 308 13, 294 13 L 52 13 C 40 13, 34 11, 34 3" fill="none" stroke="#52525b" stroke-width="1.1" stroke-dasharray="3 2.5"/>
+        <path d="M 31 6 L 34 2 L 37 6" fill="none" stroke="#71717a" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     `
     : "";
@@ -447,6 +448,45 @@ export function precheckStepLocators(
   return { matchCount: 0, unique: false };
 }
 
+const EYES_FONT_STYLE_ID = "__eyes_fonts_style__";
+const EYES_SANS_FONT = '"Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+const EYES_MONO_FONT = '"Geist Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace';
+
+function ensureExtensionFonts(): void {
+  if (typeof document === "undefined" || document.getElementById(EYES_FONT_STYLE_ID)) return;
+  const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
+    | { runtime?: { getURL?: (path: string) => string } }
+    | undefined;
+  const getURL = chromeGlobal?.runtime?.getURL;
+  if (typeof getURL !== "function") return;
+
+  try {
+    const sansUrl = getURL("dist/fonts/Geist-Variable.woff2");
+    const monoUrl = getURL("dist/fonts/GeistMono-Variable.woff2");
+    const style = document.createElement("style");
+    style.id = EYES_FONT_STYLE_ID;
+    style.textContent = `
+      @font-face {
+        font-family: "Geist";
+        src: url("${sansUrl}") format("woff2");
+        font-weight: 100 900;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "Geist Mono";
+        src: url("${monoUrl}") format("woff2");
+        font-weight: 100 900;
+        font-style: normal;
+        font-display: swap;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  } catch {
+    // Ignore when extension context is invalidated
+  }
+}
+
 export function clearWatchOverlay(): void {
   if (activeHighlightedEl && typeof activeHighlightedEl.removeAttribute === "function") {
     activeHighlightedEl.removeAttribute("data-eyes-highlighted");
@@ -455,6 +495,117 @@ export function clearWatchOverlay(): void {
   if (typeof document === "undefined") return;
   document.getElementById(WATCH_HIGHLIGHT_ID)?.remove();
   document.getElementById(WATCH_BAR_HOST_ID)?.remove();
+}
+
+export function showCompletionToast(options: { name?: string; stepsExecuted?: number } = {}): void {
+  if (typeof document === "undefined" || !document.documentElement) return;
+  if (window.top !== window.self) return;
+  ensureExtensionFonts();
+
+  document.getElementById(DONE_TOAST_HOST_ID)?.remove();
+  const host = document.createElement("div");
+  host.id = DONE_TOAST_HOST_ID;
+  host.setAttribute("data-eyes-ui", "true");
+  host.style.position = "fixed";
+  host.style.top = "12px";
+  host.style.left = "50%";
+  host.style.transform = "translateX(-50%)";
+  host.style.zIndex = "2147483647";
+
+  const title = (options.name || "Workflow automated").trim();
+  const stepsText =
+    typeof options.stepsExecuted === "number" && options.stepsExecuted > 0
+      ? `${options.stepsExecuted} ${options.stepsExecuted === 1 ? "step" : "steps"}`
+      : "Complete";
+
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML = `
+    <style>
+      :host { all: initial; }
+      .toast {
+        position: relative;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 240px;
+        max-width: 380px;
+        padding: 8px 14px 10px;
+        border: 1px solid #27272a;
+        border-radius: 8px;
+        background: #0a0a0b;
+        color: #fafafa;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+        font-family: ${EYES_SANS_FONT};
+        font-size: 12px;
+        cursor: pointer;
+        animation: toast-in 160ms ease-out;
+      }
+      @keyframes toast-in {
+        from { opacity: 0.7; transform: translateY(-4px); }
+        to { opacity: 1; transform: none; }
+      }
+      .check {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: #22c55e;
+      }
+      .copy {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        min-width: 0;
+      }
+      .headline {
+        font-weight: 600;
+        font-size: 12px;
+        color: #fafafa;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sub {
+        flex: 0 0 auto;
+        color: #71717a;
+        font-family: ${EYES_MONO_FONT};
+        font-size: 11px;
+      }
+      .timer {
+        position: absolute;
+        left: 0;
+        bottom: 0;
+        height: 2px;
+        width: 100%;
+        background: #22c55e;
+        transform-origin: left center;
+        animation: toast-drain 4200ms linear forwards;
+      }
+      @keyframes toast-drain {
+        from { transform: scaleX(1); }
+        to { transform: scaleX(0); }
+      }
+    </style>
+    <div class="toast" role="status" aria-live="polite" title="Click to dismiss">
+      <div class="check" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3.5 8.5l3 3 6-6.5"/>
+        </svg>
+      </div>
+      <div class="copy">
+        <span class="headline">${escapeHtml(title)}</span>
+        <span class="sub">${escapeHtml(stepsText)}</span>
+      </div>
+      <div class="timer" aria-hidden="true"></div>
+    </div>
+  `;
+
+  shadow.querySelector(".toast")?.addEventListener("click", () => host.remove());
+  document.documentElement.appendChild(host);
+  setTimeout(() => {
+    if (host.parentElement) host.remove();
+  }, 4300);
 }
 
 export interface WatchOverlayOptions {
@@ -504,95 +655,144 @@ export function showWatchOverlay(options: WatchOverlayOptions = {}): void {
     highlight.setAttribute("data-eyes-ui", "true");
     highlight.style.position = "fixed";
     highlight.style.pointerEvents = "none";
-    highlight.style.border = "2px solid #8a5a2b";
-    highlight.style.background = "rgba(138, 90, 43, 0.12)";
-    highlight.style.borderRadius = "6px";
+    highlight.style.border = "2px solid #f59e0b";
+    highlight.style.background = "rgba(245, 158, 11, 0.10)";
+    highlight.style.borderRadius = "5px";
     highlight.style.boxSizing = "border-box";
+    highlight.style.transition = "top 100ms ease, left 100ms ease, width 100ms ease, height 100ms ease";
     highlight.style.zIndex = "2147483646";
+    let appendHighlight = true;
     if (typeof targetEl.getBoundingClientRect === "function") {
       const rect = targetEl.getBoundingClientRect();
-      highlight.style.top = `${Math.max(0, rect.top - 3)}px`;
-      highlight.style.left = `${Math.max(0, rect.left - 3)}px`;
-      highlight.style.width = `${Math.max(0, rect.width + 6)}px`;
-      highlight.style.height = `${Math.max(0, rect.height + 6)}px`;
+      if (rect.width <= 0 && rect.height <= 0) {
+        appendHighlight = false;
+      } else {
+        highlight.style.top = `${Math.max(0, rect.top - 4)}px`;
+        highlight.style.left = `${Math.max(0, rect.left - 4)}px`;
+        highlight.style.width = `${Math.max(0, rect.width + 8)}px`;
+        highlight.style.height = `${Math.max(0, rect.height + 8)}px`;
+      }
     }
-    document.documentElement.appendChild(highlight);
+    if (appendHighlight) {
+      document.documentElement.appendChild(highlight);
+    }
   }
 
+  document.getElementById(DONE_TOAST_HOST_ID)?.remove();
   document.getElementById(WATCH_BAR_HOST_ID)?.remove();
+  ensureExtensionFonts();
   const barHost = document.createElement("div");
   barHost.id = WATCH_BAR_HOST_ID;
   barHost.setAttribute("data-eyes-ui", "true");
   barHost.style.position = "fixed";
   barHost.style.top = "12px";
-  barHost.style.right = "12px";
+  barHost.style.left = "50%";
+  barHost.style.transform = "translateX(-50%)";
   barHost.style.zIndex = "2147483647";
 
   const title = (options.name || "Eyes").trim();
-  const stepText =
-    typeof options.stepIndex === "number" && typeof options.totalSteps === "number"
-      ? `Step ${options.stepIndex + 1} of ${options.totalSteps}`
-      : options.status || options.label || "Watching run";
+  const hasSteps = typeof options.stepIndex === "number" && typeof options.totalSteps === "number" && options.totalSteps > 0;
+  const pct = hasSteps
+    ? Math.min(100, Math.max(6, Math.round(((options.stepIndex! + 1) / options.totalSteps!) * 100)))
+    : 35;
+  const stepText = hasSteps
+    ? options.label
+      ? `${String(options.stepIndex! + 1).padStart(2, "0")}/${String(options.totalSteps).padStart(2, "0")} · ${options.label}`
+      : `${String(options.stepIndex! + 1).padStart(2, "0")}/${String(options.totalSteps).padStart(2, "0")}`
+    : options.status || options.label || "Running";
   const pauseText =
     options.pauseNotice ||
-    (options.pauseBeforeSubmit ? "Paused before submit — you click the final button." : undefined);
+    (options.pauseBeforeSubmit ? "Paused before submit — click the final button." : undefined);
 
   const shadow = barHost.attachShadow({ mode: "open" });
   shadow.innerHTML = `
     <style>
       :host { all: initial; }
       .bar {
+        position: relative;
+        overflow: hidden;
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 8px 12px;
-        border: 1px solid #ccb08d;
-        border-radius: 10px;
-        background: #faf8f4;
-        color: #1a1917;
-        box-shadow: 0 10px 28px rgba(26, 25, 23, 0.18);
-        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        gap: 14px;
+        min-width: 260px;
+        max-width: 440px;
+        padding: 8px 10px 10px 12px;
+        border: 1px solid #27272a;
+        border-radius: 8px;
+        background: #0a0a0b;
+        color: #fafafa;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+        font-family: ${EYES_SANS_FONT};
         font-size: 12px;
+      }
+      .live-dot {
+        flex: 0 0 auto;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: ${pauseText ? "#f59e0b" : "#22c55e"};
       }
       .info {
         display: grid;
         gap: 2px;
+        min-width: 0;
+        flex: 1 1 auto;
       }
       .title {
         font-weight: 600;
-        color: #1a1917;
+        color: #fafafa;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .sub {
-        color: #57524b;
+        color: #a1a1aa;
+        font-family: ${EYES_MONO_FONT};
         font-size: 11px;
+        font-variant-numeric: tabular-nums;
       }
       .pause {
-        color: #8a5a2b;
+        margin-top: 2px;
+        color: #f59e0b;
         font-size: 11px;
         font-weight: 500;
       }
       .stop {
-        padding: 5px 10px;
-        border: 1px solid #8a2b2b;
-        border-radius: 6px;
-        background: #a33232;
-        color: #fff;
+        flex: 0 0 auto;
+        padding: 4px 10px;
+        border: 1px solid #3f3f46;
+        border-radius: 5px;
+        background: #18181b;
+        color: #fafafa;
         font: inherit;
-        font-size: 11.5px;
+        font-size: 11px;
         font-weight: 600;
         cursor: pointer;
+        transition: background 100ms ease, border-color 100ms ease;
       }
       .stop:hover {
-        background: #8a2626;
+        background: #dc2626;
+        border-color: #dc2626;
+      }
+      .progress {
+        position: absolute;
+        left: 0;
+        bottom: 0;
+        height: 2px;
+        width: ${pct}%;
+        background: ${pauseText ? "#f59e0b" : "#22c55e"};
+        transition: width 140ms ease;
       }
     </style>
     <div class="bar" data-eyes-watch-bar role="status" aria-live="polite">
+      <span class="live-dot" aria-hidden="true"></span>
       <div class="info">
         <span class="title">${escapeHtml(title)}</span>
         <span class="sub">${escapeHtml(stepText)}</span>
         ${pauseText ? `<span class="pause" data-eyes-watch-pause>${escapeHtml(pauseText)}</span>` : ""}
       </div>
       <button type="button" class="stop" data-eyes-watch-stop>Stop</button>
+      <div class="progress" aria-hidden="true"></div>
     </div>
   `;
 
@@ -668,13 +868,13 @@ export function showSuggestion(
   host.setAttribute("data-eyes-ui", "true");
   host.setAttribute("data-eyes-suggestion", suggestion.kind);
   host.style.position = "fixed";
-  host.style.top = "12px";
-  host.style.right = "12px";
-  host.style.bottom = "auto";
+  host.style.top = "auto";
+  host.style.right = "16px";
+  host.style.bottom = "16px";
   host.style.left = "auto";
   host.style.display = "flex";
   host.style.flexDirection = "column";
-  host.style.width = "min(336px, calc(100% - 24px))";
+  host.style.width = "min(352px, calc(100% - 32px))";
   host.style.maxWidth = "calc(100% - 24px)";
   host.style.maxHeight = "calc(100% - 24px)";
   host.style.margin = "0";
@@ -684,11 +884,21 @@ export function showSuggestion(
   host.style.transform = "none";
   host.style.zIndex = "2147483647";
 
+  ensureExtensionFonts();
   const shadow = host.attachShadow({ mode: "open" });
   const previewClass = suggestion.kind === "text" ? "snippet" : "keycap";
   const replayHtml = renderReplay(suggestion);
   const hasReplay = replayHtml.length > 0;
-  const showPreview = suggestion.kind === "text" || !hasReplay;
+  const showPreview =
+    Boolean(suggestion.preview) &&
+    (suggestion.kind === "text" ||
+      (!hasReplay &&
+        (isFlowTip || suggestion.preview.trim() !== suggestion.headline.trim())));
+  const badgeText = isFlowTip
+    ? "Quick tip"
+    : options.isRecall
+      ? "Saved shortcut"
+      : "Pattern detected";
   const eyesMark = `
     <svg class="eyes-mark" data-eyes-brand-mark viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
       <path d="M2 10c2.2-3.6 5-5.4 8-5.4s5.8 1.8 8 5.4c-2.2 3.6-5 5.4-8 5.4S4.2 13.6 2 10Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
@@ -727,19 +937,19 @@ export function showSuggestion(
         all: initial;
         display: flex;
         flex-direction: column;
-        --shell: #f1ede4;
-        --canvas: #faf8f4;
-        --surface-node: #fcfbf8;
-        --surface-graph: #f3efe7;
-        --surface-eyes: #f4e8d8;
-        --ink: #1a1917;
-        --ink-2: #57524b;
-        --ink-muted: #7b756d;
-        --brown: #8a5a2b;
-        --brown-border: #ccb08d;
-        --line: #e2dcd0;
-        --line-strong: #d0c8b9;
-        --ok: #2e6b43;
+        --shell: #0a0a0b;
+        --canvas: #121214;
+        --surface-node: #0a0a0b;
+        --surface-graph: #0a0a0b;
+        --surface-eyes: rgba(245, 158, 11, 0.12);
+        --ink: #fafafa;
+        --ink-2: #a1a1aa;
+        --ink-muted: #71717a;
+        --brown: #f59e0b;
+        --brown-border: rgba(245, 158, 11, 0.36);
+        --line: #222226;
+        --line-strong: #323238;
+        --ok: #22c55e;
       }
       *, *::before, *::after { box-sizing: border-box; }
       .card {
@@ -749,22 +959,22 @@ export function showSuggestion(
         width: 100%;
         max-width: 100%;
         min-height: 0;
-        max-height: calc(100vh - 24px);
-        max-height: calc(100dvh - 24px);
+        max-height: calc(100vh - 32px);
+        max-height: calc(100dvh - 32px);
         overflow: hidden;
-        border: 1px solid rgba(26, 25, 23, 0.14);
-        border-radius: 10px;
+        border: 1px solid var(--line-strong);
+        border-radius: 8px;
         background: var(--canvas);
         color: var(--ink);
-        box-shadow: 0 16px 36px rgba(26, 25, 23, 0.16), 0 2px 6px rgba(26, 25, 23, 0.08);
-        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+        font-family: ${EYES_SANS_FONT};
         font-size: 12px;
-        line-height: 1.38;
+        line-height: 1.4;
         -webkit-font-smoothing: antialiased;
-        animation: eyes-in 190ms cubic-bezier(.2, .8, .2, 1);
+        animation: eyes-in 160ms ease-out;
       }
       @keyframes eyes-in {
-        from { opacity: 0; transform: translateY(-6px) scale(.99); }
+        from { opacity: 0; transform: translateY(6px); }
         to { opacity: 1; transform: none; }
       }
       .top {
@@ -773,14 +983,15 @@ export function showSuggestion(
         align-items: center;
         justify-content: space-between;
         gap: 8px;
-        padding: 7px 10px;
+        padding: 8px 12px;
         border-bottom: 1px solid var(--line);
         background: var(--shell);
       }
       .brand {
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: 7px;
+        min-width: 0;
       }
       .eyes-mark {
         color: var(--ink);
@@ -790,7 +1001,17 @@ export function showSuggestion(
         color: var(--ink);
         font-size: 12px;
         font-weight: 600;
-        letter-spacing: -0.015em;
+        letter-spacing: -0.02em;
+      }
+      .detect-pill {
+        color: var(--ink-muted);
+        font-family: ${EYES_MONO_FONT};
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      .detect-dot {
+        display: none;
       }
       .top-right {
         display: flex;
@@ -812,7 +1033,7 @@ export function showSuggestion(
         cursor: pointer;
       }
       .close:hover {
-        background: rgba(26, 25, 23, 0.06);
+        background: rgba(255, 255, 255, 0.08);
         color: var(--ink);
       }
       .content {
@@ -871,7 +1092,7 @@ export function showSuggestion(
         background: var(--surface-node);
         box-shadow: 0 1px 0 var(--line-strong);
         color: var(--ink);
-        font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+        font-family: ${EYES_MONO_FONT};
         font-size: 11px;
         font-weight: 500;
       }
@@ -933,12 +1154,8 @@ export function showSuggestion(
         font-size: 10px;
       }
       .dag-canvas {
-        padding: 7px 8px;
-        border: 1px solid var(--line);
-        border-radius: 7px;
-        background-color: var(--surface-graph);
-        background-image: radial-gradient(#d8d1c5 0.9px, transparent 0.9px);
-        background-size: 11px 11px;
+        padding-top: 8px;
+        border-top: 1px solid var(--line);
         overflow: hidden;
       }
       .flow-head {
@@ -977,7 +1194,6 @@ export function showSuggestion(
         border: 1px solid var(--line-strong);
         border-radius: 5px;
         background: var(--surface-node);
-        box-shadow: 0 1px 1px rgba(26, 25, 23, 0.04);
       }
       .flow-node.eyes-step {
         border-color: var(--brown-border);
@@ -985,11 +1201,11 @@ export function showSuggestion(
       }
       .flow-node.loop {
         border-style: dashed;
-        background: rgba(250, 248, 244, 0.65);
+        background: rgba(255, 255, 255, 0.02);
       }
       .flow-node.done {
-        border-color: var(--line-strong);
-        background: var(--surface-node);
+        border-color: rgba(52, 211, 153, 0.25);
+        background: rgba(16, 185, 129, 0.08);
       }
       .flow-kind {
         display: flex;
@@ -1025,7 +1241,7 @@ export function showSuggestion(
         align-self: center;
         width: 10px;
         height: 8px;
-        color: #9e968b;
+        color: var(--ink-muted);
       }
       .loop-arc {
         display: block;
@@ -1093,30 +1309,36 @@ export function showSuggestion(
         flex-shrink: 0;
       }
       button {
-        border-radius: 5px;
+        border-radius: 7px;
         font: inherit;
         font-size: 11.5px;
         font-weight: 500;
         cursor: pointer;
+        transition: background 120ms ease, transform 90ms ease, box-shadow 120ms ease;
+      }
+      button:active {
+        transform: translateY(0.5px);
       }
       .primary {
-        padding: 5px 10px;
+        padding: 5px 12px;
         border: 1px solid var(--ink);
+        border-radius: 5px;
         background: var(--ink);
-        color: var(--canvas);
-        box-shadow: 0 1px 2px rgba(26, 25, 23, 0.16);
+        color: var(--shell);
+        font-weight: 600;
       }
       .primary:hover {
-        background: #2f2d29;
+        background: #e4e4e7;
       }
       .ghost {
-        padding: 5px 8px;
+        padding: 5px 9px;
         border: 1px solid var(--line-strong);
-        background: var(--surface-node);
+        border-radius: 5px;
+        background: transparent;
         color: var(--ink-2);
       }
       .ghost:hover {
-        background: var(--shell);
+        background: #18181b;
         color: var(--ink);
       }
       .success {
@@ -1139,6 +1361,7 @@ export function showSuggestion(
         <div class="brand">
           ${eyesMark}
           <span class="product">Eyes</span>
+          <span class="detect-pill"><span class="detect-dot" aria-hidden="true"></span>${escapeHtml(badgeText)}</span>
         </div>
         <div class="top-right">
           <button class="close" type="button" data-eyes-dismiss aria-label="Dismiss suggestion">&times;</button>
@@ -1225,9 +1448,13 @@ export function showSuggestion(
     resolveDecision("approved", collectedParams);
     const content = shadow.querySelector<HTMLElement>("[data-eyes-content]");
     const success = shadow.querySelector<HTMLElement>("[data-eyes-success]");
-    if (content) content.hidden = true;
-    if (success) success.hidden = false;
-    setTimeout(() => host.remove(), 1000);
+    if (!isFlowTip && !isSaveOnly && suggestion.kind !== "text") {
+      host.remove();
+    } else {
+      if (content) content.hidden = true;
+      if (success) success.hidden = false;
+      setTimeout(() => host.remove(), 950);
+    }
   });
   const videoEl = shadow.querySelector("video");
   const loadingEl = shadow.querySelector<HTMLElement>("[data-eyes-replay-loading]");
@@ -1357,6 +1584,8 @@ export function setupEventListeners(): void {
   win.__EYES_FLUSH__ = flushFallbackQueue;
 
   let lastPointerDownTs = Date.now();
+  let lastPointerDownOptionEl: Element | null = null;
+  let pendingOptionMouseUp: { timer: ReturnType<typeof setTimeout> } | null = null;
   let lastFocusInTs = Date.now();
   let lastContextMenuTs = 0;
   let lastShortcutKeyTs = 0;
@@ -1367,20 +1596,32 @@ export function setupEventListeners(): void {
   let lastSelectionTs = 0;
   const typingSessions = new WeakMap<HTMLElement, TypingSession>();
 
-  function emit(
+  function resolvePointerOptionEl(rawTarget: EventTarget | null): Element | null {
+    const el =
+      typeof Element !== "undefined" && rawTarget instanceof Element
+        ? rawTarget
+        : typeof Node !== "undefined" && rawTarget instanceof Node
+          ? rawTarget.parentElement
+          : null;
+    if (!el || typeof el.closest !== "function") return null;
+    return el.closest('[role="option"], [role="menuitem"], [role="treeitem"]');
+  }
+
+  function emitWithExtracted(
     type: EventType,
-    rawTarget: EventTarget | null,
+    extracted: ReturnType<typeof extractTarget>,
     rawValue?: string,
     extraMeta?: EventMeta,
-    clipboard?: Event["clipboard"]
+    clipboard?: Event["clipboard"],
+    snapshotUrl?: string,
+    snapshotWindow?: string
   ): void {
-    if ((window as { __EYES_SUPPRESS_SYNTHETIC__?: boolean }).__EYES_SUPPRESS_SYNTHETIC__) return;
-    if (isEyesUiTarget(rawTarget)) return;
-
-    const { element, target } = extractTarget(rawTarget);
+    const { element, target } = extracted;
     const privacyCheck = inspectElementPrivacy(element);
     const { value, privacy } = sanitizeValue(rawValue, privacyCheck);
-    const { url } = sanitizeUrl(typeof location !== "undefined" ? location.href : undefined);
+    const { url } = sanitizeUrl(
+      snapshotUrl ?? (typeof location !== "undefined" ? location.href : undefined)
+    );
 
     const grid = extractGridContext(element, value);
     const menu =
@@ -1404,7 +1645,7 @@ export function setupEventListeners(): void {
       session: SESSION_ID,
       source: "browser",
       app: typeof location !== "undefined" ? location.hostname || "local-page" : "unknown",
-      window: typeof document !== "undefined" ? document.title : undefined,
+      window: snapshotWindow ?? (typeof document !== "undefined" ? document.title : undefined),
       url,
       type,
       target,
@@ -1415,6 +1656,19 @@ export function setupEventListeners(): void {
 
     const localPii = privacy.redacted ? extractLocalPiiEntries(value) : undefined;
     dispatchEventToBackend(evt, localPii);
+  }
+
+  function emit(
+    type: EventType,
+    rawTarget: EventTarget | null,
+    rawValue?: string,
+    extraMeta?: EventMeta,
+    clipboard?: Event["clipboard"]
+  ): void {
+    if ((window as { __EYES_SUPPRESS_SYNTHETIC__?: boolean }).__EYES_SUPPRESS_SYNTHETIC__) return;
+    if (isEyesUiTarget(rawTarget)) return;
+
+    emitWithExtracted(type, extractTarget(rawTarget), rawValue, extraMeta, clipboard);
   }
 
   function clipboardTrigger(type: "copy" | "cut" | "paste"): EventMeta {
@@ -1438,6 +1692,8 @@ export function setupEventListeners(): void {
     "mousedown",
     (e: MouseEvent) => {
       lastPointerDownTs = Date.now();
+      lastPointerDownOptionEl =
+        e.button === 0 && !isEyesUiTarget(e.target) ? resolvePointerOptionEl(e.target) : null;
       if (getConfig().mode === "semantic") return;
       emit("mousedown", e.target, undefined, {
         button: e.button,
@@ -1462,8 +1718,41 @@ export function setupEventListeners(): void {
       }
       const sel = window.getSelection()?.toString().trim() || "";
       if (sel.length >= 2) {
+        lastPointerDownOptionEl = null;
         emit("select", e.target, sel);
+        return;
       }
+
+      if (
+        e.button === 0 &&
+        !(window as { __EYES_SUPPRESS_SYNTHETIC__?: boolean }).__EYES_SUPPRESS_SYNTHETIC__ &&
+        !isEyesUiTarget(e.target)
+      ) {
+        const upOptionEl = resolvePointerOptionEl(e.target);
+        if (upOptionEl && upOptionEl === lastPointerDownOptionEl) {
+          if (pendingOptionMouseUp) {
+            clearTimeout(pendingOptionMouseUp.timer);
+            pendingOptionMouseUp = null;
+          }
+          const extracted = extractTarget(upOptionEl);
+          const snapUrl = typeof location !== "undefined" ? location.href : undefined;
+          const snapWindow = typeof document !== "undefined" ? document.title : undefined;
+          const snapMeta: EventMeta = {
+            button: e.button,
+            clientX: Math.round(e.clientX),
+            clientY: Math.round(e.clientY),
+            dwellMs: dwellMs < 15000 ? dwellMs : undefined,
+          };
+          const timer = setTimeout(() => {
+            pendingOptionMouseUp = null;
+            if (!upOptionEl.isConnected) {
+              emitWithExtracted("click", extracted, undefined, snapMeta, undefined, snapUrl, snapWindow);
+            }
+          }, 0);
+          pendingOptionMouseUp = { timer };
+        }
+      }
+      lastPointerDownOptionEl = null;
     },
     true
   );
@@ -1491,6 +1780,10 @@ export function setupEventListeners(): void {
   document.addEventListener(
     "click",
     (e: MouseEvent) => {
+      if (pendingOptionMouseUp) {
+        clearTimeout(pendingOptionMouseUp.timer);
+        pendingOptionMouseUp = null;
+      }
       const dwellMs = Math.max(0, Date.now() - lastPointerDownTs);
       const editable = resolveEditableField(e.target);
       const rawClickEl =
@@ -2473,7 +2766,14 @@ function setupHandsTracker(): void {
     }
 
     if (msg.kind === "EYES_WATCH_STOP") {
+      const stopMsg = msg as { completed?: boolean; name?: string; stepsExecuted?: number };
       clearWatchOverlay();
+      if (stopMsg.completed) {
+        showCompletionToast({
+          name: stopMsg.name,
+          stepsExecuted: stopMsg.stepsExecuted,
+        });
+      }
       sendResponse({ ok: true });
       return false;
     }
