@@ -141,7 +141,6 @@ export function renderReplay(suggestion: Suggestion): string {
     getConfig().clickReplayUrl;
   if (!videoUrl) return "";
   return `
-    <div class="replay" data-eyes-replay>
       <div class="replay-stage">
         <video src="${escapeHtml(videoUrl)}" autoplay muted loop playsinline preload="auto"></video>
         <div class="replay-loading" data-eyes-replay-loading>
@@ -149,10 +148,6 @@ export function renderReplay(suggestion: Suggestion): string {
           <span>Loading preview…</span>
         </div>
       </div>
-      <div class="replay-bar">
-        <span class="replay-caption">Automation replay</span>
-      </div>
-    </div>
   `;
 }
 
@@ -1179,14 +1174,6 @@ export function showSuggestion(
       }
       @keyframes eyes-spin {
         to { transform: rotate(360deg); }
-      }
-      .replay-bar {
-        display: flex;
-        align-items: center;
-        padding: 4px 8px;
-        border-top: 1px solid #2b2824;
-        color: #b8b0a4;
-        font-size: 10px;
       }
       .dag-canvas {
         padding-top: 8px;
