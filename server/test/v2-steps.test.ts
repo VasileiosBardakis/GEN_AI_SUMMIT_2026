@@ -55,9 +55,13 @@ describe("v2 steps, mergeWithinSession, and tries pattern counter", () => {
     expect(splitEpisodes(contSteps)).toHaveLength(1);
     const contPatterns = countRepeatedPatterns(contSteps);
     expect(
-      contPatterns.find((p) => p.signature === "copy->tab_switch->paste"),
+      contPatterns.find(
+        (p) =>
+          p.signature ===
+          "copy@portal.local->tab_switch@erp.local->paste@erp.local",
+      ),
     ).toEqual({
-      signature: "copy->tab_switch->paste",
+      signature: "copy@portal.local->tab_switch@erp.local->paste@erp.local",
       actions: ["copy", "tab_switch", "paste"],
       count: 3,
     });
@@ -94,9 +98,13 @@ describe("v2 steps, mergeWithinSession, and tries pattern counter", () => {
     expect(splitEpisodes(spacedSteps)).toHaveLength(3);
     const spacedPatterns = countRepeatedPatterns(spacedSteps);
     expect(
-      spacedPatterns.find((p) => p.signature === "copy->tab_switch->paste"),
+      spacedPatterns.find(
+        (p) =>
+          p.signature ===
+          "copy@portal.local->tab_switch@erp.local->paste@erp.local",
+      ),
     ).toEqual({
-      signature: "copy->tab_switch->paste",
+      signature: "copy@portal.local->tab_switch@erp.local->paste@erp.local",
       actions: ["copy", "tab_switch", "paste"],
       count: 3,
     });

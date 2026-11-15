@@ -11,6 +11,7 @@ import {
   detectRepeatedCandidates,
   eventsToSteps,
   normalizeHost,
+  resolveRepeatCount,
   type CompileInput,
   type CompiledWorkflow,
   type PatternInstance,
@@ -634,14 +635,16 @@ export function createProposer(deps: ProposerDeps): Proposer {
     if (closed || events.length === 0) return;
 
     const { steps, piiMap } = eventsToSteps(events);
-    const candidates = detectRepeatedCandidates(steps, { minRepeats: 2 });
+    const repeatCount = resolveRepeatCount();
+    const precompileAt = Math.max(2, repeatCount - 1);
+    const candidates = detectRepeatedCandidates(steps, { minRepeats: precompileAt });
     if (candidates.length === 0) return;
 
     const proposedSigs = proposedSignaturesBySession.get(sessionId);
     const unproposed = proposedSigs
       ? candidates.filter((c) => !proposedSigs.has(c.signature))
       : candidates;
-    const candidate = pickPrimaryCandidate(unproposed);
+    const candidate = pickPrimaryCandidate(unproposed, repeatCount);
     if (!candidate) return;
 
     emitStageLog({
@@ -655,24 +658,30 @@ export function createProposer(deps: ProposerDeps): Proposer {
     const cacheKey = `${sessionId}::${candidate.signature}`;
     let compiled: CompiledWorkflow | null = null;
 
-    if (candidate.count === 2) {
+    if (candidate.count < repeatCount) {
       const existingRep2 = rep2Cache.get(cacheKey);
       if (existingRep2 && (existingRep2.compiled !== null || steps.length <= existingRep2.stepCount)) {
         if (!existingRep2.compiled || !existingRep2.compiled.offerAt2) {
           return;
         }
-        compiled = existingRep2.compiled;
+        compiled = {
+          ...existingRep2.compiled,
+          stats: {
+            ...existingRep2.compiled.stats,
+            repetitions: candidate.count,
+          },
+        };
       } else {
         try {
           compiled = await deps.compileV2({
             events,
             steps,
             piiMap,
-            repeatCount: 2,
+            repeatCount: candidate.count,
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          safeLog(`[propose:v2] rep-2 precompile failed for ${sessionId}: ${message}`);
+          safeLog(`[propose:v2] rep-${candidate.count} precompile failed for ${sessionId}: ${message}`);
           return;
         }
 
@@ -688,12 +697,12 @@ export function createProposer(deps: ProposerDeps): Proposer {
         });
 
         safeLog(
-          `[propose:v2] rep-2 precompile session=${sessionId} sig=${candidate.signature} offerAt2=${Boolean(compiled?.offerAt2)} name=${compiled?.name ?? "none"}`,
+          `[propose:v2] rep-${candidate.count} precompile session=${sessionId} sig=${candidate.signature} offerAt2=${Boolean(compiled?.offerAt2)} name=${compiled?.name ?? "none"}`,
         );
         emitStageLog({
           stage: "precompile",
           session: sessionId,
-          repeatCount: 2,
+          repeatCount: candidate.count,
           signature: candidate.signature,
           offerAt2: Boolean(compiled?.offerAt2),
           compiled: Boolean(compiled),

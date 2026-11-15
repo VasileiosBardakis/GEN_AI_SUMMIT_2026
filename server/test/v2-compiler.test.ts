@@ -1217,7 +1217,12 @@ describe("Brain v2 compiler and validator", () => {
     }
 
     const candidates = detectRepeatedCandidates(steps);
-    expect(candidates.some((c) => c.signature === "fill->key" && c.count === 3)).toBe(true);
+    expect(
+      candidates.some(
+        (c) =>
+          c.signature === "fill@search.local->key@search.local" && c.count === 3,
+      ),
+    ).toBe(true);
 
     const { client, prompts } = makeMockGemini({
       suggest: true,

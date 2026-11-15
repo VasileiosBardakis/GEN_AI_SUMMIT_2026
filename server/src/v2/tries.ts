@@ -1,4 +1,17 @@
 import type { V2Action, V2Step } from "./steps.ts";
+import { normalizeHost } from "./validate.ts";
+
+export const DEFAULT_REPEAT_COUNT = 3;
+
+export function resolveRepeatCount(): number {
+  const n = Number(process.env.REPEAT_COUNT);
+  return Number.isInteger(n) && n >= 2 ? n : DEFAULT_REPEAT_COUNT;
+}
+
+function stepSignaturePart(step: V2Step): string {
+  const host = step.app ? normalizeHost(step.app) : "";
+  return host ? `${step.action}@${host}` : step.action;
+}
 
 export type Episode = {
   session: string;
@@ -88,6 +101,34 @@ export function splitEpisodes(
   return episodes;
 }
 
+const TRANSITION_ONLY_ACTIONS = new Set<V2Action>(["nav", "tab_switch"]);
+
+function maxSharedPrimaryTargetCount(
+  instances: readonly PatternInstance[],
+): number {
+  if (instances.length === 0) return 0;
+  const stepCount = instances[0].steps.length;
+  let hasAnyTarget = false;
+  let maxShared = 0;
+
+  for (let j = 0; j < stepCount; j++) {
+    const counts = new Map<string, number>();
+    for (const inst of instances) {
+      const primary = inst.steps[j]?.target?.[0];
+      if (!primary) continue;
+      hasAnyTarget = true;
+      const key = `${primary.kind}:${primary.value}`;
+      const next = (counts.get(key) ?? 0) + 1;
+      counts.set(key, next);
+      if (next > maxShared) {
+        maxShared = next;
+      }
+    }
+  }
+
+  return hasAnyTarget ? maxShared : instances.length;
+}
+
 export function detectRepeatedCandidates(
   steps: V2Step[],
   opts?: {
@@ -97,13 +138,21 @@ export function detectRepeatedCandidates(
     idleGapMs?: number;
   },
 ): PatternCandidate[] {
-  const minRepeats = opts?.minRepeats ?? 3;
+  const minRepeats = opts?.minRepeats ?? resolveRepeatCount();
   const minLen = Math.max(1, opts?.minLen ?? 2);
-  const maxLen = Math.max(minLen, opts?.maxLen ?? 8);
+  const maxLen = Math.max(minLen, opts?.maxLen ?? 64);
   const idleGapMs = opts?.idleGapMs ?? 30_000;
 
   const episodes = splitEpisodes(steps, idleGapMs);
   if (episodes.length === 0) return [];
+
+  const sessionTotalSteps = new Map<string, number>();
+  for (const episode of episodes) {
+    sessionTotalSteps.set(
+      episode.session,
+      (sessionTotalSteps.get(episode.session) ?? 0) + episode.steps.length,
+    );
+  }
 
   const candidatesBySession = new Map<
     string,
@@ -118,7 +167,8 @@ export function detectRepeatedCandidates(
     }
 
     const n = episode.steps.length;
-    const upperLen = Math.min(maxLen, n);
+    const totalInSession = sessionTotalSteps.get(episode.session) ?? n;
+    const upperLen = Math.min(maxLen, n, Math.floor(totalInSession / minRepeats));
 
     for (let len = minLen; len <= upperLen; len++) {
       const nextAllowedIdx = new Map<string, number>();
@@ -126,7 +176,7 @@ export function detectRepeatedCandidates(
       for (let i = 0; i <= n - len; i++) {
         const matchedSteps = episode.steps.slice(i, i + len);
         const actions = matchedSteps.map((s) => s.action);
-        const signature = actions.join("->");
+        const signature = matchedSteps.map(stepSignaturePart).join("->");
         const allowedFrom = nextAllowedIdx.get(signature) ?? 0;
         if (i < allowedFrom) continue;
 
@@ -154,8 +204,10 @@ export function detectRepeatedCandidates(
   const bestBySignature = new Map<string, PatternCandidate>();
   for (const sessionCandidates of candidatesBySession.values()) {
     for (const [signature, entry] of sessionCandidates.entries()) {
+      if (entry.actions.every((a) => TRANSITION_ONLY_ACTIONS.has(a))) continue;
       const count = entry.instances.length;
       if (count < minRepeats) continue;
+      if (maxSharedPrimaryTargetCount(entry.instances) < minRepeats) continue;
       const existing = bestBySignature.get(signature);
       if (!existing || count > existing.count) {
         bestBySignature.set(signature, {

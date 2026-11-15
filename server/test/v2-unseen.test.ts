@@ -799,6 +799,139 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
   });
 
+  it("checks index 2 constant diff on rep-4 when REPEAT_COUNT=4 and does not skip instance 2", async () => {
+    const prevRepeatCount = process.env.REPEAT_COUNT;
+    process.env.REPEAT_COUNT = "4";
+    try {
+      let calls = 0;
+      const gemini: GeminiClient = {
+        async generateText() {
+          throw new Error("unexpected generateText");
+        },
+        async generateJson<T>(
+          _prompt: string,
+          schema: Parameters<GeminiClient["generateJson"]>[1],
+        ): Promise<T> {
+          calls += 1;
+          const isFirst = calls === 1;
+          const payload = {
+            suggest: true,
+            offerAt2: false,
+            kind: "workflow",
+            name: isFirst
+              ? "Submit order form"
+              : "Submit order form (parameterized)",
+            reason: "Fills tier and saves",
+            risk: "low",
+            runMode: "save_only",
+            params: isFirst ? [] : [{ name: "tier", example: "Standard" }],
+            steps: [
+              {
+                action: "fill",
+                stepIndex: 0,
+                value: isFirst ? "Standard" : "{{tier}}",
+              },
+              { action: "click", stepIndex: 1 },
+            ],
+          };
+          return schema.safeParse(payload).success
+            ? (payload as T)
+            : (() => {
+                throw new Error("invalid mock");
+              })();
+        },
+      };
+
+      const stageLogs: StageLogEvent[] = [];
+      const { baseUrl } = await startV2Server({ gemini, stageLogs });
+
+      const makePair = (rep: number, tierValue: string): Event[] => [
+        {
+          v: 1,
+          id: `f0000000-0000-4000-8000-0000000000${rep}1`,
+          ts: 1743100000000 + rep * 1000,
+          session: "sess_repeat4_diff",
+          source: "browser",
+          app: "shop.local",
+          url: "http://shop.local/order",
+          type: "input",
+          target: {
+            tag: "input",
+            role: "textbox",
+            label: "Tier",
+            locators: [{ kind: "testid", value: "tier-input" }],
+          },
+          value: tierValue,
+        },
+        {
+          v: 1,
+          id: `f0000000-0000-4000-8000-0000000000${rep}2`,
+          ts: 1743100000500 + rep * 1000,
+          session: "sess_repeat4_diff",
+          source: "browser",
+          app: "shop.local",
+          url: "http://shop.local/order",
+          type: "click",
+          target: {
+            tag: "button",
+            role: "button",
+            label: "Save",
+            locators: [{ kind: "testid", value: "save-btn" }],
+          },
+        },
+      ];
+
+      // Send reps 1..3: instances[0..1] = "Standard", instance[2] = "Express"
+      await fetch(`${baseUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify([
+          ...makePair(1, "Standard"),
+          ...makePair(2, "Standard"),
+          ...makePair(3, "Express"),
+        ]),
+      });
+
+      await vi.waitFor(() => {
+        expect(stageLogs.some((e) => e.stage === "precompile")).toBe(true);
+      });
+      expect(calls).toBe(1);
+
+      // Rep 4 has "Standard" (same as 0/1). Constant diff MUST still inspect instance[2] ("Express") and recompile!
+      await fetch(`${baseUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(makePair(4, "Standard")),
+      });
+
+      const precheckPoll = await pollHandsNext(baseUrl);
+      expect(precheckPoll.cmd?.kind).toBe("precheck");
+      await postHandsResult(baseUrl, {
+        id: precheckPoll.cmd!.id,
+        ok: true,
+        results: [{ index: 0, action: "fill", ok: true, matchCount: 1, unique: true }],
+      });
+
+      const decidePoll = await pollHandsNext(baseUrl);
+      expect(decidePoll.cmd?.kind).toBe("decide");
+      expect(decidePoll.cmd?.name).toBe("Submit order form (parameterized)");
+      expect(calls).toBe(2);
+      expect(stageLogs.some((e) => e.stage === "diff_recompile")).toBe(true);
+
+      await postHandsResult(baseUrl, {
+        id: decidePoll.cmd!.id,
+        ok: true,
+        decision: "dismissed",
+      });
+    } finally {
+      if (prevRepeatCount === undefined) {
+        delete process.env.REPEAT_COUNT;
+      } else {
+        process.env.REPEAT_COUNT = prevRepeatCount;
+      }
+    }
+  });
+
   function makeStaticGemini(payload: unknown): GeminiClient {
     return {
       async generateText() {

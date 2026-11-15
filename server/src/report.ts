@@ -17,11 +17,14 @@ import {
   compileWorkflow,
   detectRepeatedCandidates,
   eventsToSteps,
+  resolveRepeatCount,
   type CompiledLeafStep,
   type CompiledStep,
   type CompiledWorkflow,
   type IrisWorkflowJudge,
   type PatternCandidate,
+  type V2Action,
+  type V2Step,
 } from "./v2/index.ts";
 
 export interface BuildReportOptions {
@@ -236,28 +239,161 @@ export function compiledWorkflowToFinding(workflow: CompiledWorkflow): Finding {
   });
 }
 
+function isExactRepetitionOf(
+  longer: readonly V2Action[],
+  shorter: readonly V2Action[],
+): boolean {
+  if (longer.length <= shorter.length || shorter.length === 0) return false;
+  if (longer.length % shorter.length !== 0) return false;
+  for (let i = 0; i < longer.length; i++) {
+    if (longer[i] !== shorter[i % shorter.length]) return false;
+  }
+  return true;
+}
+
+function primaryTargetKey(step: V2Step | undefined): string | undefined {
+  const loc = step?.target?.[0];
+  if (!loc) return undefined;
+  return `${loc.kind}:${loc.value}`;
+}
+
+function hasAnyPrimaryTarget(cand: PatternCandidate): boolean {
+  return cand.instances.some((inst) =>
+    inst.steps.some((step) => primaryTargetKey(step) !== undefined),
+  );
+}
+
+function hasDistinctRepeatingSubtargets(
+  longer: PatternCandidate,
+  subLen: number,
+): boolean {
+  if (longer.instances.length < 2 || subLen <= 0) return false;
+  if (longer.actions.length % subLen !== 0) return false;
+  const k = longer.actions.length / subLen;
+  if (k < 2) return false;
+  if (!longer.instances.every((inst) => inst.steps.length === longer.actions.length)) {
+    return false;
+  }
+
+  for (let j = 0; j < subLen; j++) {
+    const hasDistinctSubTargets = longer.instances.some((inst) => {
+      const seen = new Set<string>();
+      for (let m = 0; m < k; m++) {
+        const key = primaryTargetKey(inst.steps[m * subLen + j]);
+        if (key !== undefined) seen.add(key);
+      }
+      return seen.size >= 2;
+    });
+    if (!hasDistinctSubTargets) continue;
+
+    for (let m = 0; m < k; m++) {
+      const counts = new Map<string, number>();
+      for (const inst of longer.instances) {
+        const key = primaryTargetKey(inst.steps[m * subLen + j]);
+        if (key === undefined) continue;
+        const next = (counts.get(key) ?? 0) + 1;
+        if (next >= 2) {
+          return true;
+        }
+        counts.set(key, next);
+      }
+    }
+  }
+
+  return false;
+}
+
+function isTrivialRepetitionGrouping(
+  longer: PatternCandidate,
+  shorter: PatternCandidate,
+): boolean {
+  if (!isExactRepetitionOf(longer.actions, shorter.actions)) return false;
+  if (hasDistinctRepeatingSubtargets(longer, shorter.actions.length)) {
+    return false;
+  }
+  if (!hasAnyPrimaryTarget(longer) && !hasAnyPrimaryTarget(shorter)) {
+    return false;
+  }
+  return true;
+}
+
+function candidateCovers(
+  other: PatternCandidate,
+  cand: PatternCandidate,
+): boolean {
+  if (other === cand || other.actions.length <= cand.actions.length) return false;
+
+  const otherSteps = new Set<V2Step>();
+  for (const oi of other.instances) {
+    for (const s of oi.steps) {
+      otherSteps.add(s);
+    }
+  }
+
+  if (otherSteps.size > 0 && cand.instances.every((ci) => ci.steps.length > 0)) {
+    let totalSteps = 0;
+    let coveredSteps = 0;
+    const minPerInstance = Math.max(1, cand.actions.length - 1);
+    for (const ci of cand.instances) {
+      let instCovered = 0;
+      for (const s of ci.steps) {
+        if (otherSteps.has(s)) instCovered += 1;
+      }
+      if (instCovered < minPerInstance) return false;
+      totalSteps += ci.steps.length;
+      coveredSteps += instCovered;
+    }
+    return coveredSteps * 5 >= totalSteps * 4;
+  }
+
+  return cand.instances.every((ci) =>
+    other.instances.some((oi) => ci.startTs >= oi.startTs && ci.endTs <= oi.endTs),
+  );
+}
+
 export function pickPrimaryCandidate(
   candidates: readonly PatternCandidate[],
+  minRepeats = resolveRepeatCount(),
 ): PatternCandidate | undefined {
   if (candidates.length === 0) return undefined;
   const nonSubsumed = candidates.filter((cand) => {
     const subsumed = candidates.some((other) => {
-      if (other === cand || other.actions.length <= cand.actions.length) return false;
-      return cand.instances.every((ci) =>
-        other.instances.some((oi) => ci.startTs >= oi.startTs && ci.endTs <= oi.endTs),
-      );
+      if (!candidateCovers(other, cand)) return false;
+      if (isTrivialRepetitionGrouping(other, cand)) return false;
+      if (
+        candidates.some(
+          (sup) =>
+            sup !== other &&
+            sup.actions.length > other.actions.length &&
+            candidateCovers(sup, other) &&
+            isTrivialRepetitionGrouping(sup, cand),
+        )
+      ) {
+        return false;
+      }
+      return true;
     });
     return !subsumed;
   });
   const pool = nonSubsumed.length > 0 ? nonSubsumed : candidates;
+  const filteredPool = pool.filter(
+    (cand) =>
+      !pool.some(
+        (shorter) =>
+          shorter !== cand &&
+          isTrivialRepetitionGrouping(cand, shorter),
+      ),
+  );
+  const finalPool = filteredPool.length > 0 ? filteredPool : pool;
   const isTrivialClickPair = (c: PatternCandidate) =>
     c.actions.length <= 2 && c.actions.every((a) => a === "click");
-  return [...pool].sort(
+  return [...finalPool].sort(
     (a, b) =>
       (isTrivialClickPair(a) ? 1 : 0) - (isTrivialClickPair(b) ? 1 : 0) ||
-      b.count - a.count ||
+      (b.count >= minRepeats ? 1 : 0) - (a.count >= minRepeats ? 1 : 0) ||
       b.count * b.actions.length - a.count * a.actions.length ||
       b.actions.length - a.actions.length ||
+      b.count - a.count ||
       a.signature.localeCompare(b.signature),
   )[0];
 }
@@ -268,9 +404,9 @@ async function runV2ReportForEvents(
 ): Promise<Finding[]> {
   if (events.length === 0) return [];
   const { steps, piiMap } = eventsToSteps(events);
-  const minRepeats = options.minRepeats ?? 3;
+  const minRepeats = options.minRepeats ?? resolveRepeatCount();
   const candidates = detectRepeatedCandidates(steps, { minRepeats });
-  const top = pickPrimaryCandidate(candidates);
+  const top = pickPrimaryCandidate(candidates, minRepeats);
   if (!top) return [];
 
   if (options.llm === false) {
