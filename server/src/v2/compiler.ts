@@ -289,6 +289,7 @@ type SourceColumnMeta = {
 };
 
 type PromptContext = {
+  allSteps: EnrichedStep[];
   indexedSteps: EnrichedStep[];
   targets: Map<string, PageSummaryTarget>;
   lists: Map<string, PageSummaryList>;
@@ -962,15 +963,14 @@ function extractPageSummaryData(
           typeof src.rowTag === "string" && src.rowTag.trim()
             ? src.rowTag.trim().toLowerCase()
             : "tr";
-        let containerId: string | undefined;
-        if (containerLocs.length > 0) {
-          containerId = addTarget(
-            host,
-            `container ${containerLocs[0].value}`,
-            containerLocs,
-            true,
-          );
-        }
+        const containerId = addTarget(
+          host,
+          containerLocs.length > 0
+            ? `container ${containerLocs[0].value}`
+            : `container ${rowTag}`,
+          containerLocs,
+          true,
+        );
 
         const rawRows = Array.isArray(src.rows) ? src.rows : [];
         const parsedRows: Array<{ fields: Record<string, string> }> = [];
@@ -1396,6 +1396,31 @@ function hasAnyPiiMarker(value: string): boolean {
   );
 }
 
+type LoopLeafContext = {
+  itemKeys?: ReadonlySet<string>;
+  fallbackItemKey?: string;
+  containerId?: string;
+  containerHost?: string;
+  pairedFillValue?: string;
+  readOrdinal?: number;
+  isDuplicateStepIndex?: boolean;
+};
+
+function findUniqueColumnByText(
+  columns: SourceColumnMeta["columns"],
+  rawText: string,
+): SourceColumnMeta["columns"][number] | undefined {
+  const needle = rawText.trim();
+  if (!needle) return undefined;
+  const exact = columns.filter((col) => col.texts.includes(needle));
+  if (exact.length === 1) return exact[0];
+  const prefixMatches = columns.filter((col) =>
+    col.texts.some((t) => t === needle || t.startsWith(`${needle} `)),
+  );
+  if (prefixMatches.length === 1) return prefixMatches[0];
+  return undefined;
+}
+
 function resolveLeafStep(
   raw: ModelLeafStep,
   ctx: PromptContext,
@@ -1403,8 +1428,7 @@ function resolveLeafStep(
   restoreMap: ReadonlyMap<string, string>,
   inLoop: boolean,
   nextHintStep?: ModelLeafStep,
-  loopItemKeys?: ReadonlySet<string>,
-  fallbackItemKey?: string,
+  loopContext?: LoopLeafContext,
 ): { step: CompiledLeafStep; host?: string; url?: string } | null {
   const captured =
     raw.stepIndex !== undefined &&
@@ -1414,7 +1438,40 @@ function resolveLeafStep(
       : undefined;
 
   const psTarget = raw.targetId ? ctx.targets.get(raw.targetId) : undefined;
-  const withinTarget = raw.withinId ? ctx.targets.get(raw.withinId) : undefined;
+  const capturedRealHost = captured
+    ? resolveStepRealHost({
+        app: captured.app,
+        url: captured.url ? restoreText(captured.url, restoreMap) : undefined,
+      })
+    : undefined;
+
+  let effectiveWithinId: string | undefined = raw.withinId;
+  let withinTarget = effectiveWithinId ? ctx.targets.get(effectiveWithinId) : undefined;
+  if (!withinTarget && effectiveWithinId) {
+    const mappedContainerId = ctx.lists.get(effectiveWithinId)?.containerId;
+    if (mappedContainerId) {
+      effectiveWithinId = mappedContainerId;
+      withinTarget = ctx.targets.get(mappedContainerId);
+    }
+  }
+  if (
+    !withinTarget &&
+    inLoop &&
+    (raw.action === "readText" || raw.action === "readValue") &&
+    loopContext?.containerId
+  ) {
+    const hostsCompatible =
+      !capturedRealHost ||
+      !loopContext.containerHost ||
+      capturedRealHost === loopContext.containerHost;
+    if (hostsCompatible) {
+      effectiveWithinId = loopContext.containerId;
+      withinTarget = ctx.targets.get(loopContext.containerId);
+    }
+  }
+
+  const loopItemKeys = loopContext?.itemKeys;
+  const fallbackItemKey = loopContext?.fallbackItemKey;
 
   const normalizeLoopParam = (rawParam: string | undefined): string | undefined => {
     if (!rawParam || !rawParam.trim()) return undefined;
@@ -1429,7 +1486,7 @@ function resolveLeafStep(
   const withinLocators: Locator[] = [];
   if (withinTarget) {
     withinLocators.push(...withinTarget.locators.map((l) => ({ ...l })));
-    const param = normalizeLoopParam(raw.withinTextParam);
+    const param = normalizeLoopParam(raw.withinTextParam) ?? fallbackItemKey;
     if (param) {
       withinLocators.push({ kind: "text", value: `{{${param}}}` });
     }
@@ -1467,26 +1524,40 @@ function resolveLeafStep(
   if (
     (raw.action === "readText" || raw.action === "readValue") &&
     !allowTextTarget &&
-    raw.withinId &&
+    effectiveWithinId &&
     withinTarget
   ) {
-    const srcMeta = ctx.sourceMetaByContainerId.get(raw.withinId);
+    const srcMeta = ctx.sourceMetaByContainerId.get(effectiveWithinId);
     if (srcMeta) {
+      const adjacentCopy =
+        captured?.action === "click" &&
+        raw.stepIndex !== undefined &&
+        raw.stepIndex + 1 < ctx.indexedSteps.length &&
+        ctx.indexedSteps[raw.stepIndex + 1]?.action === "copy"
+          ? ctx.indexedSteps[raw.stepIndex + 1]
+          : undefined;
       const hasInvariantCaptured =
-        captured?.target?.some(
+        !adjacentCopy &&
+        !loopContext?.isDuplicateStepIndex &&
+        (captured?.target?.some(
           (loc) =>
             (stabilityCounts.get(`${captured.action}::${loc.kind}::${loc.value}`) ?? 0) >= 2,
-        ) ?? false;
+        ) ??
+          false);
       const copyFallbackStep =
-        !captured && raw.action === "readText"
+        !captured &&
+        raw.action === "readText" &&
+        (!inLoop || (loopContext?.readOrdinal ?? 0) === 0)
           ? ctx.indexedSteps.find((s) => s.action === "copy" && Boolean(s.value))
           : undefined;
-      const valueSourceStep = captured ?? copyFallbackStep;
+      const valueSourceStep = !loopContext?.isDuplicateStepIndex
+        ? (adjacentCopy ?? captured ?? copyFallbackStep)
+        : undefined;
       const capturedVal = valueSourceStep?.value
         ? restoreText(valueSourceStep.value, restoreMap).trim()
         : "";
       const matchedColByValue = capturedVal
-        ? srcMeta.columns.find((col) => col.texts.includes(capturedVal))
+        ? findUniqueColumnByText(srcMeta.columns, capturedVal)
         : undefined;
       const matchedColByLoc =
         !matchedColByValue && valueSourceStep?.target
@@ -1498,23 +1569,50 @@ function resolveLeafStep(
               ),
             )
           : undefined;
-      const matchedCol = matchedColByValue ?? matchedColByLoc;
+      let matchedCol = matchedColByValue ?? matchedColByLoc;
+    if (!matchedCol && loopContext?.pairedFillValue) {
+        matchedCol = findUniqueColumnByText(srcMeta.columns, loopContext.pairedFillValue);
+      }
+      if (!matchedCol) {
+        const colNameHint = raw.bind?.trim() || "";
+        const colMatch = /^col(\d+)$/i.exec(stripParamBraces(colNameHint));
+        if (colMatch) {
+          const colIdx = Number(colMatch[1]) - 1;
+          if (colIdx >= 0 && colIdx < srcMeta.columns.length) {
+            matchedCol = srcMeta.columns[colIdx];
+          }
+        }
+      }
+      if (
+        !matchedCol &&
+        loopContext?.readOrdinal !== undefined &&
+        loopContext.readOrdinal >= 0 &&
+        loopContext.readOrdinal < srcMeta.columns.length
+      ) {
+        matchedCol = srcMeta.columns[loopContext.readOrdinal];
+      }
+      if (!matchedCol && raw.withinTextParam?.trim()) {
+        const colMatch = /^col(\d+)$/i.exec(stripParamBraces(raw.withinTextParam.trim()));
+        if (colMatch) {
+          const colIdx = Number(colMatch[1]) - 1;
+          if (colIdx >= 0 && colIdx < srcMeta.columns.length) {
+            matchedCol = srcMeta.columns[colIdx];
+          }
+        }
+      }
       if (
         matchedCol &&
         matchedCol.invariantLocators.length > 0 &&
-        (!hasInvariantCaptured || matchedColByValue !== undefined)
+        (!hasInvariantCaptured ||
+          matchedColByValue !== undefined ||
+          loopContext?.isDuplicateStepIndex ||
+          Boolean(adjacentCopy))
       ) {
         dedupedTarget = dedupeLocators(matchedCol.invariantLocators);
       }
     }
   }
 
-  const capturedRealHost = captured
-    ? resolveStepRealHost({
-        app: captured.app,
-        url: captured.url ? restoreText(captured.url, restoreMap) : undefined,
-      })
-    : undefined;
   const psTargetHost =
     psTarget && !isPlaceholderHost(psTarget.host) ? psTarget.host : undefined;
   const withinTargetHost =
@@ -1611,15 +1709,13 @@ function resolveLeafStep(
         rawValCandidate !== captured?.value
           ? stripParamBraces(rawValCandidate)
           : "";
+      const strippedRawBind = raw.bind?.trim() ? stripParamBraces(raw.bind) : "";
       const bindName =
-        raw.bind?.trim() ||
+        strippedRawBind ||
         safeValBind ||
-        (!withinTarget && raw.withinTextParam?.trim()
-          ? stripParamBraces(raw.withinTextParam)
-          : "") ||
-        (!withinTarget && raw.targetTextParam?.trim()
-          ? stripParamBraces(raw.targetTextParam)
-          : "");
+        (raw.withinTextParam?.trim() ? stripParamBraces(raw.withinTextParam) : "") ||
+        (raw.targetTextParam?.trim() ? stripParamBraces(raw.targetTextParam) : "") ||
+        (inLoop ? `read_tmp_${loopContext?.readOrdinal ?? 0}` : "");
       if (dedupedTarget.length === 0 || !bindName) return null;
       return {
         step: {
@@ -1990,6 +2086,25 @@ function resolveLeafStep(
   }
 }
 
+function collectReferencedVars(steps: readonly CompiledStep[]): Set<string> {
+  const vars = new Set<string>();
+  const scanString = (s: string): void => {
+    const re = /\{\{\s*([^}]+?)\s*\}\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(s)) !== null) {
+      if (m[1]) vars.add(m[1].trim());
+    }
+  };
+  for (const s of steps) {
+    if ("value" in s && typeof s.value === "string") scanString(s.value);
+    if ("url" in s && typeof s.url === "string") scanString(s.url);
+    if ("target" in s && s.target) {
+      for (const loc of s.target) scanString(loc.value);
+    }
+  }
+  return vars;
+}
+
 function resolveSteps(
   rawSteps: readonly ModelStep[],
   ctx: PromptContext,
@@ -2000,11 +2115,26 @@ function resolveSteps(
   hosts: string[];
   firstHost?: string;
   firstUrl?: string;
+  reboundParamNames: Set<string>;
 } | null {
   const out: CompiledStep[] = [];
   const hosts: string[] = [];
+  const reboundParamNames = new Set<string>();
   let firstHost: string | undefined;
   let firstUrl: string | undefined;
+
+  const processedDataValues = new Set<string>();
+  for (const s of ctx.allSteps) {
+    if (
+      (s.action === "copy" || s.action === "paste" || s.action === "fill") &&
+      typeof s.value === "string"
+    ) {
+      const restored = restoreText(s.value, restoreMap).trim();
+      if (restored.length >= 3) {
+        processedDataValues.add(restored);
+      }
+    }
+  }
 
   const recordLocation = (host?: string, url?: string) => {
     if (host) {
@@ -2020,6 +2150,8 @@ function resolveSteps(
     const raw = rawSteps[idx];
     if (raw.action === "forEach") {
       let resolvedItems: string | Record<string, string>[] | undefined;
+      let loopContainerId: string | undefined;
+      let loopContainerHost: string | undefined;
 
       const explicitItemIds =
         raw.itemIds && raw.itemIds.length > 0
@@ -2046,12 +2178,21 @@ function resolveSteps(
         }
         if (rows.length > 0) {
           resolvedItems = rows;
+          for (const list of ctx.lists.values()) {
+            if (list.items.some((it) => explicitItemIds.includes(it.id))) {
+              loopContainerId = list.containerId;
+              loopContainerHost = !isPlaceholderHost(list.host) ? list.host : undefined;
+              break;
+            }
+          }
         }
       } else if (raw.items && raw.items.trim()) {
         const key = stripParamBraces(raw.items);
         const list = ctx.lists.get(key);
         if (list && list.items.length > 0) {
           recordLocation(!isPlaceholderHost(list.host) ? list.host : undefined);
+          loopContainerId = list.containerId;
+          loopContainerHost = !isPlaceholderHost(list.host) ? list.host : undefined;
           resolvedItems = list.items.map((item) => {
             const restoredRow: Record<string, string> = {};
             for (const [k, v] of Object.entries(item.fields)) {
@@ -2061,6 +2202,27 @@ function resolveSteps(
           });
         } else if (key) {
           resolvedItems = key;
+        }
+      } else {
+        const fallbackList =
+          (raw.withinId
+            ? ctx.lists.get(raw.withinId) ??
+              Array.from(ctx.lists.values()).find((l) => l.containerId === raw.withinId)
+            : undefined) ??
+          (ctx.lists.size === 1 ? Array.from(ctx.lists.values())[0] : undefined);
+        if (fallbackList && fallbackList.items.length > 0) {
+          recordLocation(!isPlaceholderHost(fallbackList.host) ? fallbackList.host : undefined);
+          loopContainerId = fallbackList.containerId;
+          loopContainerHost = !isPlaceholderHost(fallbackList.host)
+            ? fallbackList.host
+            : undefined;
+          resolvedItems = fallbackList.items.map((item) => {
+            const restoredRow: Record<string, string> = {};
+            for (const [k, v] of Object.entries(item.fields)) {
+              restoredRow[k] = restoreText(v, restoreMap);
+            }
+            return restoredRow;
+          });
         }
       }
 
@@ -2081,23 +2243,117 @@ function resolveSteps(
       let loopItemKeys: ReadonlySet<string> | undefined;
       let fallbackItemKey: string | undefined;
       if (Array.isArray(resolvedItems) && resolvedItems.length > 0) {
-        const keys = Object.keys(resolvedItems[0]);
+        const initialRows = resolvedItems;
+        const keys = Object.keys(initialRows[0]);
         const distinctKeys = keys.filter((k) => {
-          const vals = resolvedItems.map((r) => r[k]);
+          const vals = initialRows.map((r) => r[k]);
+          return vals.every(Boolean) && new Set(vals).size === vals.length;
+        });
+
+        if (initialRows.length > 1 && processedDataValues.size > 0) {
+          const idKeys = distinctKeys.length > 0 ? distinctKeys : keys.slice(0, 1);
+          const remainingRows = initialRows.filter((row) => {
+            return !idKeys.some((k) => {
+              const v = (row[k] ?? "").trim();
+              if (v.length < 3) return false;
+              if (processedDataValues.has(v)) return true;
+              for (const pv of processedDataValues) {
+                if (v.startsWith(`${pv} `)) return true;
+              }
+              return false;
+            });
+          });
+          if (remainingRows.length > 0 && remainingRows.length < initialRows.length) {
+            resolvedItems = remainingRows;
+          }
+        }
+
+        const itemsArr = resolvedItems;
+        const finalDistinctKeys = keys.filter((k) => {
+          const vals = itemsArr.map((r) => r[k]);
           return vals.every(Boolean) && new Set(vals).size === vals.length;
         });
         loopItemKeys = new Set(
-          resolvedItems.length > 1 && distinctKeys.length > 0 ? distinctKeys : keys,
+          resolvedItems.length > 1 && finalDistinctKeys.length > 0 ? finalDistinctKeys : keys,
         );
-        fallbackItemKey = distinctKeys[0] ?? keys[0];
+        fallbackItemKey = finalDistinctKeys[0] ?? keys[0];
       }
 
+      const readStepIndexCounts = new Map<number, number>();
+      const loopFillValues: string[] = [];
+      for (const child of childRawSteps) {
+        if (
+          (child.action === "readText" || child.action === "readValue") &&
+          child.stepIndex !== undefined
+        ) {
+          readStepIndexCounts.set(
+            child.stepIndex,
+            (readStepIndexCounts.get(child.stepIndex) ?? 0) + 1,
+          );
+        }
+        if (
+          (child.action === "fill" || child.action === "select") &&
+          child.stepIndex !== undefined &&
+          child.stepIndex >= 0 &&
+          child.stepIndex < ctx.indexedSteps.length
+        ) {
+          const directStep = ctx.indexedSteps[child.stepIndex];
+          let val = directStep?.value;
+          if (!val && directStep?.action === "click") {
+            for (let offset = 1; offset <= 2; offset += 1) {
+              const nextStep = ctx.indexedSteps[child.stepIndex + offset];
+              if (
+                nextStep &&
+                (nextStep.action === "paste" || nextStep.action === "fill") &&
+                typeof nextStep.value === "string" &&
+                nextStep.value.trim()
+              ) {
+                val = nextStep.value;
+                break;
+              }
+            }
+          }
+          if (typeof val === "string" && val.trim()) {
+            loopFillValues.push(restoreText(val, restoreMap).trim());
+          }
+        }
+      }
+
+      let readOrdinal = 0;
       const nestedSteps: CompiledStep[] = [];
       for (let j = 0; j < childRawSteps.length; j++) {
         const child = childRawSteps[j];
+        const nextRawStep = childRawSteps[j + 1];
+        if (
+          child.action === "click" &&
+          !child.targetId &&
+          child.stepIndex !== undefined &&
+          child.stepIndex >= 0 &&
+          child.stepIndex + 1 < ctx.indexedSteps.length &&
+          ctx.indexedSteps[child.stepIndex]?.action === "click" &&
+          ctx.indexedSteps[child.stepIndex + 1]?.action === "copy" &&
+          (nextRawStep?.action === "readText" || nextRawStep?.action === "readValue") &&
+          !nextRawStep.targetTextParam
+        ) {
+          const clickStep = ctx.indexedSteps[child.stepIndex];
+          const hasInvariantId = clickStep?.target?.some(
+            (loc) =>
+              (loc.kind === "testid" || (loc.kind === "css" && loc.value.startsWith("#"))) &&
+              (stabilityCounts.get(`click::${loc.kind}::${loc.value}`) ?? 0) >= 2,
+          );
+          if (!hasInvariantId) {
+            continue;
+          }
+        }
         const nextChild = childRawSteps
           .slice(j + 1)
           .find((s) => s.action !== "switchTab");
+        const isRead = child.action === "readText" || child.action === "readValue";
+        const currentReadOrd = isRead ? readOrdinal++ : undefined;
+        const isDupIdx =
+          isRead &&
+          child.stepIndex !== undefined &&
+          (readStepIndexCounts.get(child.stepIndex) ?? 0) > 1;
         const resolved = resolveLeafStep(
           child,
           ctx,
@@ -2105,8 +2361,16 @@ function resolveSteps(
           restoreMap,
           true,
           nextChild,
-          loopItemKeys,
-          fallbackItemKey,
+          {
+            itemKeys: loopItemKeys,
+            fallbackItemKey,
+            containerId: loopContainerId,
+            containerHost: loopContainerHost,
+            pairedFillValue:
+              currentReadOrd !== undefined ? loopFillValues[currentReadOrd] : undefined,
+            readOrdinal: currentReadOrd,
+            isDuplicateStepIndex: isDupIdx,
+          },
         );
         if (!resolved) {
           if (child.action === "switchTab") continue;
@@ -2118,6 +2382,50 @@ function resolveSteps(
 
       if (nestedSteps.length === 0) {
         return null;
+      }
+
+      const usedVarsInWrites = collectReferencedVars(nestedSteps);
+      const readSteps = nestedSteps.filter(
+        (s): s is Extract<CompiledLeafStep, { action: "readText" | "readValue" }> =>
+          s.action === "readText" || s.action === "readValue",
+      );
+      const writeSteps = nestedSteps.filter(
+        (s): s is Extract<CompiledLeafStep, { action: "fill" | "insertText" | "select" }> =>
+          (s.action === "fill" || s.action === "insertText" || s.action === "select") &&
+          /^\{\{\s*([^}]+?)\s*\}\}$/.test(s.value.trim()),
+      );
+      if (readSteps.length > 0 && readSteps.length === writeSteps.length) {
+        const claimedBindings = new Set<string>();
+        for (const rs of readSteps) {
+          if (usedVarsInWrites.has(rs.bind) && !loopItemKeys?.has(rs.bind)) {
+            claimedBindings.add(rs.bind);
+          }
+        }
+        for (let rIdx = 0; rIdx < readSteps.length; rIdx++) {
+          const rs = readSteps[rIdx];
+          if (usedVarsInWrites.has(rs.bind) && !loopItemKeys?.has(rs.bind)) {
+            continue;
+          }
+          const ws = writeSteps[rIdx];
+          const wMatch = /^\{\{\s*([^}]+?)\s*\}\}$/.exec(ws.value.trim());
+          if (!wMatch) continue;
+          const wVar = wMatch[1].trim();
+          if (loopItemKeys?.has(wVar)) {
+            let fresh = `read_${wVar}`;
+            let suffix = 1;
+            while (loopItemKeys.has(fresh) || claimedBindings.has(fresh)) {
+              suffix += 1;
+              fresh = `read_${wVar}_${suffix}`;
+            }
+            rs.bind = fresh;
+            ws.value = `{{${fresh}}}`;
+            claimedBindings.add(fresh);
+          } else if (!claimedBindings.has(wVar)) {
+            rs.bind = wVar;
+            claimedBindings.add(wVar);
+            reboundParamNames.add(wVar);
+          }
+        }
       }
 
       out.push({
@@ -2153,7 +2461,7 @@ function resolveSteps(
     out.push(resolved.step);
   }
 
-  return { steps: out, hosts, firstHost, firstUrl };
+  return { steps: out, hosts, firstHost, firstUrl, reboundParamNames };
 }
 
 function countCompiledExecutions(
@@ -2262,6 +2570,7 @@ export async function compileWorkflow(
   const summaryData = extractPageSummaryData(enrichedAll, scrubText);
 
   const ctx: PromptContext = {
+    allSteps: enrichedAll,
     indexedSteps,
     ...summaryData,
     repeatCount,
@@ -2373,7 +2682,7 @@ export async function compileWorkflow(
   );
   const apps = Array.from(appsSet);
 
-  const params: CompiledParam[] = modelOut.params.map((p) => {
+  const rawParams: CompiledParam[] = modelOut.params.map((p) => {
     const restoredDesc =
       p.description !== undefined
         ? restoreText(p.description, restoreMap)
@@ -2400,6 +2709,12 @@ export async function compileWorkflow(
       ...(piiHash ? { piiHash } : {}),
     };
   });
+  const params = rawParams.filter(
+    (p) =>
+      !resolved.reboundParamNames.has(p.name) ||
+      p.example !== undefined ||
+      p.piiHash !== undefined,
+  );
 
   // Backfill missing param examples or piiHash from referenced captured steps, and bind any unmapped __PII_*__ tokens
   const paramByName = new Map<string, CompiledParam>();
@@ -2495,13 +2810,18 @@ export async function compileWorkflow(
 
   const stats = computeStats(rawSteps, steps, repeatCount);
 
+  const hasPopulatedForEach = steps.some(
+    (s) => s.action === "forEach" && Array.isArray(s.items) && s.items.length > 0,
+  );
+  const runMode = hasPopulatedForEach ? "run_remaining" : modelOut.runMode;
+
   const candidate: CompiledWorkflow = {
     kind: modelOut.kind,
     name: sanitizeDisplayText(modelOut.name),
     reason: sanitizeDisplayText(modelOut.reason),
     risk: modelOut.risk,
     offerAt2: modelOut.offerAt2,
-    runMode: modelOut.runMode,
+    runMode,
     pauseBeforeSubmit,
     ...(rawStartUrl ? { startUrl: rawStartUrl } : {}),
     apps,
