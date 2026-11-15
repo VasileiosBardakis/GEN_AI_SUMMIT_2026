@@ -69,6 +69,7 @@ cat traces/<session>.jsonl
 ## Config
 
 `PORT=8787` · `DEV_APP_PORT=5173` · `DEV_APP_URL=http://127.0.0.1:5173/` ·
+`V2_COMPILE_MODEL=gemini-3.1-flash-lite` · `V2_COMPILE_TIMEOUT_MS=5000` ·
 `CHROME_BIN`/`CHROME_PATH` auto-detected.
 
 Extension endpoint is hardcoded to `http://localhost:8787` in

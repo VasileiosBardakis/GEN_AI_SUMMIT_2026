@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Event } from "@gen/shared";
 import { EventsSchema } from "@gen/shared/schema.ts";
 import type { GeminiClient, GeminiSdk } from "../src/llm/gemini.ts";
@@ -1022,6 +1022,139 @@ describe("Brain v2 compiler and validator", () => {
     expect(phWf!.steps.map((s) => s.action)).toEqual(["fill", "click"]);
   });
 
+  it("compiles a 3-repeat form trace with repeated Help click + excursion without navigate or extra click", async () => {
+    const events: Event[] = [];
+    for (let rep = 1; rep <= 3; rep += 1) {
+      const baseTs = rep * 10_000;
+      events.push(
+        {
+          v: 1,
+          id: `hc-${rep}-1`,
+          ts: baseTs + 100,
+          session: "s_help_excursion",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:4173/form",
+          type: "input",
+          target: {
+            tag: "input",
+            label: "Item Name",
+            locators: [{ kind: "testid", value: "item-name" }],
+          },
+          value: "Printer Paper",
+        },
+        {
+          v: 1,
+          id: `hc-${rep}-2`,
+          ts: baseTs + 200,
+          session: "s_help_excursion",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:4173/form",
+          type: "input",
+          target: {
+            tag: "input",
+            label: "Note",
+            locators: [{ kind: "testid", value: "item-note" }],
+          },
+          value: "Re-order",
+        },
+        {
+          v: 1,
+          id: `hc-${rep}-3`,
+          ts: baseTs + 300,
+          session: "s_help_excursion",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:4173/form",
+          type: "click",
+          target: {
+            tag: "a",
+            label: "Help",
+            locators: [
+              { kind: "css", value: 'a[href="/help-missing"]' },
+              { kind: "text", value: "Help" },
+            ],
+          },
+        },
+        {
+          v: 1,
+          id: `hc-${rep}-4`,
+          ts: baseTs + 400,
+          session: "s_help_excursion",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:4173/help-missing",
+          type: "nav",
+        },
+        {
+          v: 1,
+          id: `hc-${rep}-5`,
+          ts: baseTs + 500,
+          session: "s_help_excursion",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:4173/form",
+          type: "nav",
+        },
+        {
+          v: 1,
+          id: `hc-${rep}-6`,
+          ts: baseTs + 600,
+          session: "s_help_excursion",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:4173/form",
+          type: "click",
+          target: {
+            tag: "button",
+            label: "Save Entry",
+            locators: [{ kind: "testid", value: "save-entry-btn" }],
+          },
+        },
+      );
+    }
+
+    const { client, prompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Submit inventory item",
+      reason: "Fills item name and note and saves entry",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "fill", stepIndex: 0, value: "Printer Paper" },
+        { action: "fill", stepIndex: 1, value: "Re-order" },
+        { action: "click", stepIndex: 5 },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events, repeatCount: 3 },
+      {
+        gemini: client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(prompts[0]).toContain("side excursions");
+    expect(prompts[0]).toContain("even if repeated in every repetition");
+    expect(prompts[0]).toContain("Never emit `navigate`");
+
+    expect(wf).not.toBeNull();
+    expect(wf!.steps.some((s) => s.action === "navigate")).toBe(false);
+    expect(JSON.stringify(wf!.steps)).not.toContain("help-missing");
+    expect(JSON.stringify(wf!.steps)).not.toContain("Help");
+    expect(wf!.steps.map((s) => s.action)).toEqual([
+      "switchTab",
+      "fill",
+      "fill",
+      "click",
+    ]);
+  });
+
   it("compiles a 3-rep input + keydown(Enter) search trace, converts to pressKey(Enter), and triggers proposer at rep 3", async () => {
     const searchLocators = [
       { kind: "testid" as const, value: "search-input" },
@@ -1151,5 +1284,264 @@ describe("Brain v2 compiler and validator", () => {
     } finally {
       proposer.close();
     }
+  });
+
+  it("preserves port and path on navigate when model returns bare origin (with or without stepIndex) and keeps deliberate different paths with captured port", async () => {
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "nav-1",
+        ts: 1000,
+        session: "s_nav_port",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "nav",
+      },
+      {
+        v: 1,
+        id: "fill-1",
+        ts: 2000,
+        session: "s_nav_port",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "input",
+        target: {
+          tag: "input",
+          label: "Name",
+          locators: [{ kind: "css", value: "#name" }],
+        },
+        value: "Ada",
+      },
+      {
+        v: 1,
+        id: "click-1",
+        ts: 3000,
+        session: "s_nav_port",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "click",
+        target: {
+          tag: "button",
+          label: "Save",
+          locators: [{ kind: "css", value: "#save" }],
+        },
+      },
+    ];
+
+    // 1) With stepIndex, model returns bare "http://127.0.0.1"
+    const withStepIndex = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            { action: "navigate", stepIndex: 0, url: "http://127.0.0.1" },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withStepIndex).not.toBeNull();
+    expect(withStepIndex!.steps[1]).toEqual({
+      action: "navigate",
+      url: "http://localhost:4173/form.html",
+    });
+
+    // 2) Without stepIndex, model returns bare "http://localhost"
+    const withoutStepIndex = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            { action: "navigate", url: "http://localhost" },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withoutStepIndex).not.toBeNull();
+    expect(withoutStepIndex!.steps[1]).toEqual({
+      action: "navigate",
+      url: "http://localhost:4173/form.html",
+    });
+
+    // 3) Deliberate different path on same host keeps /other + captured port
+    const differentPathPromptCheck = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Open other path and save",
+      reason: "Navigates to /other and saves",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "navigate", url: "http://localhost/other" },
+        { action: "fill", stepIndex: 1, value: "Ada" },
+        { action: "click", stepIndex: 2 },
+      ],
+    });
+    const differentPath = await compileWorkflow(
+      { events },
+      {
+        gemini: differentPathPromptCheck.client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(differentPath).not.toBeNull();
+    expect(differentPath!.steps[1]).toEqual({
+      action: "navigate",
+      url: "http://localhost:4173/other",
+    });
+    expect(differentPathPromptCheck.prompts[0]).toContain("full URL including port and path");
+  });
+});
+
+describe("v2 compiler model and timeout configuration", () => {
+  const validPayload = {
+    suggest: true,
+    offerAt2: false,
+    kind: "workflow" as const,
+    name: "Record claim",
+    reason: "Copies claim fields",
+    risk: "low" as const,
+    runMode: "save_only" as const,
+    params: [],
+    steps: [{ action: "click" as const, stepIndex: 6 }],
+  };
+
+  let prevGeminiModel: string | undefined;
+  let prevV2Model: string | undefined;
+  let prevV2Timeout: string | undefined;
+
+  beforeEach(() => {
+    prevGeminiModel = process.env.GEMINI_MODEL;
+    prevV2Model = process.env.V2_COMPILE_MODEL;
+    prevV2Timeout = process.env.V2_COMPILE_TIMEOUT_MS;
+  });
+
+  afterEach(() => {
+    if (prevGeminiModel === undefined) delete process.env.GEMINI_MODEL;
+    else process.env.GEMINI_MODEL = prevGeminiModel;
+
+    if (prevV2Model === undefined) delete process.env.V2_COMPILE_MODEL;
+    else process.env.V2_COMPILE_MODEL = prevV2Model;
+
+    if (prevV2Timeout === undefined) delete process.env.V2_COMPILE_TIMEOUT_MS;
+    else process.env.V2_COMPILE_TIMEOUT_MS = prevV2Timeout;
+
+    vi.useRealTimers();
+  });
+
+  it("uses gemini-3.1-flash-lite by default even when GEMINI_MODEL is set", async () => {
+    delete process.env.V2_COMPILE_MODEL;
+    process.env.GEMINI_MODEL = "gemini-3-flash-preview";
+
+    const events = await loadFixture("unseen-extra-click.jsonl");
+    const { sdk, generateContent } = makeMockSdk(validPayload);
+
+    const wf = await compileWorkflow(
+      { events },
+      {
+        gemini: { sdk, apiKey: "mock-key" },
+        iris: async () => null,
+      },
+    );
+
+    expect(wf).not.toBeNull();
+    expect(generateContent).toHaveBeenCalledTimes(1);
+    expect(generateContent.mock.calls[0]?.[0]?.model).toBe(
+      "gemini-3.1-flash-lite",
+    );
+  });
+
+  it("overrides default model with V2_COMPILE_MODEL env var", async () => {
+    process.env.V2_COMPILE_MODEL = "gemini-2.5-flash";
+
+    const events = await loadFixture("unseen-extra-click.jsonl");
+    const { sdk, generateContent } = makeMockSdk(validPayload);
+
+    const wf = await compileWorkflow(
+      { events },
+      {
+        gemini: { sdk, apiKey: "mock-key" },
+        iris: async () => null,
+      },
+    );
+
+    expect(wf).not.toBeNull();
+    expect(generateContent).toHaveBeenCalledTimes(1);
+    expect(generateContent.mock.calls[0]?.[0]?.model).toBe("gemini-2.5-flash");
+  });
+
+  it("gives opts.model precedence over V2_COMPILE_MODEL", async () => {
+    process.env.V2_COMPILE_MODEL = "gemini-2.5-flash";
+
+    const events = await loadFixture("unseen-extra-click.jsonl");
+    const { sdk, generateContent } = makeMockSdk(validPayload);
+
+    const wf = await compileWorkflow(
+      { events },
+      {
+        gemini: { sdk, apiKey: "mock-key" },
+        iris: async () => null,
+        model: "gemini-3-flash-preview",
+      },
+    );
+
+    expect(wf).not.toBeNull();
+    expect(generateContent).toHaveBeenCalledTimes(1);
+    expect(generateContent.mock.calls[0]?.[0]?.model).toBe(
+      "gemini-3-flash-preview",
+    );
+  });
+
+  it("overrides default 5000 ms timeout with V2_COMPILE_TIMEOUT_MS", async () => {
+    process.env.V2_COMPILE_TIMEOUT_MS = "35";
+
+    const events = await loadFixture("unseen-extra-click.jsonl");
+    const generateContent = vi.fn<GeminiSdk["models"]["generateContent"]>(
+      async ({ config }) => {
+        expect(config?.abortSignal).toBeInstanceOf(AbortSignal);
+        return await new Promise<never>(() => {});
+      },
+    );
+    const sdk: GeminiSdk = { models: { generateContent } };
+
+    await expect(
+      compileWorkflow(
+        { events },
+        {
+          gemini: { sdk, apiKey: "mock-key" },
+          iris: async () => null,
+        },
+      ),
+    ).rejects.toThrow("Gemini request timed out after 35 ms");
+    expect(generateContent).toHaveBeenCalledTimes(1);
   });
 });
