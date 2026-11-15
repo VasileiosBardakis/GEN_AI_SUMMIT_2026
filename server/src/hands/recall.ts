@@ -1,4 +1,6 @@
 import type { Event } from "@gen/shared";
+import { judgeRecallIris, type IrisJudgeOptions } from "../llm/iris.ts";
+import { buildStartSignature } from "./implementor.ts";
 import type { LibraryEntry } from "./types.ts";
 
 const INTERACTIVE_EVENT_TYPES = new Set<Event["type"]>([
@@ -7,6 +9,9 @@ const INTERACTIVE_EVENT_TYPES = new Set<Event["type"]>([
   "focus",
   "input",
   "select",
+  "copy",
+  "paste",
+  "change",
 ]);
 
 const CLIPBOARD_WINDOW_MS = 120_000;
@@ -62,14 +67,32 @@ function hostMatches(eventHost: string, patternHost: string): boolean {
 
 function urlMatchesPattern(eventUrl: string | undefined, pattern: string): boolean {
   if (!eventUrl) return false;
-  const cleanUrl = normalizeUrlForPattern(eventUrl);
-  const cleanPattern = normalizeUrlForPattern(pattern);
-  if (!cleanUrl || !cleanPattern) return false;
+  const trimmedPattern = pattern.trim().toLowerCase();
+  if (!trimmedPattern) return false;
+
+  let targetToMatch: string;
+  let cleanPattern: string;
+  if (trimmedPattern.startsWith("/")) {
+    try {
+      const withScheme = /^https?:\/\//i.test(eventUrl) ? eventUrl : `https://${eventUrl}`;
+      targetToMatch = new URL(withScheme).pathname.replace(/\/+$/, "").toLowerCase() || "/";
+    } catch {
+      targetToMatch = eventUrl.trim().toLowerCase();
+    }
+    cleanPattern = trimmedPattern.replace(/\/+$/, "") || "/";
+  } else {
+    targetToMatch = normalizeUrlForPattern(eventUrl);
+    cleanPattern = normalizeUrlForPattern(trimmedPattern);
+  }
+  if (!targetToMatch || !cleanPattern) return false;
 
   const escaped = cleanPattern
     .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
     .replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}`).test(cleanUrl) || cleanUrl.includes(cleanPattern.replace(/\*/g, ""));
+  return (
+    new RegExp(`^${escaped}`).test(targetToMatch) ||
+    targetToMatch.includes(cleanPattern.replace(/\*/g, ""))
+  );
 }
 
 function extractImplicitRoles(evt: Event): Set<string> {
@@ -84,14 +107,23 @@ function extractImplicitRoles(evt: Event): Set<string> {
   if (explicitRole === "searchbox" || (explicitRole === "combobox" && tag !== "select")) {
     roles.add("textbox");
   }
-  const nonGridTags = new Set(["input", "textarea", "select", "button", "a", "body", "html", "main", "section", "header", "p", "label"]);
-  const hasGridLocator = Boolean(
-    evt.target?.locators?.some((l) => /grid|cell|waffle|sheet|canvas/i.test(l.value)),
-  );
+  const nonGridTags = new Set([
+    "input",
+    "textarea",
+    "select",
+    "button",
+    "a",
+    "body",
+    "html",
+    "main",
+    "section",
+    "header",
+    "p",
+    "label",
+  ]);
   if (
     !evt.target?.role &&
     (!tag || !nonGridTags.has(tag)) &&
-    (tag === "canvas" || hasGridLocator) &&
     evt.meta &&
     typeof evt.meta === "object" &&
     "grid" in evt.meta &&
@@ -103,26 +135,18 @@ function extractImplicitRoles(evt: Event): Set<string> {
   return roles;
 }
 
-const GENERIC_LABEL_STOPWORDS = new Set([
-  "name",
-  "names",
-  "input",
-  "field",
-  "box",
-  "textbox",
-  "textarea",
-  "button",
-  "text",
-  "value",
-  "form",
-]);
-
 function extractTargetTextCorpus(evt: Event, roles: Set<string>): string[] {
   const parts: string[] = [];
   if (evt.target?.label) parts.push(evt.target.label.toLowerCase());
   if (evt.target?.locators) {
     for (const loc of evt.target.locators) {
-      if (loc.kind === "testid" || loc.kind === "text") {
+      if (
+        loc.kind === "testid" ||
+        loc.kind === "text" ||
+        (loc.kind === "aria" &&
+          !loc.value.startsWith("[") &&
+          !/^[a-z]+\[\s*name\s*=/i.test(loc.value))
+      ) {
         parts.push(loc.value.toLowerCase());
         continue;
       }
@@ -150,7 +174,7 @@ function extractTargetTextCorpus(evt: Event, roles: Set<string>): string[] {
 
 function containsHintPhrase(text: string, rawHint: string): boolean {
   const hint = rawHint.trim().toLowerCase();
-  if (!hint || GENERIC_LABEL_STOPWORDS.has(hint)) return false;
+  if (!hint) return false;
   const escaped = hint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "[\\s_-]+");
   return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i").test(text);
 }
@@ -165,20 +189,32 @@ function locatorsMatch(
   if (ev === hv) return true;
   if (hintLoc.kind !== evtLoc.kind) return false;
   if (hintLoc.kind === "css") {
-    return hv
+    const hintParts = hv
       .split(",")
       .map((s) => s.trim())
-      .some((part) => part.length > 0 && part === ev);
+      .filter(Boolean);
+    const evtParts = ev
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return hintParts.some((hp) => evtParts.includes(hp));
   }
   return false;
 }
+
+type MatchScoreResult = {
+  score: number;
+  borderline: boolean;
+};
+
+const NO_MATCH: MatchScoreResult = { score: 0, borderline: false };
 
 function matchEntryToEvent(
   entry: LibraryEntry,
   evt: Event,
   lastClipboardAt: number | null,
   now: number,
-): number {
+): MatchScoreResult {
   const { eyes } = entry;
   const hasTargetHints =
     eyes.targetHints.roles.length > 0 ||
@@ -187,7 +223,15 @@ function matchEntryToEvent(
   const hasPrefixHints = eyes.textHints.prefixHints.length > 0;
 
   if (!INTERACTIVE_EVENT_TYPES.has(evt.type)) {
-    return 0;
+    return NO_MATCH;
+  }
+
+  const startAction = buildStartSignature(entry.script).action;
+  if (
+    evt.type === "copy" &&
+    (eyes.guards.fieldEmptyOnly || startAction !== "copy")
+  ) {
+    return NO_MATCH;
   }
 
   const normalizedVal = (evt.value ?? "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -200,11 +244,11 @@ function matchEntryToEvent(
       evt.meta?.subType === "blur_commit" ||
       inputType === "insertFromPaste"
     ) {
-      return 0;
+      return NO_MATCH;
     }
   }
 
-  if (eyes.guards.requireClipboard) {
+  if (eyes.guards.requireClipboard && evt.type !== "copy") {
     const hasEventClipboard = Boolean(
       evt.clipboard?.text || evt.clipboard?.textHash || evt.clipboard?.fromApp,
     );
@@ -212,7 +256,7 @@ function matchEntryToEvent(
       !hasEventClipboard &&
       (lastClipboardAt === null || now - lastClipboardAt > CLIPBOARD_WINDOW_MS)
     ) {
-      return 0;
+      return NO_MATCH;
     }
   }
 
@@ -227,7 +271,7 @@ function matchEntryToEvent(
 
   const hasScopeConstraint = eyes.scope.apps.length > 0 || eyes.scope.urlPatterns.length > 0;
   if (hasScopeConstraint && !appMatched && !urlMatched) {
-    return 0;
+    return NO_MATCH;
   }
 
   const pageText = `${evt.window ?? ""} ${evt.url ?? ""}`.toLowerCase();
@@ -235,6 +279,15 @@ function matchEntryToEvent(
     eyes.scope.pageHints.length > 0 &&
     eyes.scope.pageHints.some((hint) => pageText.includes(hint.toLowerCase()));
 
+  // 1. Locator[]-first matching (exact or CSS-list match)
+  const locatorMatched =
+    eyes.targetHints.locators.length > 0 &&
+    Boolean(evt.target?.locators?.length) &&
+    eyes.targetHints.locators.some((hintLoc) =>
+      evt.target!.locators.some((evtLoc) => locatorsMatch(hintLoc, evtLoc)),
+    );
+
+  // 2. Semantic role/label/text matching
   const eventRoles = extractImplicitRoles(evt);
   const roleMatched =
     eyes.targetHints.roles.length > 0 &&
@@ -250,7 +303,7 @@ function matchEntryToEvent(
     (entry.kind === "snippet" && isNonTextControl) ||
     (eyes.targetHints.roles.length > 0 && eventRoles.size > 0 && !roleMatched)
   ) {
-    return 0;
+    return NO_MATCH;
   }
 
   const targetCorpus = extractTargetTextCorpus(evt, eventRoles);
@@ -258,13 +311,6 @@ function matchEntryToEvent(
     eyes.targetHints.labelContains.length > 0 &&
     eyes.targetHints.labelContains.some((tok) =>
       targetCorpus.some((part) => containsHintPhrase(part, tok)),
-    );
-
-  const locatorMatched =
-    eyes.targetHints.locators.length > 0 &&
-    Boolean(evt.target?.locators?.length) &&
-    eyes.targetHints.locators.some((hintLoc) =>
-      evt.target!.locators.some((evtLoc) => locatorsMatch(hintLoc, evtLoc)),
     );
 
   const firstStep = entry.script.steps[0];
@@ -276,10 +322,13 @@ function matchEntryToEvent(
     fullSnippetNorm.length > 0 &&
     (normalizedVal === fullSnippetNorm || normalizedVal.includes(fullSnippetNorm));
 
+  if (alreadyHasSnippet) {
+    return NO_MATCH;
+  }
+
   const prefixMatched =
     evt.type === "input" &&
     hasPrefixHints &&
-    !alreadyHasSnippet &&
     normalizedVal.length >= eyes.textHints.minCharsBeforeMatch &&
     eyes.textHints.prefixHints.some(
       (prefix) => normalizedVal.startsWith(prefix) || prefix.startsWith(normalizedVal),
@@ -290,23 +339,20 @@ function matchEntryToEvent(
       (evt.type === "focus" || evt.type === "click" || evt.type === "dblclick") &&
       normalizedVal.length > 0
     ) {
-      return 0;
+      return NO_MATCH;
+    }
+    if (evt.type === "paste" || evt.type === "change") {
+      return NO_MATCH;
     }
     if (evt.type === "input" && !prefixMatched) {
-      return 0;
-    }
-  }
-
-  if (entry.kind === "snippet" && eyes.targetHints.locators.length > 0 && appMatched) {
-    if (!locatorMatched && !prefixMatched) {
-      return 0;
+      return NO_MATCH;
     }
   }
 
   const hasSpecificTargetHints =
     eyes.targetHints.locators.length > 0 || eyes.targetHints.labelContains.length > 0;
   if (hasSpecificTargetHints && !locatorMatched && !labelMatched && !prefixMatched) {
-    return 0;
+    return NO_MATCH;
   }
 
   const targetOrTextSignals =
@@ -316,7 +362,7 @@ function matchEntryToEvent(
     (prefixMatched ? 1 : 0);
 
   if ((hasTargetHints || hasPrefixHints) && targetOrTextSignals === 0) {
-    return 0;
+    return NO_MATCH;
   }
 
   const totalSignals =
@@ -325,13 +371,20 @@ function matchEntryToEvent(
     (pageHintMatched ? 1 : 0) +
     targetOrTextSignals;
 
-  return totalSignals >= eyes.guards.minSignals ? totalSignals : 0;
+  if (totalSignals < eyes.guards.minSignals) {
+    return NO_MATCH;
+  }
+
+  const score = totalSignals + (locatorMatched ? 2 : 0);
+  const borderline = totalSignals <= 1 || !locatorMatched;
+  return { score, borderline };
 }
 
 export interface LibraryRecallMatch {
   entry: LibraryEntry;
   event: Event;
   score: number;
+  borderline: boolean;
 }
 
 export interface LibraryRecallMatcher {
@@ -341,6 +394,11 @@ export interface LibraryRecallMatcher {
     entries: LibraryEntry[],
     now?: number,
   ): LibraryRecallMatch | null;
+  matchEventsWithIris(
+    events: Event[],
+    entries: LibraryEntry[],
+    opts?: { now?: number; irisOpts?: IrisJudgeOptions },
+  ): Promise<LibraryRecallMatch | null>;
   markTriggered(entryId: string, now?: number): void;
   suppressEntry(entryId: string, durationMs: number, now?: number): void;
   suppressOnTarget(
@@ -424,16 +482,16 @@ export function createLibraryRecallMatcher(): LibraryRecallMatcher {
     let best: LibraryRecallMatch | null = null;
     for (const evt of events) {
       for (const entry of candidates) {
-        const score = matchEntryToEvent(entry, evt, lastClipboardAt, now);
-        if (score === 0) continue;
+        const result = matchEntryToEvent(entry, evt, lastClipboardAt, now);
+        if (result.score === 0) continue;
         if (
           !best ||
-          score > best.score ||
-          (score === best.score &&
+          result.score > best.score ||
+          (result.score === best.score &&
             ((entry.status === "active" && best.entry.status !== "active") ||
               (entry.status === best.entry.status && entry.updatedAt > best.entry.updatedAt)))
         ) {
-          best = { entry, event: evt, score };
+          best = { entry, event: evt, score: result.score, borderline: result.borderline };
         }
       }
     }
@@ -449,9 +507,58 @@ export function createLibraryRecallMatcher(): LibraryRecallMatcher {
     return matchEventsWithEvent(events, entries, now)?.entry ?? null;
   }
 
+  async function matchEventsWithIris(
+    events: Event[],
+    entries: LibraryEntry[],
+    opts?: { now?: number; irisOpts?: IrisJudgeOptions },
+  ): Promise<LibraryRecallMatch | null> {
+    const matched = matchEventsWithEvent(events, entries, opts?.now);
+    if (!matched) return null;
+    if (!matched.borderline) return matched;
+
+    try {
+      const judgment = await judgeRecallIris(
+        {
+          currentEvent: {
+            type: matched.event.type,
+            app: matched.event.app,
+            url: matched.event.url,
+            window: matched.event.window,
+            target: matched.event.target
+              ? {
+                  tag: matched.event.target.tag,
+                  role: matched.event.target.role,
+                  label: matched.event.target.label,
+                  locators: matched.event.target.locators,
+                }
+              : undefined,
+          },
+          candidateEntry: {
+            id: matched.entry.id,
+            name: matched.entry.name,
+            description: matched.entry.description,
+            kind: matched.entry.kind,
+            intent: matched.entry.eyes.intent,
+            targetHints: matched.entry.eyes.targetHints,
+          },
+          score: matched.score,
+          borderline: matched.borderline,
+        },
+        { timeoutMs: 1500, ...opts?.irisOpts },
+      );
+      if (judgment === null) {
+        return matched;
+      }
+      return judgment.match ? matched : null;
+    } catch {
+      return matched;
+    }
+  }
+
   return {
     matchEvents,
     matchEventsWithEvent,
+    matchEventsWithIris,
     markTriggered,
     suppressEntry,
     suppressOnTarget,
