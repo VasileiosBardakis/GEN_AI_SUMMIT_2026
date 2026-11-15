@@ -1,0 +1,57 @@
+{
+  "promptHash": "7084decbf624880cadfb0894ddec388b76fb17b7f1450ec0e1026072f2a0323e",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Automate Wire Payments from Remittance",
+    "reason": "Repeated manual entry of wire details from remittance inbox to treasury portal.",
+    "risk": "high",
+    "runMode": "save_only",
+    "params": [
+      {
+        "name": "wireAmount",
+        "example": "14500.00"
+      }
+    ],
+    "steps": [
+      {
+        "action": "readText",
+        "stepIndex": 1,
+        "value": "WIRE-REF-VAL"
+      },
+      {
+        "action": "readText",
+        "stepIndex": 2,
+        "value": "EMAIL-VAL"
+      },
+      {
+        "action": "switchTab",
+        "host": "treasury.local"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 4,
+        "value": "{{WIRE-REF-VAL}}"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 5,
+        "value": "{{EMAIL-VAL}}"
+      },
+      {
+        "action": "fill",
+        "stepIndex": 6,
+        "value": "{{wireAmount}}"
+      },
+      {
+        "action": "click",
+        "stepIndex": 7
+      },
+      {
+        "action": "switchTab",
+        "host": "ap-inbox.local"
+      }
+    ]
+  }
+}
