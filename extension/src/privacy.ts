@@ -56,6 +56,11 @@ export interface ElementPrivacyCheck {
   reason?: NonNullable<EventMeta["privacy"]>["reason"];
   autofillEligible: boolean;
   autocompleteAttr?: string;
+  maskEmail?: boolean;
+}
+
+export interface SanitizeValueOptions {
+  maskEmail?: boolean;
 }
 
 export function inspectElementPrivacy(el: Element | null): ElementPrivacyCheck {
@@ -118,7 +123,8 @@ export function inspectElementPrivacy(el: Element | null): ElementPrivacyCheck {
 
 export function sanitizeValue(
   rawValue: string | undefined,
-  elCheck?: ElementPrivacyCheck
+  elCheck?: ElementPrivacyCheck,
+  options?: SanitizeValueOptions
 ): { value: string | undefined; privacy: NonNullable<EventMeta["privacy"]> } {
   if (rawValue === undefined || rawValue === null) {
     return { value: undefined, privacy: { redacted: false } };
@@ -169,10 +175,19 @@ export function sanitizeValue(
     return match;
   });
 
-  if (EMAIL_PATTERN.test(scrubbed)) {
-    piiTypes.add("email");
+  const maskEmail = options?.maskEmail ?? elCheck?.maskEmail ?? elCheck !== undefined;
+  if (maskEmail) {
+    scrubbed = scrubbed.replace(EMAIL_PATTERN, (match) => {
+      redacted = true;
+      piiTypes.add("email");
+      return `[REDACTED:EMAIL#${hashValue(match)}]`;
+    });
+  } else {
+    if (EMAIL_PATTERN.test(scrubbed)) {
+      piiTypes.add("email");
+    }
+    EMAIL_PATTERN.lastIndex = 0;
   }
-  EMAIL_PATTERN.lastIndex = 0;
 
   if (PHONE_PATTERN.test(scrubbed) && scrubbed.replace(/\D/g, "").length >= 10) {
     piiTypes.add("phone");
