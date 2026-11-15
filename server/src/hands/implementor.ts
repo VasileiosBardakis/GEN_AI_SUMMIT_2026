@@ -12,6 +12,7 @@ import {
   LibraryEntrySchema,
   parseActionScript,
   parseImplementedLibraryDraft,
+  toLocatorList,
   type ActionScript,
   type EyesDetectionSpec,
   type ImplementedLibraryDraft,
@@ -365,10 +366,12 @@ function collectStepSignals(steps: Step[]): {
   const visit = (list: Step[]): void => {
     for (const step of list) {
       if ("target" in step && step.target) {
-        if (step.action !== "waitFor") {
-          locators.push(step.target);
+        for (const loc of toLocatorList(step.target)) {
+          if (step.action !== "waitFor") {
+            locators.push(loc);
+          }
+          labelHints.push(...extractLabelsFromLocator(loc));
         }
-        labelHints.push(...extractLabelsFromLocator(step.target));
       }
       switch (step.action) {
         case "fill":

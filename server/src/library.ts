@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Workflow } from "@gen/shared";
-import type { ActionScript } from "./hands/types.ts";
+import { toLocatorList, type ActionScript } from "./hands/types.ts";
 
 export type LibraryConfig = {
   matchMaxDistance: number;
@@ -164,7 +164,7 @@ function signatureFromStoredEntry(raw: unknown): WorkflowSignature | null {
     if (s.action === "forEach") {
       for (const nested of s.steps) {
         const mapped = nested.action === "insertText" ? "fill" : nested.action === "navigate" ? "nav" : nested.action;
-        const kind = "target" in nested && nested.target ? nested.target.kind : "none";
+        const kind = "target" in nested ? (toLocatorList(nested.target)[0]?.kind ?? "none") : "none";
         steps.push(`${mapped}:${kind}`);
       }
       continue;
@@ -177,7 +177,7 @@ function signatureFromStoredEntry(raw: unknown): WorkflowSignature | null {
           : s.action === "navigate"
             ? "nav"
             : s.action;
-    const kind = "target" in s && s.target ? s.target.kind : "none";
+    const kind = "target" in s ? (toLocatorList(s.target)[0]?.kind ?? "none") : "none";
     steps.push(`${mapped}:${kind}`);
   }
   return { host, steps };
