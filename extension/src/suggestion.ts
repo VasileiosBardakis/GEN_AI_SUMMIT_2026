@@ -115,6 +115,19 @@ function collapsePreview(value: string, max = 64): string {
   return collapsed.length > max ? `${collapsed.slice(0, max)}...` : collapsed;
 }
 
+const SHORT_TEXT_EXACT_LIMIT = 24;
+
+export function matchesTextCluster(
+  repNorm: string,
+  norm: string,
+  similarityThreshold: number
+): boolean {
+  if (repNorm.length < SHORT_TEXT_EXACT_LIMIT || norm.length < SHORT_TEXT_EXACT_LIMIT) {
+    return repNorm === norm;
+  }
+  return trigramJaccard(repNorm, norm) >= similarityThreshold;
+}
+
 export function createSuggestionEngine(options: SuggestionOptions = {}): SuggestionEngine {
   const minTextLength = options.minTextLength ?? 20;
   const similarityThreshold = options.similarityThreshold ?? 0.8;
@@ -151,7 +164,7 @@ export function createSuggestionEngine(options: SuggestionOptions = {}): Suggest
     let cluster = textClusters.find(
       (candidate) =>
         candidate.scopeKey === scopeKey &&
-        trigramJaccard(candidate.repNorm, norm) >= similarityThreshold
+        matchesTextCluster(candidate.repNorm, norm, similarityThreshold)
     );
     if (!cluster) {
       cluster = { scopeKey, repRaw: raw, repNorm: norm, members: [], notified: false };

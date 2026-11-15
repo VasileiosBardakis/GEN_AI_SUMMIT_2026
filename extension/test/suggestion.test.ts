@@ -141,6 +141,42 @@ describe("createSuggestionEngine", () => {
     expect(suggestion.flows.proposed.map((n) => n.kind)).toEqual(["ai", "done"]);
   });
 
+  it("does not cluster distinct short IDs into a text suggestion", () => {
+    const engine = createSuggestionEngine({ minTextLength: 6 });
+
+    expect(engine.recordText("INV-2026-001", "127.0.0.1::invoice_id")).toBeNull();
+    expect(engine.recordText("INV-2026-002", "127.0.0.1::invoice_id")).toBeNull();
+    expect(engine.recordText("INV-2026-003", "127.0.0.1::invoice_id")).toBeNull();
+
+    expect(engine.recordText("CLM-701", "127.0.0.1::claim_id")).toBeNull();
+    expect(engine.recordText("CLM-702", "127.0.0.1::claim_id")).toBeNull();
+    expect(engine.recordText("CLM-703", "127.0.0.1::claim_id")).toBeNull();
+  });
+
+  it("still emits a text suggestion when the exact same short text is repeated three times", () => {
+    const invoiceEngine = createSuggestionEngine({ minTextLength: 6 });
+    expect(invoiceEngine.recordText("INV-2026-001", "127.0.0.1::invoice_id")).toBeNull();
+    expect(invoiceEngine.recordText("INV-2026-001", "127.0.0.1::invoice_id")).toBeNull();
+    const invoiceSuggestion = invoiceEngine.recordText(
+      "INV-2026-001",
+      "127.0.0.1::invoice_id"
+    );
+    expect(invoiceSuggestion).not.toBeNull();
+    expect(invoiceSuggestion?.kind).toBe("text");
+    expect(invoiceSuggestion?.count).toBe(3);
+
+    const companyEngine = createSuggestionEngine({ minTextLength: 6 });
+    expect(companyEngine.recordText("Acme Logistics", "127.0.0.1::company_name")).toBeNull();
+    expect(companyEngine.recordText("Acme Logistics", "127.0.0.1::company_name")).toBeNull();
+    const companySuggestion = companyEngine.recordText(
+      "Acme Logistics",
+      "127.0.0.1::company_name"
+    );
+    expect(companySuggestion).not.toBeNull();
+    expect(companySuggestion?.kind).toBe("text");
+    expect(companySuggestion?.count).toBe(3);
+  });
+
   it("persists and restores text clusters across engine instances (page reloads)", () => {
     let savedClusters: import("../src/suggestion.ts").TextCluster[] = [];
     const engine1 = createSuggestionEngine({
