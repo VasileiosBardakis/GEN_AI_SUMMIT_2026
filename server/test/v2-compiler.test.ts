@@ -1102,6 +1102,141 @@ describe("Brain v2 compiler and validator", () => {
       proposer.close();
     }
   });
+
+  it("preserves port and path on navigate when model returns bare origin (with or without stepIndex) and keeps deliberate different paths with captured port", async () => {
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "nav-1",
+        ts: 1000,
+        session: "s_nav_port",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "nav",
+      },
+      {
+        v: 1,
+        id: "fill-1",
+        ts: 2000,
+        session: "s_nav_port",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "input",
+        target: {
+          tag: "input",
+          label: "Name",
+          locators: [{ kind: "css", value: "#name" }],
+        },
+        value: "Ada",
+      },
+      {
+        v: 1,
+        id: "click-1",
+        ts: 3000,
+        session: "s_nav_port",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/form.html",
+        type: "click",
+        target: {
+          tag: "button",
+          label: "Save",
+          locators: [{ kind: "css", value: "#save" }],
+        },
+      },
+    ];
+
+    // 1) With stepIndex, model returns bare "http://127.0.0.1"
+    const withStepIndex = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            { action: "navigate", stepIndex: 0, url: "http://127.0.0.1" },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withStepIndex).not.toBeNull();
+    expect(withStepIndex!.steps[1]).toEqual({
+      action: "navigate",
+      url: "http://localhost:4173/form.html",
+    });
+
+    // 2) Without stepIndex, model returns bare "http://localhost"
+    const withoutStepIndex = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            { action: "navigate", url: "http://localhost" },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withoutStepIndex).not.toBeNull();
+    expect(withoutStepIndex!.steps[1]).toEqual({
+      action: "navigate",
+      url: "http://localhost:4173/form.html",
+    });
+
+    // 3) Deliberate different path on same host keeps /other + captured port
+    const differentPathPromptCheck = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Open other path and save",
+      reason: "Navigates to /other and saves",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "navigate", url: "http://localhost/other" },
+        { action: "fill", stepIndex: 1, value: "Ada" },
+        { action: "click", stepIndex: 2 },
+      ],
+    });
+    const differentPath = await compileWorkflow(
+      { events },
+      {
+        gemini: differentPathPromptCheck.client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(differentPath).not.toBeNull();
+    expect(differentPath!.steps[1]).toEqual({
+      action: "navigate",
+      url: "http://localhost:4173/other",
+    });
+    expect(differentPathPromptCheck.prompts[0]).toContain("full URL including port and path");
+  });
 });
 
 describe("v2 compiler model and timeout configuration", () => {
