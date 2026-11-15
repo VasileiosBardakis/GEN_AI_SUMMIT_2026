@@ -775,6 +775,18 @@ export function buildGroundedEyesSpec(input: {
   });
 }
 
+export function formatStartSignature(sig: StartSignature): string {
+  const host = sig.host ?? "*";
+  const urlPattern = sig.urlPattern ?? "/*";
+  const firstLoc = sig.locators[0];
+  const targetPart = firstLoc
+    ? `${firstLoc.kind}:${firstLoc.value}`
+    : sig.roles[0]
+      ? `${sig.roles[0]}:${sig.labelContains[0] ?? ""}`
+      : sig.labelContains[0] ?? "";
+  return `${host}|${urlPattern}|${sig.action}${targetPart ? `:${targetPart}` : ""}`;
+}
+
 export function buildLibraryEntryFromScript(input: {
   name?: string;
   description?: string;

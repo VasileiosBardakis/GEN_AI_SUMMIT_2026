@@ -29,6 +29,7 @@ export interface Suggestion {
   snippetText?: string;
   headline: string;
   detail: string;
+  solution?: string;
   meta: string;
   videoUrl?: string;
   pauseBeforeSubmit?: boolean;
@@ -99,9 +100,11 @@ export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion 
     firstStep?.action === "insertText" &&
     !firstStep.target &&
     typeof firstStep.value === "string";
+  const isFlowTip = input.primaryLabel?.trim() === "Got it";
 
-  const previewSource =
-    isSingleInsert && typeof firstStep.value === "string"
+  const previewSource = isFlowTip
+    ? (input.script.name?.trim() || name)
+    : isSingleInsert && typeof firstStep.value === "string"
       ? firstStep.value
       : name;
 
@@ -141,18 +144,21 @@ export function buildDeciderSuggestion(input: DeciderProposalInput): Suggestion 
       : {}),
     headline: collapsePreview(name, 56),
     detail: collapsePreview(solution, 140),
-    meta: `${stepLabel} · ${metaSuffix}`,
+    ...(solution ? { solution } : {}),
+    meta: isFlowTip ? "Flow tip" : `${stepLabel} · ${metaSuffix}`,
     ...(pauseBeforeSubmit !== undefined ? { pauseBeforeSubmit } : {}),
     ...(runMode !== undefined ? { runMode } : {}),
     ...(params && params.length > 0 ? { params } : {}),
     ...(primaryLabel ? { primaryLabel } : {}),
     ...(pauseNotice ? { pauseNotice } : {}),
-    flows: {
-      user: userNodes,
-      proposed: [
-        { kind: "ai", label: collapsePreview(name, 26) },
-        { kind: "done", label: "Done" },
-      ],
-    },
+    flows: isFlowTip
+      ? { user: [], proposed: [] }
+      : {
+          user: userNodes,
+          proposed: [
+            { kind: "ai", label: collapsePreview(name, 26) },
+            { kind: "done", label: "Done" },
+          ],
+        },
   };
 }

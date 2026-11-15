@@ -529,19 +529,21 @@ export function handleRuntimeMessage(
     const incoming = msg.item;
     const targetId = msg.id ?? incoming?.id;
     const shouldRecordRun = Boolean(msg.recordRun);
-    void loadLibrary()
-      .then((items) => {
-        let next = incoming
-          ? upsertOptimizationItem(items, incoming, { forceActivate: true })
-          : items.map((item) =>
-              item.id === targetId ? { ...item, status: "active" as const } : item
-            );
-        if (shouldRecordRun && targetId) {
-          next = recordOptimizationRun(next, targetId);
-        }
-        return saveLibrary(next);
-      })
-      .then((items) => sendResponse({ ok: true, items }));
+    void (async () => {
+      let items = await loadLibrary();
+      if (!incoming && targetId && !items.some((item) => item.id === targetId)) {
+        items = await loadLibrary(true);
+      }
+      let next = incoming
+        ? upsertOptimizationItem(items, incoming, { forceActivate: true })
+        : items.map((item) =>
+            item.id === targetId ? { ...item, status: "active" as const } : item
+          );
+      if (shouldRecordRun && targetId) {
+        next = recordOptimizationRun(next, targetId);
+      }
+      return saveLibrary(next);
+    })().then((items) => sendResponse({ ok: true, items }));
     return true;
   }
   if (msg?.kind === "EYES_TOGGLE_OPTIMIZATION" && msg.id) {
@@ -987,6 +989,7 @@ export interface HandsCommand {
   id?: string;
   kind?: "run" | "decide" | "precheck";
   isRecall?: boolean;
+  entryId?: string;
   name?: string;
   solution?: string;
   script?: V2ActionScript;
@@ -1029,7 +1032,7 @@ export async function handleHandsCommand(
         ? decideScript.params
         : undefined;
     console.log("[eyes-bg] received decide command", decideId, decideName);
-    if (!cmd.isRecall) {
+    if (!cmd.isRecall && cmd.primaryLabel !== "Got it") {
       const suggestion = buildDeciderSuggestion({
         name: decideName ?? "",
         solution: decideSolution,
@@ -1087,6 +1090,8 @@ export async function handleHandsCommand(
           name: decideName,
           solution: decideSolution,
           script: decideScript,
+          ...(cmd.isRecall ? { isRecall: true } : {}),
+          ...(cmd.entryId ? { entryId: cmd.entryId } : {}),
           ...(pauseBeforeSubmit !== undefined ? { pauseBeforeSubmit } : {}),
           ...(runMode !== undefined ? { runMode } : {}),
           ...(resolvedParams ? { params: resolvedParams } : {}),
@@ -1155,6 +1160,9 @@ export async function handleHandsCommand(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       }).catch((err) => console.error("[eyes-bg] failed to post decide result:", err));
+      if (payload.ok && payload.decision === "approved" && serverUrl === SERVER_URL) {
+        void loadLibrary(true);
+      }
     })();
     return;
   }

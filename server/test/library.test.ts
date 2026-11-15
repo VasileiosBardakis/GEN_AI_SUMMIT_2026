@@ -11,8 +11,16 @@ import {
   signature,
   type LibraryEntry,
 } from "../src/library.ts";
-import { buildLibraryEntryFromScript } from "../src/hands/implementor.ts";
-import { readLibrary, upsertLibraryEntry } from "../src/hands/library.ts";
+import {
+  buildLibraryEntryFromScript,
+  buildStartSignature,
+  formatStartSignature,
+} from "../src/hands/implementor.ts";
+import {
+  dedupeLibraryEntries,
+  readLibrary,
+  upsertLibraryEntry,
+} from "../src/hands/library.ts";
 
 function makeSteps(count: number, overrides?: Partial<Record<number, Step>>): Step[] {
   const steps: Step[] = [];
@@ -417,5 +425,88 @@ describe("loadLibrary & matchLibrary", () => {
     const reloaded = await readLibrary(dataDir);
     expect(reloaded).toHaveLength(1);
     expect(reloaded[0].id).toBe(firstSnippet.id);
+  });
+
+  it("upsertLibraryEntry reuses existing entry across rephrased solution, omitted pre-fill click, and added trailing save step", async () => {
+    const dataDir = await makeTempDir();
+
+    const first = buildLibraryEntryFromScript({
+      name: "Fill Company Name and Owner Email",
+      solution: "Automates entering company details into the form.",
+      status: "active",
+      context: { app: "127.0.0.1", url: "http://127.0.0.1:5173/" },
+      script: {
+        name: "Fill Company Name and Owner Email",
+        steps: [
+          { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:5173/" },
+          { action: "click", target: { kind: "css", value: 'input[name="company_name"]' } },
+          { action: "fill", target: { kind: "css", value: 'input[name="company_name"]' }, value: "{{companyName}}" },
+          { action: "fill", target: { kind: "css", value: 'input[name="owner_email"]' }, value: "{{ownerEmail}}" },
+        ],
+      },
+      now: 1000,
+    });
+    const firstSaved = await upsertLibraryEntry(dataDir, {
+      ...first,
+      startSignature: formatStartSignature(buildStartSignature(first.script, { app: "127.0.0.1" })),
+      runCount: 2,
+      stats: { repetitions: 2, stepCount: 4, manualSeconds: 8.37, replaySeconds: 0, timeSavedSeconds: 8.37 },
+    });
+
+    // Variation without initial click and slightly different name/solution
+    const noClickVariant = buildLibraryEntryFromScript({
+      name: "Fill Company and Owner Details",
+      solution: "Automate entering company name and owner email details into the form.",
+      status: "active",
+      context: { app: "127.0.0.1", url: "http://127.0.0.1:5173/" },
+      script: {
+        name: "Fill Company and Owner Details",
+        steps: [
+          { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:5173/" },
+          { action: "fill", target: { kind: "css", value: 'input[name="company_name"]' }, value: "{{companyName}}" },
+          { action: "fill", target: { kind: "css", value: 'input[name="owner_email"]' }, value: "{{ownerEmail}}" },
+        ],
+      },
+      now: 2000,
+    });
+    const secondSaved = await upsertLibraryEntry(dataDir, {
+      ...noClickVariant,
+      startSignature: formatStartSignature(buildStartSignature(noClickVariant.script, { app: "127.0.0.1" })),
+    });
+    expect(secondSaved.items).toHaveLength(1);
+    expect(secondSaved.entry.id).toBe(firstSaved.entry.id);
+    expect(secondSaved.entry.runCount).toBe(2);
+
+    // Richer variant adding trailing Save button click + rephrased solution
+    const withSave = buildLibraryEntryFromScript({
+      name: "Fill Company Name and Owner Email",
+      solution: "Automate entering company details and owner email into the form.",
+      status: "active",
+      context: { app: "127.0.0.1", url: "http://127.0.0.1:5173/" },
+      script: {
+        name: "Fill Company Name and Owner Email",
+        steps: [
+          { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:5173/" },
+          { action: "click", target: { kind: "css", value: 'input[name="company_name"]' } },
+          { action: "fill", target: { kind: "css", value: 'input[name="company_name"]' }, value: "{{companyName}}" },
+          { action: "fill", target: { kind: "css", value: 'input[name="owner_email"]' }, value: "{{ownerEmail}}" },
+          { action: "click", target: { kind: "aria", value: 'button[name="Save profile"]' } },
+        ],
+      },
+      now: 3000,
+    });
+    const thirdSaved = await upsertLibraryEntry(dataDir, {
+      ...withSave,
+      startSignature: formatStartSignature(buildStartSignature(withSave.script, { app: "127.0.0.1" })),
+      stats: { repetitions: 3, stepCount: 5, manualSeconds: 58.38, replaySeconds: 0, timeSavedSeconds: 58.38 },
+    });
+    expect(thirdSaved.items).toHaveLength(1);
+    expect(thirdSaved.entry.id).toBe(firstSaved.entry.id);
+    expect(thirdSaved.entry.runCount).toBe(2);
+    expect(thirdSaved.entry.script.steps).toHaveLength(5);
+
+    const disk = await readLibrary(dataDir);
+    expect(disk).toHaveLength(1);
+    expect(dedupeLibraryEntries(disk)).toHaveLength(1);
   });
 });

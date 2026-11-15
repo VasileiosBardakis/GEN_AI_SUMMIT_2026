@@ -8,8 +8,10 @@ import {
   libraryEntryToOptimization,
   mergeServerAndLocalOptimizations,
   recordOptimizationRun,
+  suggestionToOptimization,
   type OptimizationItem,
 } from "../src/library.ts";
+import { buildDeciderSuggestion } from "../src/suggestion.ts";
 
 describe("optimization library helpers", () => {
   it("formats durations and relative timestamps in user-friendly units", () => {
@@ -296,5 +298,64 @@ describe("optimization library helpers", () => {
 
     const merged = mergeServerAndLocalOptimizations([serverEntry], [localShadow]);
     expect(merged.map((item) => item.id)).toEqual(["lib_123"]);
+  });
+
+  it("transfers local decider_* runCount onto the matching server entry with real timeSavedSeconds", () => {
+    const serverEntry = {
+      id: "lib_848cac826c",
+      name: "Fill Company and Owner Details",
+      kind: "workflow" as const,
+      status: "active" as const,
+      description: "Automate entering company name and owner email details into the form.",
+      solution: "Automate entering company name and owner email details into the form.",
+      script: {
+        name: "Fill Company and Owner Details",
+        steps: [
+          { action: "fill" as const, target: { kind: "css" as const, value: "input[name=\"company_name\"]" }, value: "{{companyName}}" },
+          { action: "fill" as const, target: { kind: "css" as const, value: "input[name=\"owner_email\"]" }, value: "{{ownerEmail}}" },
+        ],
+      },
+      eyes: {
+        intent: "fill_company_and_owner_details",
+        scope: { apps: ["127.0.0.1"], urlPatterns: [], pageHints: [] },
+        targetHints: { roles: ["textbox"], labelContains: [], locators: [] },
+        textHints: { prefixHints: [], minCharsBeforeMatch: 0 },
+        guards: { requireClipboard: false, fieldEmptyOnly: true, minSignals: 2, cooldownMs: 60000 },
+      },
+      stats: {
+        repetitions: 3,
+        stepCount: 2,
+        manualSeconds: 14.61,
+        replaySeconds: 0,
+        timeSavedSeconds: 14.61,
+      },
+      runCount: 2,
+      createdAt: 1_000,
+      updatedAt: 2_000,
+    };
+
+    const suggestion = buildDeciderSuggestion({
+      name: "Fill Company and Owner Details",
+      solution: "Automate entering company name and owner email details into the form.",
+      script: serverEntry.script,
+    });
+    const localShadow = recordOptimizationRun(
+      [suggestionToOptimization(suggestion, { app: "127.0.0.1", status: "active" })],
+      suggestion.id,
+      5_000,
+    );
+    const localAfter3Runs = recordOptimizationRun(
+      recordOptimizationRun(localShadow, suggestion.id, 6_000),
+      suggestion.id,
+      7_000,
+    );
+
+    expect(localAfter3Runs[0].solution).toBe(serverEntry.solution);
+    const merged = mergeServerAndLocalOptimizations([serverEntry], localAfter3Runs);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe("lib_848cac826c");
+    expect(merged[0].runCount).toBe(3);
+    expect(merged[0].timeSavedPerRunSec).toBe(14.61);
+    expect(merged[0].totalTimeSavedSec).toBeCloseTo(43.83);
   });
 });

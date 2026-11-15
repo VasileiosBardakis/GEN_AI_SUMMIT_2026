@@ -9,7 +9,7 @@ loadEnv({ path: path.resolve(__dirname, "../../.env"), quiet: true });
 const tracesDir = path.resolve(__dirname, "../../traces");
 const port = Number(process.env.PORT) || 8787;
 
-const server = createServer({ tracesDir });
+const server = createServer({ tracesDir, flowTips: true });
 
 server.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
