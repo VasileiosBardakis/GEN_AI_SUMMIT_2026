@@ -57,6 +57,8 @@ const MAX_SUMMARY_CHARS = 4096;
 
 const REDACTED_MARKER_RE = /\[REDACTED:([A-Z0-9_]+)(?:#([^\]]+))?\]/g;
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const CARD_RE = /\b(?:\d[ -]*?){13,19}\b/g;
+const FOUR_BY_FOUR_CARD_RE = /^\d{4}(?:[ -]\d{4}){3}$/;
 const PHONE_RE =
   /(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)|\d{2,4})[\s.-]\d{3,4}[\s.-]\d{4}\b/g;
 const PII_TOKEN_RE = /__PII_[A-Za-z0-9_]+__/;
@@ -301,6 +303,24 @@ function stripParamBraces(name: string): string {
   return trimmed;
 }
 
+function luhnCheck(digitsOnly: string): boolean {
+  if (digitsOnly.length < 13 || digitsOnly.length > 19) return false;
+  let sum = 0;
+  let shouldDouble = false;
+  for (let i = digitsOnly.length - 1; i >= 0; i--) {
+    const digitRaw = digitsOnly.charCodeAt(i) - 48;
+    if (digitRaw < 0 || digitRaw > 9) return false;
+    let digit = digitRaw;
+    if (shouldDouble) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    shouldDouble = !shouldDouble;
+  }
+  return sum % 10 === 0;
+}
+
 function createPromptScrubber(piiMap: PiiMap): {
   scrubText: (raw: string) => string;
   restoreMap: Map<string, string>;
@@ -349,6 +369,19 @@ function createPromptScrubber(piiMap: PiiMap): {
       const token = nextToken("EMAIL");
       rawToToken.set(email, token);
       restoreMap.set(token, email);
+      return token;
+    });
+
+    out = out.replace(CARD_RE, (card) => {
+      const digits = card.replace(/\D/g, "");
+      if (!luhnCheck(digits) && !FOUR_BY_FOUR_CARD_RE.test(card)) {
+        return card;
+      }
+      const existing = rawToToken.get(card);
+      if (existing) return existing;
+      const token = nextToken("CARD");
+      rawToToken.set(card, token);
+      restoreMap.set(token, card);
       return token;
     });
 
@@ -855,7 +888,7 @@ function buildCompilePrompt(
       app,
     };
     const label = step.label ?? inferLabelFromTarget(step.target);
-    if (label) entry.label = label;
+    if (label) entry.label = scrubText(label);
     if (step.role) entry.role = step.role;
     if (step.tag) entry.tag = step.tag;
     if (step.target && step.target.length > 0) entry.hasTarget = true;
@@ -870,7 +903,9 @@ function buildCompilePrompt(
       seenUrlForApp.add(app);
       entry.url = normalizeUrlHost(scrubText(step.url));
     }
-    if (step.container) entry.container = step.container;
+    if (step.container) {
+      entry.container = scrubUnknown(step.container, scrubText);
+    }
     return JSON.stringify(entry);
   });
 
