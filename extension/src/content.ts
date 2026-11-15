@@ -1108,7 +1108,7 @@ export function showSuggestion(
         <div class="footer">
           <div class="meta">${escapeHtml(suggestion.meta)}</div>
           <div class="actions">
-            <button class="ghost" type="button" data-eyes-dismiss>Not now</button>
+            ${isFlowTip ? "" : '<button class="ghost" type="button" data-eyes-dismiss>Not now</button>'}
             <button class="primary" type="button" data-eyes-primary>${escapeHtml(primaryButtonLabel)}</button>
           </div>
         </div>

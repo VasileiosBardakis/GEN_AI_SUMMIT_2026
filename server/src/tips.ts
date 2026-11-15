@@ -70,7 +70,7 @@ const FLOW_TIP_EVENT_TYPES = new Set<Event["type"]>([
 
 export function hasRepeatedInteraction(events: Event[], minRepeats = 3): boolean {
   const tokens: string[] = [];
-  for (const ev of events.slice(-40)) {
+  for (const ev of events) {
     if (!FLOW_TIP_EVENT_TYPES.has(ev.type)) continue;
     const token =
       ev.type === "input" || ev.type === "change"
@@ -82,9 +82,10 @@ export function hasRepeatedInteraction(events: Event[], minRepeats = 3): boolean
           : ev.type;
     tokens.push(token);
   }
+  const recent = tokens.slice(-40);
   const counts = new Map<string, number>();
-  for (let i = 0; i < tokens.length - 1; i++) {
-    const pair = `${tokens[i]}>${tokens[i + 1]}`;
+  for (let i = 0; i < recent.length - 1; i++) {
+    const pair = `${recent[i]}>${recent[i + 1]}`;
     const next = (counts.get(pair) ?? 0) + 1;
     if (next >= minRepeats) return true;
     counts.set(pair, next);
@@ -94,7 +95,7 @@ export function hasRepeatedInteraction(events: Event[], minRepeats = 3): boolean
 
 function summarizeFlowEvents(events: Event[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
-  for (const ev of events.slice(-40)) {
+  for (const ev of events) {
     if (!FLOW_TIP_EVENT_TYPES.has(ev.type)) continue;
     const entry: Record<string, unknown> = { type: ev.type, app: ev.app };
     if (ev.target?.role) entry.role = ev.target.role;
@@ -125,7 +126,7 @@ function summarizeFlowEvents(events: Event[]): Array<Record<string, unknown>> {
     }
     out.push(entry);
   }
-  return out;
+  return out.slice(-40);
 }
 
 export function buildFlowTipPrompt(events: Event[]): string {
@@ -137,6 +138,7 @@ export function buildFlowTipPrompt(events: Event[]): string {
     "Return ONLY valid JSON:",
     '{ "tip": string | null, "keys": string[] | null, "why": string }',
     '(If a menu command applies without a keyboard shortcut, set "keys" to null.)',
+    'Each "keys" entry must be one complete shortcut (e.g. "Ctrl+C"), never a separate modifier/key token.',
     "Use tip: null and keys: null when the user already uses the faster shortcut or when no meaningful shortcut applies.",
     "Focus on the interaction shape and ignore personal values.",
     "",

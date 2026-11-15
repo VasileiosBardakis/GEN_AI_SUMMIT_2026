@@ -1027,7 +1027,7 @@ export async function handleHandsCommand(
         ? decideScript.params
         : undefined;
     console.log("[eyes-bg] received decide command", decideId, decideName);
-    if (!cmd.isRecall) {
+    if (!cmd.isRecall && cmd.primaryLabel !== "Got it") {
       const suggestion = buildDeciderSuggestion({
         name: decideName ?? "",
         solution: decideSolution,
