@@ -176,3 +176,226 @@ export function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string):
     return tabUrl.startsWith(targetUrl) ? 1 : 0;
   }
 }
+
+type SliceStepLike = {
+  action: string;
+  host?: string;
+  url?: string;
+  bind?: string;
+  items?: unknown;
+  target?: unknown;
+  targets?: unknown;
+  within?: unknown;
+  value?: unknown;
+  steps?: SliceStepLike[];
+};
+
+type SliceScriptLike<TStep extends SliceStepLike = SliceStepLike> = {
+  steps: TStep[];
+  params?: Array<{ name: string; example?: string; piiHash?: string }>;
+};
+
+function stripWwwPrefix(host: string): string {
+  return host.startsWith("www.") && host.length > 4 ? host.slice(4) : host;
+}
+
+function urlsMatchStepPage(candidateUrl: string, currentParsed: URL): boolean {
+  try {
+    const cand = new URL(candidateUrl);
+    if (cand.port !== currentParsed.port) return false;
+    const candHost = normalizeLoopbackHost(cand.hostname);
+    const currHost = normalizeLoopbackHost(currentParsed.hostname);
+    if (candHost !== currHost && stripWwwPrefix(candHost) !== stripWwwPrefix(currHost)) {
+      return false;
+    }
+    return normalizeUrlPath(cand.pathname) === normalizeUrlPath(currentParsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function extractTargetLocators(target: unknown): Array<{ kind?: string; value?: string }> {
+  if (!target) return [];
+  return Array.isArray(target)
+    ? (target as Array<{ kind?: string; value?: string }>)
+    : [target as { kind?: string; value?: string }];
+}
+
+function extractClickHrefUrl(step: SliceStepLike, baseUrl?: string): string | undefined {
+  if (step.action !== "click") return undefined;
+  const locs = [...extractTargetLocators(step.target), ...extractTargetLocators(step.targets)];
+  for (const loc of locs) {
+    if ((loc.kind !== "css" && loc.kind !== "xpath") || typeof loc.value !== "string") continue;
+    const match = /href\s*=\s*["']([^"']+)["']/i.exec(loc.value);
+    const rawHref = match?.[1]?.trim();
+    if (!rawHref || rawHref.startsWith("#") || /^javascript:/i.test(rawHref)) continue;
+    try {
+      const resolved = baseUrl ? new URL(rawHref, baseUrl) : new URL(rawHref);
+      if (resolved.protocol === "http:" || resolved.protocol === "https:") {
+        return resolved.href;
+      }
+    } catch {
+      // ignore unresolvable href
+    }
+  }
+  return undefined;
+}
+
+function collectTemplateRefs(val: unknown, out: Set<string>): void {
+  if (typeof val === "string") {
+    for (const m of val.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)) {
+      const name = m[1]?.trim();
+      if (name) out.add(name);
+    }
+    return;
+  }
+  if (Array.isArray(val)) {
+    for (const item of val) collectTemplateRefs(item, out);
+    return;
+  }
+  if (val && typeof val === "object") {
+    for (const child of Object.values(val)) collectTemplateRefs(child, out);
+  }
+}
+
+function canSliceStepsAt(
+  steps: readonly SliceStepLike[],
+  startIdx: number,
+  providedBindings: ReadonlySet<string>,
+): boolean {
+  if (startIdx <= 0) return true;
+  const skippedBinds = new Set<string>();
+  for (let i = 0; i < startIdx; i += 1) {
+    const s = steps[i];
+    if (s && (s.action === "readText" || s.action === "readValue" || s.action === "extractList")) {
+      if (typeof s.bind === "string" && s.bind) {
+        skippedBinds.add(s.bind);
+      }
+    }
+  }
+  if (skippedBinds.size === 0) return true;
+  const refs = new Set<string>();
+  for (let i = startIdx; i < steps.length; i += 1) {
+    const s = steps[i];
+    if (!s) continue;
+    if (s.action === "forEach" && typeof s.items === "string" && s.items.trim()) {
+      refs.add(s.items.trim());
+    }
+    collectTemplateRefs(s, refs);
+  }
+  for (const ref of refs) {
+    if (skippedBinds.has(ref) && !providedBindings.has(ref)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function findStartStepIndexForUrl(
+  script: SliceScriptLike,
+  currentTabUrl: string | undefined,
+  initialParams?: Record<string, string>,
+): number {
+  if (!currentTabUrl) return 0;
+  let parsedTab: URL;
+  try {
+    parsedTab = new URL(currentTabUrl);
+    if (parsedTab.protocol !== "http:" && parsedTab.protocol !== "https:") return 0;
+  } catch {
+    return 0;
+  }
+
+  const provided = new Set<string>();
+  if (Array.isArray(script.params)) {
+    for (const p of script.params) {
+      if (p?.name && (typeof p.example === "string" || typeof p.piiHash === "string")) {
+        provided.add(p.name);
+      }
+    }
+  }
+  if (initialParams) {
+    for (const k of Object.keys(initialParams)) {
+      provided.add(k);
+    }
+  }
+
+  const steps = script.steps;
+  let pageUrl: string | undefined;
+  let sawNonSetupStep = false;
+  for (let i = 0; i < steps.length; i += 1) {
+    const step = steps[i]!;
+    if (step.action === "switchTab") {
+      pageUrl = step.url;
+      const matches = step.url
+        ? urlsMatchStepPage(step.url, parsedTab)
+        : Boolean(
+            step.host &&
+              (tabMatchesHost(currentTabUrl, step.host) ||
+                stripWwwPrefix(normalizeLoopbackHost(step.host)) ===
+                  stripWwwPrefix(normalizeLoopbackHost(parsedTab.hostname))),
+          );
+      if (matches) {
+        if (!sawNonSetupStep) return 0;
+        let targetIdx = i;
+        while (
+          targetIdx + 1 < steps.length &&
+          (steps[targetIdx]!.action === "switchTab" || steps[targetIdx]!.action === "navigate")
+        ) {
+          targetIdx += 1;
+        }
+        if (canSliceStepsAt(steps, targetIdx, provided)) return targetIdx;
+      }
+      continue;
+    }
+    if (step.action === "navigate" && typeof step.url === "string") {
+      pageUrl = step.url;
+      if (urlsMatchStepPage(step.url, parsedTab)) {
+        if (!sawNonSetupStep) return 0;
+        let targetIdx = i;
+        while (
+          targetIdx + 1 < steps.length &&
+          (steps[targetIdx]!.action === "switchTab" || steps[targetIdx]!.action === "navigate")
+        ) {
+          targetIdx += 1;
+        }
+        if (canSliceStepsAt(steps, targetIdx, provided)) return targetIdx;
+      }
+      continue;
+    }
+
+    if (typeof step.url === "string" && /^https?:\/\//i.test(step.url)) {
+      pageUrl = step.url;
+    }
+
+    if (pageUrl && urlsMatchStepPage(pageUrl, parsedTab)) {
+      if (!sawNonSetupStep) return 0;
+      if (canSliceStepsAt(steps, i, provided)) return i;
+    }
+
+    sawNonSetupStep = true;
+    const nextUrl = extractClickHrefUrl(step, pageUrl);
+    if (nextUrl) {
+      pageUrl = nextUrl;
+    }
+  }
+  return 0;
+}
+
+export function sliceScriptForTabUrl<TScript extends SliceScriptLike>(
+  script: TScript,
+  currentTabUrl: string | undefined,
+  initialParams?: Record<string, string>,
+): { script: TScript; startStepIndex: number; sliced: boolean } {
+  const startStepIndex = findStartStepIndexForUrl(script, currentTabUrl, initialParams);
+  if (startStepIndex <= 0 || startStepIndex >= script.steps.length) {
+    return { script, startStepIndex: 0, sliced: false };
+  }
+  return {
+    script: {
+      ...script,
+      steps: script.steps.slice(startStepIndex),
+    },
+    startStepIndex,
+    sliced: true,
+  };
+}

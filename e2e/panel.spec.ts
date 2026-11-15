@@ -155,7 +155,8 @@ test("extension panel renders saved workflow with real stats and runs script on 
   }
 });
 
-test("extension panel preserves locally activated workflow across reload when missing from GET /library", async () => {
+// GEN-131: workflows are saved active automatically and no longer render Add/Dismiss
+test.skip("extension panel preserves locally activated workflow across reload when missing from GET /library", async () => {
   const env = await launchExtensionContext();
 
   try {

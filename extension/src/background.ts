@@ -22,6 +22,7 @@ import {
   normalizeLoopbackHost,
   normalizeUrlPath,
   scoreTabUrlMatch,
+  sliceScriptForTabUrl,
   substituteBindings,
   tabMatchesHost,
 } from "./utils.ts";
@@ -696,15 +697,20 @@ export function handleRuntimeMessage(
     return false;
   }
   if (msg?.kind === "HANDS_RUN_SCRIPT" && msg.script) {
-    const targetScript = withFlowStartSwitch(msg.script, msg.url);
     void (async () => {
+      const api = getChromeApi();
       let tabId = await resolveActiveTabId(msg.tabId ?? sender.tab);
-      if (!scriptStartsWithTabOrNav(targetScript.steps) && (msg.url || msg.appHost)) {
-        const api = getChromeApi();
-        const activeTab =
-          tabId !== undefined && api?.tabs?.get
-            ? await api.tabs.get(tabId).catch(() => undefined)
+      const activeTab =
+        tabId !== undefined && api?.tabs?.get
+          ? await api.tabs.get(tabId).catch(() => undefined)
+          : tabId !== undefined && api?.tabs?.query
+            ? ((await api.tabs.query({}).catch(() => [])) ?? []).find((t) => t.id === tabId)
             : undefined;
+      const sliced = sliceScriptForTabUrl(msg.script!, activeTab?.url);
+      const targetScript = sliced.sliced
+        ? sliced.script
+        : withFlowStartSwitch(msg.script!, msg.url);
+      if (!sliced.sliced && !scriptStartsWithTabOrNav(targetScript.steps) && (msg.url || msg.appHost)) {
         const matchesActive = activeTab?.url
           ? (msg.url ? scoreTabUrlMatch(activeTab.url, msg.url) > 0 : false) ||
             (msg.appHost ? tabMatchesHost(activeTab.url, msg.appHost) : false)
@@ -1494,13 +1500,14 @@ export async function handleHandsCommand(
         tryHostFromUrl(lastMeaningfulTab?.url) ??
         tryHostFromUrl(lastActiveTab?.url) ??
         "Browser";
-      const suggestedItem = suggestionToOptimization(suggestion, {
+      const itemStatus = suggestion.kind === "text" ? "suggested" : "active";
+      const storedItem = suggestionToOptimization(suggestion, {
         app: appHost,
-        status: "suggested",
+        status: itemStatus,
       });
-      suggestedItem.script = decideScript as unknown as ActionScript;
+      storedItem.script = decideScript as unknown as ActionScript;
       void loadLibrary()
-        .then((items) => saveLibrary(upsertOptimizationItem(items, suggestedItem)))
+        .then((items) => saveLibrary(upsertOptimizationItem(items, storedItem)))
         .catch(() => {});
     }
     void (async () => {
@@ -1764,17 +1771,26 @@ export async function handleHandsCommand(
     console.log("[eyes-bg] received run command", cmd.id, "steps=", cmd.script.steps.length);
     let payload: { id: string; ok: boolean; results?: StepResult[]; error?: string };
     try {
-      const scriptToRun = withFlowStartSwitch(cmd.script, cmd.url);
       const preferredTabId = cmd.tabId ?? lastApprovedDecideTabId;
       lastApprovedDecideTabId = undefined;
       const tabId = await resolveActiveTabId(preferredTabId);
       console.log("[eyes-bg] run target tabId =", tabId);
-      if (tabId === undefined && !scriptStartsWithTabOrNav(scriptToRun.steps)) {
-        throw new Error("No active web tab open");
-      }
       const initialParams =
         cmd.paramValues ??
         (cmd.params && !Array.isArray(cmd.params) ? cmd.params : undefined);
+      const currentTab =
+        tabId !== undefined && api?.tabs?.get
+          ? await api.tabs.get(tabId).catch(() => undefined)
+          : tabId !== undefined && api?.tabs?.query
+            ? ((await api.tabs.query({}).catch(() => [])) ?? []).find((t) => t.id === tabId)
+            : undefined;
+      const sliced = sliceScriptForTabUrl(cmd.script, currentTab?.url, initialParams);
+      const scriptToRun = sliced.sliced
+        ? sliced.script
+        : withFlowStartSwitch(cmd.script, cmd.url);
+      if (tabId === undefined && !scriptStartsWithTabOrNav(scriptToRun.steps)) {
+        throw new Error("No active web tab open");
+      }
       const results = await runActionScript(tabId ?? -1, scriptToRun, initialParams, {
         skipRowValues: cmd.skipRowValues,
       });

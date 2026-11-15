@@ -887,7 +887,10 @@ export function showSuggestion(
 
   const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
   if (!options.onDecision) {
-    const suggestedItem = suggestionToOptimization(suggestion, { app: appHost, status: "suggested" });
+    const suggestedItem = suggestionToOptimization(suggestion, {
+      app: appHost,
+      status: suggestion.kind === "text" ? "suggested" : "active",
+    });
     if (options.script) suggestedItem.script = options.script;
     sendLibraryMessage({
       kind: "EYES_UPSERT_OPTIMIZATION",

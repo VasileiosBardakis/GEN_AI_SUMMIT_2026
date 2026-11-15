@@ -103,7 +103,7 @@ export function canonicalStepCount(script: ActionScript): number {
   return extractCanonicalSteps(script.steps).length;
 }
 
-function canonicalStepsMatch(a: CanonicalStep, b: CanonicalStep): boolean {
+export function canonicalStepsMatch(a: CanonicalStep, b: CanonicalStep): boolean {
   if (a.action !== b.action) return false;
   if (a.locators.length > 0 && b.locators.length > 0) {
     return locatorsOverlap(a.locators, b.locators);
