@@ -1,0 +1,71 @@
+{
+  "promptHash": "bd8576e20bf48dba62ec25aaeccfeb2715bfc530b759fd4d585a374f4f0158ab",
+  "response": {
+    "suggest": true,
+    "offerAt2": true,
+    "kind": "workflow",
+    "name": "Sync Orders to Dispatch",
+    "reason": "Automates the creation of shipments by migrating order details from the pending orders table to the dispatch portal.",
+    "risk": "medium",
+    "runMode": "run_remaining",
+    "params": [
+      {
+        "name": "col1",
+        "description": "The Order ID value"
+      },
+      {
+        "name": "col2",
+        "description": "The Customer name value"
+      }
+    ],
+    "steps": [
+      {
+        "action": "forEach",
+        "itemIds": [
+          "item_1_3",
+          "item_1_4",
+          "item_1_5"
+        ],
+        "steps": [
+          {
+            "action": "readText",
+            "stepIndex": 1,
+            "withinId": "ps_1",
+            "withinTextParam": "col1",
+            "bind": "orderId"
+          },
+          {
+            "action": "readText",
+            "stepIndex": 2,
+            "withinId": "ps_1",
+            "withinTextParam": "col2",
+            "bind": "customer"
+          },
+          {
+            "action": "switchTab",
+            "host": "dispatch.local"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 4,
+            "value": "{{orderId}}"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 5,
+            "value": "{{customer}}"
+          },
+          {
+            "action": "click",
+            "stepIndex": 6,
+            "targetId": "ps_2"
+          },
+          {
+            "action": "switchTab",
+            "host": "orders.local"
+          }
+        ]
+      }
+    ]
+  }
+}
