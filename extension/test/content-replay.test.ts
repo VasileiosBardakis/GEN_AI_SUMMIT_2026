@@ -40,7 +40,7 @@ describe("renderReplay", () => {
     expect(html).toContain(
       'src="chrome-extension://test-extension/dist/replay-demo.webm"'
     );
-    expect(html).toContain("Automation replay");
+    expect(html).not.toContain("replay-bar");
   });
 
   it("prefers an explicit videoUrl over the bundled demo", () => {
