@@ -46,7 +46,7 @@ export const EventSchema = z.object({
     .optional(),
   meta: z
     .object({
-      pageSummary: z.record(z.string(), z.unknown()).optional(),
+      pageSummary: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
     })
     .catchall(z.unknown())
     .optional(),

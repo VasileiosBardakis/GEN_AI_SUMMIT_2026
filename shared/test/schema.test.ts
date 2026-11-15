@@ -62,7 +62,7 @@ describe("EventSchema", () => {
     expect(
       EventSchema.safeParse({
         ...validEvent,
-        meta: { pageSummary: "invalid" },
+        meta: { pageSummary: 123 },
       }).success,
     ).toBe(false);
   });
