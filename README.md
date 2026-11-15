@@ -23,6 +23,14 @@ Built as a Chrome extension paired with a local backend AI. Instead of writing s
    - **Oumi Iris** runs alongside it as a fast judge to decide if the pattern is worth automating and whether replay should pause before a final submit.
 4. Once verified against the open page, Eyes shows a suggestion card in Chrome. Accepting saves the skill to your Side Panel and replays it step by step on screen, with a Stop button whenever you want to take over.
 
+## Use Cases
+
+| Who | How it helps |
+| :--- | :--- |
+| **Accountant closing the month** | Repetitive per-client clicks turn into one supervised run, so you spend time checking numbers instead of typing them. |
+| **New hire** | Common team routines are saved as step-by-step workflows you can inspect and run on day one. |
+| **The team** | The people doing the work create the automations themselves instead of waiting on engineering tickets or custom integrations. |
+
 ## Architecture
 
 ```mermaid
@@ -71,6 +79,13 @@ flowchart LR
 - **Backend:** Node.js, TypeScript, pnpm workspaces
 - **AI Models:** Google Gemini (Vertex AI), Oumi Iris
 - **Testing & Tooling:** Playwright, Vitest, ESLint
+
+## Future
+
+The browser extension is the starting point for a desktop-wide assistant that learns from work already happening on your machine:
+
+- **Desktop apps:** Bring the same capture, pattern detection, and approval loop to native tools like Excel, ERP clients, mail apps, and PDF viewers.
+- **Cross-app workflows without connectors:** Learn multi-step chains across separate apps (such as reading an invoice, updating a ledger, and sending a confirmation) without API keys, plugins, or pre-built integrations.
 
 ## Getting Started
 
