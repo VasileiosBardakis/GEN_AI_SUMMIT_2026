@@ -11,7 +11,7 @@ import {
   type WorkflowIrisJudgment,
 } from "../llm/iris.ts";
 import { eventsToSteps, type PiiMap, type V2Step } from "./steps.ts";
-import { countRepeatedPatterns, splitEpisodes } from "./tries.ts";
+import { countRepeatedPatterns, resolveRepeatCount, splitEpisodes } from "./tries.ts";
 import {
   normalizeHost,
   validateCompiledWorkflow,
@@ -1580,7 +1580,8 @@ export async function compileWorkflow(
       ? enrichedAll.slice(-MAX_PROMPT_STEPS)
       : enrichedAll;
 
-  const patterns = countRepeatedPatterns(rawSteps, { minRepeats: 2 });
+  const precompileAt = Math.max(2, resolveRepeatCount() - 1);
+  const patterns = countRepeatedPatterns(rawSteps, { minRepeats: precompileAt });
   const inferredRepeats = patterns[0]?.count ?? 1;
   const repeatCount = Math.max(
     1,

@@ -66,23 +66,23 @@ describe("v2 interleaved workflow detection (GEN-75)", () => {
     const patterns = countRepeatedPatterns(steps);
     const candidates = detectRepeatedCandidates(steps);
 
-    const patA = patterns.find((p) => p.signature === "copy->tab_switch->paste");
-    const patB = patterns.find((p) => p.signature === "click->fill->submit");
+    const sigA = "copy@portal.local->tab_switch@erp.local->paste@erp.local";
+    const sigB = "click@helpdesk.local->fill@helpdesk.local->submit@helpdesk.local";
+    const patA = patterns.find((p) => p.signature === sigA);
+    const patB = patterns.find((p) => p.signature === sigB);
     expect(patA).toEqual({
-      signature: "copy->tab_switch->paste",
+      signature: sigA,
       actions: ["copy", "tab_switch", "paste"],
       count: 3,
     });
     expect(patB).toEqual({
-      signature: "click->fill->submit",
+      signature: sigB,
       actions: ["click", "fill", "submit"],
       count: 3,
     });
 
-    const candA = candidates.find(
-      (c) => c.signature === "copy->tab_switch->paste",
-    );
-    const candB = candidates.find((c) => c.signature === "click->fill->submit");
+    const candA = candidates.find((c) => c.signature === sigA);
+    const candB = candidates.find((c) => c.signature === sigB);
     expect(candA).toBeDefined();
     expect(candB).toBeDefined();
     if (!candA || !candB) return;
@@ -225,9 +225,15 @@ describe("v2 interleaved workflow detection (GEN-75)", () => {
 
     const candidates = detectRepeatedCandidates(steps);
     const candA = candidates.find(
-      (c) => c.signature === "copy->tab_switch->paste",
+      (c) =>
+        c.signature ===
+        "copy@alpha.local->tab_switch@beta.local->paste@beta.local",
     );
-    const candB = candidates.find((c) => c.signature === "click->fill->submit");
+    const candB = candidates.find(
+      (c) =>
+        c.signature ===
+        "click@gamma.local->fill@gamma.local->submit@gamma.local",
+    );
 
     expect(candA?.count).toBe(3);
     expect(candB?.count).toBe(3);

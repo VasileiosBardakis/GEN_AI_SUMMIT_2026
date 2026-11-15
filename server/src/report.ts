@@ -17,11 +17,14 @@ import {
   compileWorkflow,
   detectRepeatedCandidates,
   eventsToSteps,
+  resolveRepeatCount,
   type CompiledLeafStep,
   type CompiledStep,
   type CompiledWorkflow,
   type IrisWorkflowJudge,
   type PatternCandidate,
+  type V2Action,
+  type V2Step,
 } from "./v2/index.ts";
 
 export interface BuildReportOptions {
@@ -230,13 +233,51 @@ export function compiledWorkflowToFinding(workflow: CompiledWorkflow): Finding {
   });
 }
 
+function isExactRepetitionOf(
+  longer: readonly V2Action[],
+  shorter: readonly V2Action[],
+): boolean {
+  if (longer.length <= shorter.length || shorter.length === 0) return false;
+  if (longer.length % shorter.length !== 0) return false;
+  for (let i = 0; i < longer.length; i++) {
+    if (longer[i] !== shorter[i % shorter.length]) return false;
+  }
+  return true;
+}
+
 export function pickPrimaryCandidate(
   candidates: readonly PatternCandidate[],
+  minRepeats = resolveRepeatCount(),
 ): PatternCandidate | undefined {
   if (candidates.length === 0) return undefined;
   const nonSubsumed = candidates.filter((cand) => {
     const subsumed = candidates.some((other) => {
       if (other === cand || other.actions.length <= cand.actions.length) return false;
+      if (isExactRepetitionOf(other.actions, cand.actions)) return false;
+
+      const otherSteps = new Set<V2Step>();
+      for (const oi of other.instances) {
+        for (const s of oi.steps) {
+          otherSteps.add(s);
+        }
+      }
+
+      if (otherSteps.size > 0 && cand.instances.every((ci) => ci.steps.length > 0)) {
+        let totalSteps = 0;
+        let coveredSteps = 0;
+        const minPerInstance = Math.max(1, cand.actions.length - 1);
+        for (const ci of cand.instances) {
+          let instCovered = 0;
+          for (const s of ci.steps) {
+            if (otherSteps.has(s)) instCovered += 1;
+          }
+          if (instCovered < minPerInstance) return false;
+          totalSteps += ci.steps.length;
+          coveredSteps += instCovered;
+        }
+        return coveredSteps * 5 >= totalSteps * 4;
+      }
+
       return cand.instances.every((ci) =>
         other.instances.some((oi) => ci.startTs >= oi.startTs && ci.endTs <= oi.endTs),
       );
@@ -244,11 +285,21 @@ export function pickPrimaryCandidate(
     return !subsumed;
   });
   const pool = nonSubsumed.length > 0 ? nonSubsumed : candidates;
-  return [...pool].sort(
+  const filteredPool = pool.filter(
+    (cand) =>
+      !pool.some(
+        (shorter) =>
+          shorter !== cand &&
+          isExactRepetitionOf(cand.actions, shorter.actions),
+      ),
+  );
+  const finalPool = filteredPool.length > 0 ? filteredPool : pool;
+  return [...finalPool].sort(
     (a, b) =>
-      b.count - a.count ||
+      (b.count >= minRepeats ? 1 : 0) - (a.count >= minRepeats ? 1 : 0) ||
       b.count * b.actions.length - a.count * a.actions.length ||
       b.actions.length - a.actions.length ||
+      b.count - a.count ||
       a.signature.localeCompare(b.signature),
   )[0];
 }
@@ -259,7 +310,7 @@ async function runV2ReportForEvents(
 ): Promise<Finding[]> {
   if (events.length === 0) return [];
   const { steps, piiMap } = eventsToSteps(events);
-  const minRepeats = options.minRepeats ?? 3;
+  const minRepeats = options.minRepeats ?? resolveRepeatCount();
   const candidates = detectRepeatedCandidates(steps, { minRepeats });
   const top = pickPrimaryCandidate(candidates);
   if (!top) return [];
