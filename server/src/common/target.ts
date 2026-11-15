@@ -52,6 +52,18 @@ export function maskPii(raw: string): string {
   );
 }
 
+const NAMED_CONTROL_ROLES = new Set([
+  "button",
+  "link",
+  "menuitem",
+  "tab",
+  "option",
+  "treeitem",
+  "checkbox",
+  "radio",
+  "switch",
+]);
+
 export function rankLocators(
   target: NonNullable<Event["target"]>,
   locators: Locator[],
@@ -59,7 +71,11 @@ export function rankLocators(
 ): Locator[] {
   const isGrid =
     target.role === "gridcell" || target.tag?.toLowerCase() === "td";
-  const ranks = isGrid ? GRID_RANKS : defaultRanks;
+  const isNamedControl =
+    !isGrid &&
+    defaultRanks === CSS_FIRST_RANKS &&
+    Boolean(target.role && NAMED_CONTROL_ROLES.has(target.role.toLowerCase()));
+  const ranks = isGrid ? GRID_RANKS : isNamedControl ? ARIA_FIRST_RANKS : defaultRanks;
   return locators.sort((a, b) => ranks[a.kind] - ranks[b.kind]);
 }
 

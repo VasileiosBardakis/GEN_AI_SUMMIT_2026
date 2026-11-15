@@ -141,6 +141,7 @@ export function isEquivalentLibraryEntry(a: LibraryEntry, b: LibraryEntry): bool
   }
 
   if (stepsA.length === stepsB.length) return true;
+  if (sameStartSig && minLen >= 3) return true;
 
   const longer = stepsA.length > stepsB.length ? stepsA : stepsB;
   const extraSteps = longer.slice(minLen);

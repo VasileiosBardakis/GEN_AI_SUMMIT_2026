@@ -303,7 +303,7 @@ function isTrivialRepetitionGrouping(
   return true;
 }
 
-function candidateCovers(
+export function candidateCovers(
   other: PatternCandidate,
   cand: PatternCandidate,
 ): boolean {
@@ -371,11 +371,11 @@ export function pickPrimaryCandidate(
       ),
   );
   const finalPool = filteredPool.length > 0 ? filteredPool : pool;
-  const isTrivialClickPair = (c: PatternCandidate) =>
-    c.actions.length <= 2 && c.actions.every((a) => a === "click");
+  const isTrivialNavOrClickPair = (c: PatternCandidate) =>
+    c.actions.length <= 2 && c.actions.every((a) => a === "click" || a === "nav");
   return [...finalPool].sort(
     (a, b) =>
-      (isTrivialClickPair(a) ? 1 : 0) - (isTrivialClickPair(b) ? 1 : 0) ||
+      (isTrivialNavOrClickPair(a) ? 1 : 0) - (isTrivialNavOrClickPair(b) ? 1 : 0) ||
       (b.count >= minRepeats ? 1 : 0) - (a.count >= minRepeats ? 1 : 0) ||
       b.count * b.actions.length - a.count * a.actions.length ||
       b.actions.length - a.actions.length ||

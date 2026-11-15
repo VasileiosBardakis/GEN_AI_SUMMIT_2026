@@ -72,7 +72,7 @@ export function resolveCompileModel(): string {
     DEFAULT_V2_COMPILE_MODEL
   );
 }
-const MAX_PROMPT_STEPS = 60;
+const MAX_PROMPT_STEPS = 120;
 const MAX_SUMMARY_CHARS = 4096;
 
 const MODEL_LEAF_ACTIONS = [
@@ -971,7 +971,10 @@ function extractPageSummaryData(
   return { targets, lists, items, sourceMetaByContainerId, summaryViews };
 }
 
-function buildCompilePrompt(ctx: PromptContext): string {
+function buildCompilePrompt(
+  ctx: PromptContext,
+  stabilityCounts: ReadonlyMap<string, number>,
+): string {
   const seenUrlForApp = new Set<string>();
   const stepLines = ctx.indexedSteps.map((step, idx) => {
     const app = resolveStepRealHost(step) ?? normalizeHost(step.app);
@@ -984,7 +987,15 @@ function buildCompilePrompt(ctx: PromptContext): string {
     if (label) entry.label = label;
     if (step.role) entry.role = step.role;
     if (step.tag) entry.tag = step.tag;
-    if (step.target && step.target.length > 0) entry.hasTarget = true;
+    if (step.target && step.target.length > 0) {
+      entry.hasTarget = true;
+      let maxSeen = 0;
+      for (const loc of step.target) {
+        const c = stabilityCounts.get(`${step.action}::${loc.kind}::${loc.value}`) ?? 0;
+        if (c > maxSeen) maxSeen = c;
+      }
+      if (maxSeen > 0) entry.seenCount = maxSeen;
+    }
     if (step.value !== undefined) entry.value = step.value;
     if (step.key !== undefined) entry.key = step.key;
     if (
@@ -1041,7 +1052,7 @@ function buildCompilePrompt(ctx: PromptContext): string {
     "",
     "RULES:",
     "1. Never write CSS/DOM selectors. Every UI step (`click`, `fill`, `select`, `readText`, `readValue`, `extractList`, `waitFor`, `key`, `submit`) must reference a `stepIndex` from Steps or an exact `targetId` from PageSummary Targets.",
-    "2. Output one clean generalized workflow repetition; drop one-off stray clicks or irrelevant side excursions.",
+    "2. Output one clean generalized repetition (preferring the latest complete repetition); drop one-off stray clicks, side excursions, and one-time setup/cookie/consent clicks (`seenCount: 1` when not a varying per-repetition item). Only keep a transient banner/modal click if it recurs, and mark it with \"optional\": true.",
     "3. Keep all distinct form inputs and submit keys (e.g. `Enter`).",
     "4. Parameterize user-supplied variables in `params[]` and `\"{{paramName}}\"`. Use `readText`/`readValue` with `bind` and `\"{{varName}}\"` for values copied across steps or tabs.",
     "5. `switchTab` uses `stepIndex` or `host` (hostname only). Any `navigate` must preserve the full URL (scheme, host, port, path).",
@@ -1103,8 +1114,13 @@ function selectCapturedLocators(
 
   return cloned
     .sort((a, b) => {
+      const aCount = countOf(a.loc);
+      const bCount = countOf(b.loc);
+      const aStable = aCount >= 2 ? 1 : 0;
+      const bStable = bCount >= 2 ? 1 : 0;
+      if (aStable !== bStable) return bStable - aStable;
       if (a.loc.kind === b.loc.kind) {
-        const diff = countOf(b.loc) - countOf(a.loc);
+        const diff = bCount - aCount;
         if (diff !== 0) return diff;
       }
       return a.idx - b.idx;
@@ -1534,11 +1550,13 @@ function resolveSteps(
   stabilityCounts: ReadonlyMap<string, number>,
 ): {
   steps: CompiledStep[];
+  stepHosts: Array<string | undefined>;
   hosts: string[];
   firstHost?: string;
   firstUrl?: string;
 } | null {
   const out: CompiledStep[] = [];
+  const stepHosts: Array<string | undefined> = [];
   const hosts: string[] = [];
   let firstHost: string | undefined;
   let firstUrl: string | undefined;
@@ -1628,6 +1646,7 @@ function resolveSteps(
         steps: nestedSteps,
         ...(raw.optional !== undefined ? { optional: raw.optional } : {}),
       });
+      stepHosts.push(undefined);
       continue;
     }
 
@@ -1643,9 +1662,10 @@ function resolveSteps(
     }
     recordLocation(resolved.host, resolved.url);
     out.push(resolved.step);
+    stepHosts.push(resolved.host);
   }
 
-  return { steps: out, hosts, firstHost, firstUrl };
+  return { steps: out, stepHosts, hosts, firstHost, firstUrl };
 }
 
 function computeStats(
@@ -1721,7 +1741,8 @@ export async function compileWorkflow(
     repeatCount,
   };
 
-  const prompt = buildCompilePrompt(ctx);
+  const stabilityCounts = buildLocatorStabilityCounts(indexedSteps);
+  const prompt = buildCompilePrompt(ctx, stabilityCounts);
   const gemini = createCompileGeminiClient(opts);
 
   const distinctApps = Array.from(
@@ -1768,10 +1789,75 @@ export async function compileWorkflow(
     return null;
   }
 
-  const stabilityCounts = buildLocatorStabilityCounts(indexedSteps);
   const resolved = resolveSteps(modelOut.steps, ctx, stabilityCounts);
   if (!resolved || resolved.steps.length === 0) {
     return null;
+  }
+
+  if (repeatCount >= 2) {
+    const maxSeenForLocators = (
+      action: CompiledLeafStep["action"],
+      locs: readonly Locator[],
+    ): number => {
+      let maxSeen = 0;
+      for (const loc of locs) {
+        const c = stabilityCounts.get(`${action}::${loc.kind}::${loc.value}`) ?? 0;
+        if (c > maxSeen) maxSeen = c;
+      }
+      return maxSeen;
+    };
+
+    const hasRepeatedSteps = resolved.steps.some(
+      (s) =>
+        s.action !== "forEach" &&
+        "target" in s &&
+        Array.isArray(s.target) &&
+        maxSeenForLocators(s.action, s.target) >= 2,
+    );
+
+    if (hasRepeatedSteps) {
+      let seenRepeatedAfter = false;
+      for (let idx = resolved.steps.length - 1; idx >= 0; idx -= 1) {
+        const s = resolved.steps[idx];
+        if (s.action === "forEach") {
+          seenRepeatedAfter = true;
+          continue;
+        }
+        if ("target" in s && Array.isArray(s.target)) {
+          const maxSeen = maxSeenForLocators(s.action, s.target);
+          if (maxSeen >= 2) {
+            seenRepeatedAfter = true;
+          } else if (
+            s.action === "click" &&
+            maxSeen === 1 &&
+            seenRepeatedAfter &&
+            s.optional === undefined
+          ) {
+            const prevStep = resolved.steps[idx - 1];
+            const currHost = resolved.stepHosts[idx];
+            const prevHost = resolved.stepHosts[idx - 1];
+            const isFirstOnPageOrHost =
+              idx === 0 ||
+              prevStep?.action === "navigate" ||
+              prevStep?.action === "switchTab" ||
+              (Boolean(currHost) && Boolean(prevHost) && currHost !== prevHost);
+            if (isFirstOnPageOrHost) {
+              resolved.steps[idx] = { ...s, optional: true };
+            }
+          } else if (
+            s.action === "click" &&
+            maxSeen === 1 &&
+            s.optional === undefined
+          ) {
+            const currHost = resolved.stepHosts[idx];
+            const prevHost = resolved.stepHosts[idx - 1];
+            if (Boolean(currHost) && Boolean(prevHost) && currHost !== prevHost) {
+              resolved.steps[idx] = { ...s, optional: true };
+            }
+          }
+        }
+      }
+    }
   }
 
   const firstRealStep = indexedSteps.find((s) => resolveStepRealHost(s) !== undefined);
