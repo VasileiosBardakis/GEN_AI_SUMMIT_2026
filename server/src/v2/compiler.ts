@@ -2022,6 +2022,8 @@ function logRejectedStep(
   );
 }
 
+const COMPILE_RESOLVE_RETRIES = 2;
+
 function resolveSteps(
   rawSteps: readonly ModelStep[],
   ctx: PromptContext,
@@ -2486,7 +2488,7 @@ export async function compileWorkflow(
           () => null,
         );
 
-  const [modelOut, irisResult] = await Promise.all([
+  let [modelOut, irisResult] = await Promise.all([
     gemini.generateJson(prompt, ModelCompileOutputSchema),
     irisPromise,
   ]);
@@ -2505,7 +2507,19 @@ export async function compileWorkflow(
     return null;
   }
 
-  const resolved = resolveSteps(modelOut.steps, ctx, stabilityCounts);
+  // The model occasionally omits a step reference; one bad step voids the whole
+  // compile, so regenerate before giving up.
+  let resolved = resolveSteps(modelOut.steps, ctx, stabilityCounts);
+  for (
+    let retry = 0;
+    retry < COMPILE_RESOLVE_RETRIES && (!resolved || resolved.steps.length === 0);
+    retry += 1
+  ) {
+    console.log(`[v2/compiler] unresolved step, regenerating (${retry + 1}/${COMPILE_RESOLVE_RETRIES})`);
+    modelOut = await gemini.generateJson(prompt, ModelCompileOutputSchema);
+    if (modelOut.steps.length === 0) break;
+    resolved = resolveSteps(modelOut.steps, ctx, stabilityCounts);
+  }
   if (!resolved || resolved.steps.length === 0) {
     console.log(`[v2/compiler] dropped: no step resolved to a real target (${modelOut.steps.length} model steps)`);
     return null;
