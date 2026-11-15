@@ -139,7 +139,7 @@ async function main() {
       env: {
         ...process.env,
         PORT: String(backendPort),
-        BRAIN_AUTO_PROPOSE: process.env.BRAIN_AUTO_PROPOSE ?? "1",
+        BRAIN_AUTO_PROPOSE: process.env.BRAIN_AUTO_PROPOSE === "0" ? "0" : "1",
       },
     });
     serverChild.on("exit", (code) => {

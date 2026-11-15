@@ -336,6 +336,95 @@ function splitIntoSequences(
   return afterLoopSplit;
 }
 
+const ROW_SUFFIX_RE = /(?:-\d+|_\d+)(?=(?:["']\])?$)/;
+
+function stripRowSuffix(value: string): string {
+  return value.replace(ROW_SUFFIX_RE, "");
+}
+
+function normalizedStepKey(step: Step): string {
+  const kind = step.target?.[0]?.kind ?? "";
+  const val = step.target?.[0]?.value ?? "";
+  return `${step.action}:${kind}:${stripRowSuffix(val)}`;
+}
+
+function computeRowNormalizedStepKeys(steps: Step[]): {
+  keys: string[];
+  isRowIndexed: boolean[];
+} {
+  const rawKeys = steps.map(exactStepKey);
+  const normKeys = steps.map(normalizedStepKey);
+  const rawKeyCounts = new Map<string, number>();
+  const distinctRawByNormKey = new Map<string, Set<string>>();
+
+  for (let i = 0; i < steps.length; i++) {
+    const rawKey = rawKeys[i];
+    const normKey = normKeys[i];
+    rawKeyCounts.set(rawKey, (rawKeyCounts.get(rawKey) ?? 0) + 1);
+    let set = distinctRawByNormKey.get(normKey);
+    if (!set) {
+      set = new Set<string>();
+      distinctRawByNormKey.set(normKey, set);
+    }
+    set.add(rawKey);
+  }
+
+  const keys: string[] = [];
+  const isRowIndexed: boolean[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const rawKey = rawKeys[i];
+    const normKey = normKeys[i];
+    const rowIndexed =
+      normKey !== rawKey &&
+      (rawKeyCounts.get(rawKey) ?? 0) < 2 &&
+      (distinctRawByNormKey.get(normKey)?.size ?? 0) >= 2;
+    isRowIndexed.push(rowIndexed);
+    keys.push(rowIndexed ? normKey : rawKey);
+  }
+
+  return { keys, isRowIndexed };
+}
+
+function normalizeRowIndexedStepsForDetect(steps: Step[]): {
+  stepsForDetect: Step[];
+  originalTargetsByNormKey: Map<string, Step["target"]>;
+} {
+  const { keys, isRowIndexed } = computeRowNormalizedStepKeys(steps);
+  const originalTargetsByNormKey = new Map<string, Step["target"]>();
+  const stepsForDetect = steps.map((step, i) => {
+    if (!isRowIndexed[i] || !step.target) return step;
+    if (!originalTargetsByNormKey.has(keys[i])) {
+      originalTargetsByNormKey.set(keys[i], step.target);
+    }
+    return {
+      ...step,
+      target: step.target.map((loc) => ({
+        ...loc,
+        value: stripRowSuffix(loc.value),
+      })),
+    };
+  });
+  return { stepsForDetect, originalTargetsByNormKey };
+}
+
+function restoreRowIndexedTargets(
+  candidate: Candidate,
+  originalTargetsByNormKey: Map<string, Step["target"]>,
+): Candidate {
+  if (originalTargetsByNormKey.size === 0) return candidate;
+  const restoredSteps = candidate.workflow.steps.map((step) => {
+    const origTarget = originalTargetsByNormKey.get(exactStepKey(step));
+    return origTarget ? { ...step, target: origTarget } : step;
+  });
+  return {
+    ...candidate,
+    workflow: {
+      ...candidate.workflow,
+      steps: restoredSteps,
+    },
+  };
+}
+
 export function filterNoisySteps(
   steps: Step[],
   opts?: {
@@ -350,10 +439,11 @@ export function filterNoisySteps(
   }
 
   const mapping = mapEventsToSteps(steps, opts?.events);
+  const { keys } = computeRowNormalizedStepKeys(steps);
   const indexed: IndexedStep[] = steps.map((step, origIdx) => ({
     step,
     origIdx,
-    key: exactStepKey(step),
+    key: keys[origIdx],
     startTs: mapping.stepMeta[origIdx]?.startTs,
     endTs: mapping.stepMeta[origIdx]?.endTs,
   }));
@@ -380,6 +470,10 @@ export function filterNoisySteps(
 
   for (const seq of sequences) {
     for (let i = 0; i < seq.length; i++) {
+      if (seq[i].step.action === "copy" || seq[i].step.action === "paste") {
+        keptIndices.add(seq[i].origIdx);
+        continue;
+      }
       const hasValidPrev =
         i > 0 &&
         (bigramSeqCount.get(`${seq[i - 1].key}=>${seq[i].key}`) ?? 0) / seqCount >=
@@ -580,6 +674,10 @@ export function buildSolutionText(
     let sawCopy = false;
     let insertedSwitchTab = false;
     const rawLines: string[] = [];
+
+    if (workflow.sourceApp && (hasCopySteps || isCrossHost)) {
+      rawLines.push(`switchTab host="${workflow.sourceApp}"`);
+    }
 
     for (const step of workflow.steps) {
       if (
@@ -795,9 +893,14 @@ export async function runPipeline(
     minBigramShare: config.minBigramShare,
   });
 
-  const workflowCandidates = detectWorkflows(filteredSteps, {
+  const { stepsForDetect, originalTargetsByNormKey } =
+    normalizeRowIndexedStepsForDetect(filteredSteps);
+
+  const workflowCandidates = detectWorkflows(stepsForDetect, {
     events: filteredEvents,
-  });
+  }).map((candidate) =>
+    restoreRowIndexedTargets(candidate, originalTargetsByNormKey),
+  );
   const snippetFindings = detectSnippetsWithText(steps);
   const sharedEdgeFindings = detectSharedEdgesWithText(steps);
   const shortValueFindings = detectShortValues(steps, opts.events);

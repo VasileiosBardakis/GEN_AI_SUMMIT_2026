@@ -323,14 +323,15 @@ describe("pipeline unit & config tests", () => {
     expect(crossSolution).toContain(
       "Read values on portal.local, switch to erp.local, and fill on erp.local:",
     );
+    expect(crossSolution).toContain('1. switchTab host="portal.local"');
     expect(crossSolution).toContain(
-      '1. readText from css="#portal-company" into "{{company_name}}"',
+      '2. readText from css="#portal-company" into "{{company_name}}"',
     );
-    expect(crossSolution).toContain('2. switchTab host="erp.local"');
+    expect(crossSolution).toContain('3. switchTab host="erp.local"');
     expect(crossSolution).toContain(
-      '3. fill testid="erp-vendor" with "{{company_name}}"',
+      '4. fill testid="erp-vendor" with "{{company_name}}"',
     );
-    expect(crossSolution).toContain('4. click text="Save"');
+    expect(crossSolution).toContain('5. click text="Save"');
     expect(crossSolution).not.toContain("aria=");
 
     const singleHostWf: Workflow = {
