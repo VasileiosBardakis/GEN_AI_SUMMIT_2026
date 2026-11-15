@@ -1,11 +1,11 @@
 {
-  "promptHash": "e3df4895cbb832b947474f62de1ee77d8664a2d4646bd7a55d2ed25be772d001",
+  "promptHash": "04316bf55421802a8034b80e8c19e25563dc3c7d7b57f5e7dd4c20f63d798509",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Update Client Lookup Values",
-    "reason": "Automate updating client lookup values from the sheet table to the client detail forms.",
+    "name": "Sync Client Rates",
+    "reason": "Automate copying lookup rates from sheet to client details for pending items.",
     "risk": "low",
     "runMode": "run_remaining",
     "params": [
@@ -39,7 +39,7 @@
             "stepIndex": 3,
             "withinId": "ps_4",
             "withinTextParam": "clientName",
-            "bind": "lookupValue"
+            "bind": "rateValue"
           },
           {
             "action": "click",
@@ -50,7 +50,7 @@
             "stepIndex": 5,
             "withinId": "ps_2",
             "withinTextParam": "clientName",
-            "value": "{{lookupValue}}"
+            "value": "{{rateValue}}"
           },
           {
             "action": "click",
