@@ -13,6 +13,46 @@ export type RepeatedPattern = {
   count: number;
 };
 
+export type PatternInstance = {
+  startTs: number;
+  endTs: number;
+  steps: V2Step[];
+  bindings: Record<string, string>;
+};
+
+export type PatternCandidate = {
+  signature: string;
+  actions: V2Action[];
+  count: number;
+  apps: string[];
+  instances: PatternInstance[];
+};
+
+function buildBindings(matchedSteps: V2Step[]): Record<string, string> {
+  const bindings: Record<string, string> = {};
+  for (let idx = 0; idx < matchedSteps.length; idx++) {
+    const value = matchedSteps[idx].value;
+    if (typeof value === "string" && value.length > 0) {
+      bindings[`step_${idx}`] = value;
+    }
+  }
+  return bindings;
+}
+
+function collectApps(instances: PatternInstance[]): string[] {
+  const apps: string[] = [];
+  const seen = new Set<string>();
+  for (const instance of instances) {
+    for (const step of instance.steps) {
+      if (step.app.length > 0 && !seen.has(step.app)) {
+        seen.add(step.app);
+        apps.push(step.app);
+      }
+    }
+  }
+  return apps;
+}
+
 export function splitEpisodes(
   steps: V2Step[],
   idleGapMs = 30_000,
@@ -48,7 +88,7 @@ export function splitEpisodes(
   return episodes;
 }
 
-export function countRepeatedPatterns(
+export function detectRepeatedCandidates(
   steps: V2Step[],
   opts?: {
     minRepeats?: number;
@@ -56,7 +96,7 @@ export function countRepeatedPatterns(
     maxLen?: number;
     idleGapMs?: number;
   },
-): RepeatedPattern[] {
+): PatternCandidate[] {
   const minRepeats = opts?.minRepeats ?? 3;
   const minLen = Math.max(1, opts?.minLen ?? 2);
   const maxLen = Math.max(minLen, opts?.maxLen ?? 8);
@@ -65,52 +105,65 @@ export function countRepeatedPatterns(
   const episodes = splitEpisodes(steps, idleGapMs);
   if (episodes.length === 0) return [];
 
-  const countsBySession = new Map<
+  const candidatesBySession = new Map<
     string,
-    Map<string, { actions: V2Action[]; count: number }>
+    Map<string, { actions: V2Action[]; instances: PatternInstance[] }>
   >();
 
   for (const episode of episodes) {
-    let sessionCounts = countsBySession.get(episode.session);
-    if (!sessionCounts) {
-      sessionCounts = new Map();
-      countsBySession.set(episode.session, sessionCounts);
+    let sessionCandidates = candidatesBySession.get(episode.session);
+    if (!sessionCandidates) {
+      sessionCandidates = new Map();
+      candidatesBySession.set(episode.session, sessionCandidates);
     }
 
-    const actions = episode.steps.map((s) => s.action);
-    const n = actions.length;
+    const n = episode.steps.length;
     const upperLen = Math.min(maxLen, n);
 
     for (let len = minLen; len <= upperLen; len++) {
       const nextAllowedIdx = new Map<string, number>();
 
       for (let i = 0; i <= n - len; i++) {
-        const slice = actions.slice(i, i + len);
-        const signature = slice.join("->");
+        const matchedSteps = episode.steps.slice(i, i + len);
+        const actions = matchedSteps.map((s) => s.action);
+        const signature = actions.join("->");
         const allowedFrom = nextAllowedIdx.get(signature) ?? 0;
         if (i < allowedFrom) continue;
 
         nextAllowedIdx.set(signature, i + len);
-        const entry = sessionCounts.get(signature);
+        const instance: PatternInstance = {
+          startTs: matchedSteps[0].ts,
+          endTs: matchedSteps[matchedSteps.length - 1].ts,
+          steps: matchedSteps,
+          bindings: buildBindings(matchedSteps),
+        };
+
+        const entry = sessionCandidates.get(signature);
         if (entry) {
-          entry.count += 1;
+          entry.instances.push(instance);
         } else {
-          sessionCounts.set(signature, { actions: slice, count: 1 });
+          sessionCandidates.set(signature, {
+            actions,
+            instances: [instance],
+          });
         }
       }
     }
   }
 
-  const bestBySignature = new Map<string, RepeatedPattern>();
-  for (const sessionCounts of countsBySession.values()) {
-    for (const [signature, entry] of sessionCounts.entries()) {
-      if (entry.count < minRepeats) continue;
+  const bestBySignature = new Map<string, PatternCandidate>();
+  for (const sessionCandidates of candidatesBySession.values()) {
+    for (const [signature, entry] of sessionCandidates.entries()) {
+      const count = entry.instances.length;
+      if (count < minRepeats) continue;
       const existing = bestBySignature.get(signature);
-      if (!existing || entry.count > existing.count) {
+      if (!existing || count > existing.count) {
         bestBySignature.set(signature, {
           signature,
           actions: entry.actions,
-          count: entry.count,
+          count,
+          apps: collectApps(entry.instances),
+          instances: entry.instances,
         });
       }
     }
@@ -122,4 +175,20 @@ export function countRepeatedPatterns(
       b.actions.length - a.actions.length ||
       a.signature.localeCompare(b.signature),
   );
+}
+
+export function countRepeatedPatterns(
+  steps: V2Step[],
+  opts?: {
+    minRepeats?: number;
+    minLen?: number;
+    maxLen?: number;
+    idleGapMs?: number;
+  },
+): RepeatedPattern[] {
+  return detectRepeatedCandidates(steps, opts).map((candidate) => ({
+    signature: candidate.signature,
+    actions: candidate.actions,
+    count: candidate.count,
+  }));
 }
