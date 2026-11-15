@@ -523,6 +523,84 @@ function checkSteps(
   return null;
 }
 
+export function locatorsOverlap(
+  a: readonly Locator[],
+  b: readonly Locator[],
+): boolean {
+  for (const la of a) {
+    const va = la.value.trim();
+    if (!va) continue;
+    for (const lb of b) {
+      if (lb.kind === la.kind && lb.value.trim() === va) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function isSameStepTarget(
+  aTarget: readonly Locator[] | undefined,
+  aWithin: readonly Locator[] | undefined,
+  bTarget: readonly Locator[] | undefined,
+  bWithin: readonly Locator[] | undefined,
+): boolean {
+  if (!aTarget?.length || !bTarget?.length) return false;
+  if (!locatorsOverlap(aTarget, bTarget)) return false;
+  const hasAWithin = Boolean(aWithin && aWithin.length > 0);
+  const hasBWithin = Boolean(bWithin && bWithin.length > 0);
+  if (!hasAWithin && !hasBWithin) return true;
+  if (hasAWithin && hasBWithin) {
+    return locatorsOverlap(aWithin!, bWithin!);
+  }
+  return false;
+}
+
+type RecordedRead = {
+  target: Locator[];
+  within?: Locator[];
+  path: string;
+};
+
+function checkNoSelfReads(
+  steps: readonly CompiledStep[],
+  pathPrefix: string,
+  priorReads: RecordedRead[],
+): string | null {
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const stepPath = `${pathPrefix}[${i}]`;
+    if (step.action === "forEach") {
+      const err = checkNoSelfReads(step.steps, `${stepPath}.steps`, priorReads);
+      if (err) return err;
+      continue;
+    }
+    if (step.action === "readText" || step.action === "readValue") {
+      priorReads.push({
+        target: step.target,
+        within: step.within,
+        path: stepPath,
+      });
+      continue;
+    }
+    if (
+      (step.action === "fill" ||
+        step.action === "insertText" ||
+        step.action === "select") &&
+      step.target &&
+      step.target.length > 0
+    ) {
+      const match = priorReads.find((r) =>
+        isSameStepTarget(r.target, r.within, step.target, step.within),
+      );
+      if (match) {
+        return `Self-read: ${step.action} target at ${stepPath} was previously read at ${match.path}`;
+      }
+    }
+  }
+  return null;
+}
+
 export function validateCompiledWorkflow(
   workflow: CompiledWorkflow,
   opts?: {
@@ -611,6 +689,11 @@ export function validateCompiledWorkflow(
   );
   if (stepErr) {
     return { ok: false, error: stepErr };
+  }
+
+  const selfReadErr = checkNoSelfReads(data.steps, "steps", []);
+  if (selfReadErr) {
+    return { ok: false, error: selfReadErr };
   }
 
   return { ok: true, value: data };

@@ -1,11 +1,12 @@
 import type { Event } from "@gen/shared";
 import {
+  hostnameFromUrl,
   normalizeHost as normalizeHostBase,
   resolveEventHost,
 } from "../common/host.ts";
 import { judgeRecallIris, type IrisJudgeOptions } from "../llm/iris.ts";
 import { buildStartSignature } from "./implementor.ts";
-import type { LibraryEntry } from "./types.ts";
+import { toLocatorList, type LibraryEntry, type Locator, type Step } from "./types.ts";
 
 const INTERACTIVE_EVENT_TYPES = new Set<Event["type"]>([
   "click",
@@ -554,4 +555,451 @@ export function createLibraryRecallMatcher(): LibraryRecallMatcher {
     suppressOnTarget,
     notifyTargetVisited,
   };
+}
+
+const PREFIX_SKIPPED_ACTIONS = new Set<Step["action"]>([
+  "navigate",
+  "wait",
+  "switchTab",
+  "extractList",
+  "waitFor",
+]);
+
+const PREFIX_INTERACTIVE_EVENT_TYPES = new Set<Event["type"]>([
+  "click",
+  "dblclick",
+  "input",
+  "change",
+  "paste",
+  "copy",
+  "select",
+  "submit",
+  "keydown",
+  "key",
+]);
+
+function locatorsMatchForPrefix(
+  stepLoc: Locator,
+  evtLoc: NonNullable<Event["target"]>["locators"][number],
+): boolean {
+  const sv = stepLoc.value.trim().toLowerCase();
+  const ev = evtLoc.value.trim().toLowerCase();
+  if (!sv || !ev) return false;
+  if (ev === sv) return true;
+  if (stepLoc.kind !== evtLoc.kind) return false;
+  if (stepLoc.kind === "css") {
+    const stepParts = sv.split(",").map((s) => s.trim()).filter(Boolean);
+    const evtParts = ev.split(",").map((s) => s.trim()).filter(Boolean);
+    for (const sp of stepParts) {
+      if (evtParts.includes(sp)) return true;
+      if (
+        evtParts.some(
+          (ep) =>
+            ep.endsWith(` ${sp}`) ||
+            ep.endsWith(`>${sp}`) ||
+            ep.endsWith(`> ${sp}`),
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function extractAriaName(raw: string): string | null {
+  const trimmed = raw.trim();
+  const m = /^[a-z]+\[\s*name\s*=\s*["']([\s\S]*?)["']\s*\]$/i.exec(trimmed);
+  if (m?.[1]) return m[1].toLowerCase().trim();
+  if (!trimmed.startsWith("[")) return trimmed.toLowerCase();
+  return null;
+}
+
+function stepLocatorsMatchEvent(stepLocators: Locator[], evt: Event): boolean {
+  const concrete = stepLocators.filter((loc) => !loc.value.includes("{{"));
+  if (concrete.length === 0) {
+    return Boolean(evt.target);
+  }
+  const evtLocators = evt.target?.locators ?? [];
+  for (const sl of concrete) {
+    if (evtLocators.some((el) => locatorsMatchForPrefix(sl, el))) {
+      return true;
+    }
+  }
+  const evtLabel = evt.target?.label?.trim().toLowerCase();
+  if (evtLabel) {
+    for (const sl of concrete) {
+      if (sl.kind === "text" && sl.value.trim().toLowerCase() === evtLabel) {
+        return true;
+      }
+      if (sl.kind === "aria") {
+        const ariaName = extractAriaName(sl.value);
+        if (ariaName && ariaName === evtLabel) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function advancePastSkippedSteps(
+  steps: readonly Step[],
+  startIdx: number,
+  initialHost: string | undefined,
+): { idx: number; host: string | undefined } {
+  let idx = startIdx;
+  let host = initialHost;
+  while (idx < steps.length && PREFIX_SKIPPED_ACTIONS.has(steps[idx].action)) {
+    const step = steps[idx];
+    if (step.action === "switchTab" && step.host) {
+      host = normalizeHost(step.host);
+    } else if (step.action === "navigate") {
+      host = hostnameFromUrl(step.url) ?? host;
+    }
+    idx += 1;
+  }
+  return { idx, host };
+}
+
+function isFocusingClickForStep(evt: Event, step: Step): boolean {
+  if (evt.type !== "click" && evt.type !== "dblclick") return false;
+  if (step.action !== "fill" && step.action !== "insertText" && step.action !== "select") {
+    return false;
+  }
+  if (!("target" in step) || !step.target) return false;
+  return stepLocatorsMatchEvent(toLocatorList(step.target), evt);
+}
+
+function matchStepToEvent(
+  step: Step,
+  evt: Event,
+  expectedHost: string | undefined,
+  entry: LibraryEntry,
+): { matched: boolean; value?: string; fillLocators?: Locator[]; bindName?: string } {
+  const evtHost = extractEventHost(evt);
+  if (expectedHost && evtHost && !hostMatches(evtHost, expectedHost)) {
+    return { matched: false };
+  }
+
+  switch (step.action) {
+    case "readText":
+    case "readValue": {
+      if (evt.type !== "copy") return { matched: false };
+      if (!stepLocatorsMatchEvent(toLocatorList(step.target), evt)) {
+        return { matched: false };
+      }
+      const val = (evt.value ?? evt.clipboard?.text ?? "").trim();
+      return {
+        matched: true,
+        ...(val ? { value: val } : {}),
+        bindName: step.bind,
+      };
+    }
+    case "fill":
+    case "insertText": {
+      if (evt.type !== "input" && evt.type !== "change" && evt.type !== "paste") {
+        return { matched: false };
+      }
+      const rawVal = evt.value ?? evt.clipboard?.text ?? "";
+      if (
+        evt.type === "input" &&
+        evt.meta?.typing?.inputType?.startsWith("delete") &&
+        rawVal.trim().length === 0
+      ) {
+        return { matched: false };
+      }
+      const stepLocs =
+        "target" in step && step.target
+          ? toLocatorList(step.target)
+          : entry.eyes.targetHints.locators;
+      if (stepLocs.length > 0) {
+        if (!stepLocatorsMatchEvent(stepLocs, evt)) {
+          return { matched: false };
+        }
+      } else if (rawVal.trim().length === 0) {
+        return { matched: false };
+      }
+      const val = rawVal.trim();
+      const eventScriptLocs: Locator[] | undefined = evt.target?.locators?.flatMap(
+        (l): Locator[] =>
+          l.kind === "testid" ||
+          l.kind === "aria" ||
+          l.kind === "css" ||
+          l.kind === "text"
+            ? [{ kind: l.kind, value: l.value }]
+            : [],
+      );
+      return {
+        matched: true,
+        ...(val ? { value: val } : {}),
+        fillLocators: stepLocs.length > 0 ? stepLocs : eventScriptLocs,
+      };
+    }
+    case "select": {
+      if (evt.type !== "select" && evt.type !== "change") {
+        return { matched: false };
+      }
+      if (!stepLocatorsMatchEvent(toLocatorList(step.target), evt)) {
+        return { matched: false };
+      }
+      const val = (evt.value ?? "").trim();
+      return {
+        matched: true,
+        ...(val ? { value: val } : {}),
+        fillLocators: toLocatorList(step.target),
+      };
+    }
+    case "click": {
+      if (evt.type !== "click" && evt.type !== "dblclick" && evt.type !== "submit") {
+        return { matched: false };
+      }
+      if (!stepLocatorsMatchEvent(toLocatorList(step.target), evt)) {
+        return { matched: false };
+      }
+      return { matched: true };
+    }
+    case "pressKey": {
+      const keyHit =
+        ((evt.type === "keydown" || evt.type === "key") && evt.meta?.key === step.key) ||
+        (evt.type === "submit" && step.key === "Enter");
+      if (!keyHit) return { matched: false };
+      if (step.target && !stepLocatorsMatchEvent(toLocatorList(step.target), evt)) {
+        return { matched: false };
+      }
+      return { matched: true };
+    }
+    default:
+      return { matched: false };
+  }
+}
+
+function filterPrefixInteractiveEvents(events: readonly Event[]): Event[] {
+  return events.filter((evt) => {
+    if (!PREFIX_INTERACTIVE_EVENT_TYPES.has(evt.type)) return false;
+    if (evt.type === "keydown" || evt.type === "key") {
+      const key = evt.meta?.key;
+      return key === "Enter" || key === "Tab" || key === "Escape";
+    }
+    return true;
+  });
+}
+
+function computeMatchedPrefixInternal(
+  sessionEvents: Event[],
+  entry: LibraryEntry,
+): {
+  startStepIndex: number;
+  completedValues: string[];
+  boundValues: Record<string, string>;
+} {
+  const steps = entry.script.steps;
+  if (entry.kind === "snippet" || steps.length === 0 || sessionEvents.length === 0) {
+    return { startStepIndex: 0, completedValues: [], boundValues: {} };
+  }
+
+  const interactiveEvents = filterPrefixInteractiveEvents(sessionEvents);
+  if (interactiveEvents.length === 0) {
+    return { startStepIndex: 0, completedValues: [], boundValues: {} };
+  }
+
+  const completedValues: string[] = [];
+  const boundValues: Record<string, string> = {};
+  const addCompletedValue = (val: string | undefined): number => {
+    if (!val) return -1;
+    const existingIdx = completedValues.indexOf(val);
+    if (existingIdx !== -1) return existingIdx;
+    completedValues.push(val);
+    return completedValues.length - 1;
+  };
+
+  let startStepIndex = 0;
+  let currentHost: string | undefined = entry.eyes.scope.apps[0]
+    ? normalizeHost(entry.eyes.scope.apps[0])
+    : undefined;
+  let lastFillLocs: Locator[] | undefined;
+  let lastFillValIdx = -1;
+  let lastFillBindName: string | undefined;
+
+  let evtCursor = 0;
+  while (evtCursor < interactiveEvents.length) {
+    const { idx: candidateIdx, host: nextHost } = advancePastSkippedSteps(
+      steps,
+      startStepIndex,
+      currentHost,
+    );
+    if (candidateIdx >= steps.length) break;
+
+    const candidateStep = steps[candidateIdx];
+
+    if (candidateStep.action === "forEach") {
+      const body = candidateStep.steps;
+      if (body.length === 0) break;
+
+      let loopIdx = 0;
+      let loopHost = nextHost;
+      let iterValues: string[] = [];
+      let iterLastFillLocs: Locator[] | undefined;
+      let iterLastFillValIdx = -1;
+      let matchedAnyInLoop = false;
+
+      while (evtCursor < interactiveEvents.length) {
+        const evt = interactiveEvents[evtCursor];
+        const adv = advancePastSkippedSteps(body, loopIdx, loopHost);
+        if (adv.idx >= body.length) {
+          for (const v of iterValues) addCompletedValue(v);
+          iterValues = [];
+          loopIdx = 0;
+          loopHost = nextHost;
+          iterLastFillLocs = undefined;
+          iterLastFillValIdx = -1;
+          continue;
+        }
+        loopIdx = adv.idx;
+        loopHost = adv.host;
+        const loopStep = body[loopIdx];
+
+        if (
+          iterLastFillLocs &&
+          (evt.type === "input" || evt.type === "change" || evt.type === "paste") &&
+          stepLocatorsMatchEvent(iterLastFillLocs, evt)
+        ) {
+          const val = (evt.value ?? evt.clipboard?.text ?? "").trim();
+          if (val && iterLastFillValIdx >= 0) {
+            iterValues[iterLastFillValIdx] = val;
+          }
+          evtCursor += 1;
+          continue;
+        }
+
+        if (isFocusingClickForStep(evt, loopStep)) {
+          evtCursor += 1;
+          continue;
+        }
+
+        if (
+          (evt.type === "keydown" || evt.type === "key") &&
+          evt.meta?.key === "Tab" &&
+          !(loopStep.action === "pressKey" && loopStep.key === "Tab")
+        ) {
+          evtCursor += 1;
+          continue;
+        }
+
+        const res = matchStepToEvent(loopStep, evt, loopHost, entry);
+        if (!res.matched) {
+          break;
+        }
+
+        matchedAnyInLoop = true;
+        if (res.value) {
+          const existing = iterValues.indexOf(res.value);
+          if (existing === -1) {
+            iterValues.push(res.value);
+            iterLastFillValIdx = iterValues.length - 1;
+          } else {
+            iterLastFillValIdx = existing;
+          }
+        } else {
+          iterLastFillValIdx = -1;
+        }
+        iterLastFillLocs = res.fillLocators;
+        loopIdx += 1;
+        evtCursor += 1;
+
+        const afterAdv = advancePastSkippedSteps(body, loopIdx, loopHost);
+        if (afterAdv.idx >= body.length) {
+          for (const v of iterValues) addCompletedValue(v);
+          iterValues = [];
+          loopIdx = 0;
+          loopHost = nextHost;
+          iterLastFillLocs = undefined;
+          iterLastFillValIdx = -1;
+        } else {
+          loopIdx = afterAdv.idx;
+          loopHost = afterAdv.host;
+        }
+      }
+
+      if (matchedAnyInLoop) {
+        startStepIndex = candidateIdx;
+      }
+      break;
+    }
+
+    const evt = interactiveEvents[evtCursor];
+
+    if (
+      lastFillLocs &&
+      (evt.type === "input" || evt.type === "change" || evt.type === "paste") &&
+      stepLocatorsMatchEvent(lastFillLocs, evt)
+    ) {
+      const val = (evt.value ?? evt.clipboard?.text ?? "").trim();
+      if (val) {
+        if (lastFillValIdx >= 0) {
+          completedValues[lastFillValIdx] = val;
+        } else {
+          lastFillValIdx = addCompletedValue(val);
+        }
+        if (lastFillBindName) {
+          boundValues[lastFillBindName] = val;
+        }
+      }
+      evtCursor += 1;
+      continue;
+    }
+
+    if (isFocusingClickForStep(evt, candidateStep)) {
+      evtCursor += 1;
+      continue;
+    }
+
+    if (
+      (evt.type === "keydown" || evt.type === "key") &&
+      evt.meta?.key === "Tab" &&
+      !(candidateStep.action === "pressKey" && candidateStep.key === "Tab")
+    ) {
+      evtCursor += 1;
+      continue;
+    }
+
+    const res = matchStepToEvent(candidateStep, evt, nextHost, entry);
+    if (!res.matched) {
+      break;
+    }
+
+    if (res.value) {
+      lastFillValIdx = addCompletedValue(res.value);
+      if (res.bindName) {
+        boundValues[res.bindName] = res.value;
+      }
+    } else {
+      lastFillValIdx = -1;
+    }
+    lastFillLocs = res.fillLocators;
+    lastFillBindName = res.bindName;
+    currentHost = nextHost;
+    startStepIndex = candidateIdx + 1;
+    evtCursor += 1;
+  }
+
+  return { startStepIndex, completedValues, boundValues };
+}
+
+export function computeMatchedPrefix(
+  sessionEvents: Event[],
+  entry: LibraryEntry,
+): { startStepIndex: number; completedValues: string[] } {
+  const { startStepIndex, completedValues } = computeMatchedPrefixInternal(
+    sessionEvents,
+    entry,
+  );
+  return { startStepIndex, completedValues };
+}
+
+export function extractMatchedPrefixBindings(
+  sessionEvents: Event[],
+  entry: LibraryEntry,
+): Record<string, string> {
+  return computeMatchedPrefixInternal(sessionEvents, entry).boundValues;
 }

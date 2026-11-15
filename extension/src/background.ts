@@ -69,6 +69,7 @@ type V2ActionScript = {
   runMode?: "run_remaining" | "save_only";
   params?: ScriptParam[];
   pageSummary?: unknown;
+  skipRowValues?: string[];
 };
 
 interface ChromeRuntimeMessage {
@@ -1040,6 +1041,7 @@ export interface HandsCommand {
   runMode?: "run" | "run_remaining" | "save_only";
   params?: ScriptParam[] | Record<string, string>;
   paramValues?: Record<string, string>;
+  skipRowValues?: string[];
   primaryLabel?: string;
   pauseNotice?: string;
 }
@@ -1604,7 +1606,9 @@ export async function handleHandsCommand(
       const initialParams =
         cmd.paramValues ??
         (cmd.params && !Array.isArray(cmd.params) ? cmd.params : undefined);
-      const results = await runActionScript(tabId ?? -1, scriptToRun, initialParams);
+      const results = await runActionScript(tabId ?? -1, scriptToRun, initialParams, {
+        skipRowValues: cmd.skipRowValues,
+      });
       console.log("[eyes-bg] runActionScript results:", results);
       payload = { id: cmd.id, ok: true, results };
     } catch (err) {
@@ -1684,6 +1688,7 @@ export async function runActionScript(
   tabId: number,
   script: V2ActionScript | ActionScript,
   initialParams?: Record<string, string>,
+  opts?: { skipRowValues?: string[] },
 ): Promise<StepResult[]> {
   const v2Script = script as V2ActionScript;
   const bindings: Record<string, BindingValue> = {};
@@ -1709,6 +1714,9 @@ export async function runActionScript(
       }
     }
   }
+  const skipRowValues =
+    opts?.skipRowValues ??
+    (Array.isArray(v2Script.skipRowValues) ? v2Script.skipRowValues : undefined);
   await ensureLocalPiiLoaded();
   const runControl: RunControl = { aborted: false, waiters: new Set() };
   activeRunControl = runControl;
@@ -1719,6 +1727,7 @@ export async function runActionScript(
       scriptName: v2Script.name,
       pauseBeforeSubmit: Boolean(v2Script.pauseBeforeSubmit),
       pageSummary: v2Script.pageSummary,
+      skipRowValues,
       runControl,
       isTopLevel: true,
     });
@@ -1820,9 +1829,24 @@ type RunContext = {
   scriptName?: string;
   pauseBeforeSubmit: boolean;
   pageSummary?: unknown;
+  skipRowValues?: string[];
   runControl: RunControl;
   isTopLevel: boolean;
 };
+
+function rowMatchesSkipValues(
+  item: Record<string, unknown>,
+  skipSet: ReadonlySet<string>,
+): boolean {
+  for (const [k, v] of Object.entries(item)) {
+    if (k === "cells" || typeof v !== "string") continue;
+    const norm = v.toLowerCase().replace(/\s+/g, " ").trim();
+    if (norm && skipSet.has(norm)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function stepLocatorsForWatch(step: V2DomStep): Locator[] {
   const out: Locator[] = [];
@@ -2040,9 +2064,25 @@ async function runStepsInternal(
 
       if (step.action === "forEach") {
         const items = resolveForEachItems(step.items, bindings, scope, ctx.pageSummary);
+        const skipSources = [
+          ...(ctx.skipRowValues ?? []),
+          ...(Array.isArray(bindings.skipRowValues) ? bindings.skipRowValues : []),
+          ...(Array.isArray(scope.skipRowValues) ? scope.skipRowValues : []),
+        ];
+        const skipSet =
+          typeof step.items === "string" && skipSources.length > 0
+            ? new Set(
+                skipSources
+                  .map((v) => String(v ?? "").toLowerCase().replace(/\s+/g, " ").trim())
+                  .filter(Boolean),
+              )
+            : null;
         for (const item of items) {
           if (ctx.runControl.aborted) {
             throw new Error("Run stopped by user");
+          }
+          if (skipSet && skipSet.size > 0 && rowMatchesSkipValues(item, skipSet)) {
+            continue;
           }
           const nested = await runStepsInternal(
             currentTabId,

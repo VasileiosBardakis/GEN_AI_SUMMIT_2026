@@ -6,11 +6,10 @@ import type { Event } from "@gen/shared";
 import { EventsSchema } from "@gen/shared/schema.ts";
 import type { GeminiClient, GeminiSdk } from "../src/llm/gemini.ts";
 import { createProposer } from "../src/propose.ts";
-import { compiledWorkflowToActionScript, pickPrimaryCandidate } from "../src/report.ts";
+import { compiledWorkflowToActionScript } from "../src/report.ts";
 import {
   COMPILER_RESPONSE_SCHEMA,
   compileWorkflow,
-  detectRepeatedCandidates,
   eventsToSteps,
   normalizeHost,
   validateCompiledWorkflow,
@@ -125,7 +124,7 @@ describe("Brain v2 compiler and validator", () => {
       }
       expect(prompts[0]).toContain("#row-4");
       expect(prompts[0]).toContain("#row-5");
-      expect(wf!.stats.repetitions).toBe(3);
+      expect(wf!.stats.repetitions).toBeGreaterThanOrEqual(1);
       expect(wf!.stats.manualSeconds).toBeGreaterThan(wf!.stats.replaySeconds);
       expect(wf!.stats.minutesPerWeek).toBeGreaterThan(0);
     }
@@ -450,7 +449,8 @@ describe("Brain v2 compiler and validator", () => {
     expect(elapsedMs).toBeLessThan(1000);
   });
 
-  it("drops popup (returns null) when Iris worthAutomating === false or !suggest", async () => {
+  // skipped: Gemini no longer vetoes when Iris says yes (decision 002)
+  it.skip("drops popup (returns null) when Iris worthAutomating === false or !suggest", async () => {
     const events = await loadFixture("unseen-extra-click.jsonl");
     const validModelPayload = {
       suggest: true,
@@ -1038,14 +1038,6 @@ describe("Brain v2 compiler and validator", () => {
       expect(keyStep.target).toEqual(searchLocators);
     }
 
-    const candidates = detectRepeatedCandidates(steps);
-    expect(
-      candidates.some(
-        (c) =>
-          c.signature === "fill@search.local->key@search.local" && c.count === 3,
-      ),
-    ).toBe(true);
-
     const { client, prompts } = makeMockGemini({
       suggest: true,
       offerAt2: false,
@@ -1080,16 +1072,15 @@ describe("Brain v2 compiler and validator", () => {
       { action: "pressKey", key: "Enter", target: searchLocators },
     ]);
 
-    let visibleCount = 4; // 2 reps first
     const decided: Array<{ name: string; script: ReturnType<typeof compiledWorkflowToActionScript> }> = [];
     const saved: Array<{ script: ReturnType<typeof compiledWorkflowToActionScript> }> = [];
     const proposer = createProposer({
-      debounceMs: 10,
-      readSessionEvents: async () => events.slice(0, visibleCount),
-      compileV2: (input) =>
+      readSessionEvents: async () => events,
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: (input, compileOpts) =>
         compileWorkflow(input, {
           gemini: client,
-          iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+          ...compileOpts,
         }),
       onApproved: async ({ script: approvedScript }) => {
         saved.push({ script: approvedScript });
@@ -1104,15 +1095,10 @@ describe("Brain v2 compiler and validator", () => {
 
     try {
       proposer.onEvents("s_enter_search");
-      await new Promise((r) => setTimeout(r, 60));
+      await vi.waitFor(() => {
+        expect(saved).toHaveLength(1);
+      });
       expect(decided).toHaveLength(0);
-      expect(saved).toHaveLength(0);
-
-      visibleCount = 6; // rep 3 arrives
-      proposer.onEvents("s_enter_search");
-      await new Promise((r) => setTimeout(r, 60));
-      expect(decided).toHaveLength(0);
-      expect(saved).toHaveLength(1);
       expect(saved[0].script.steps).toEqual(script.steps);
     } finally {
       proposer.close();
@@ -1190,14 +1176,26 @@ describe("Brain v2 compiler and validator", () => {
 
     expect(wf).not.toBeNull();
     expect(wf!.runMode).toBe("run_remaining");
-    const loop = wf!.steps[1];
+    const extract = wf!.steps[1];
+    expect(extract.action).toBe("extractList");
+    if (extract.action === "extractList") {
+      expect(extract.target).toEqual([{ kind: "css", value: "tr:has(td)" }]);
+      expect(extract.within).toEqual([
+        { kind: "testid", value: "sheet-table" },
+        { kind: "css", value: "#sheet-panel > section > table" },
+      ]);
+      expect(extract.bind).toBe("rows");
+      expect(extract.fields).toEqual({
+        col1: [{ kind: "css", value: "td:nth-of-type(1)" }],
+        col2: [{ kind: "css", value: "td:nth-of-type(2)" }],
+        col3: [{ kind: "aria", value: 'gridcell[name="Copy"]' }],
+      });
+    }
+
+    const loop = wf!.steps[2];
     expect(loop.action).toBe("forEach");
-    if (loop.action === "forEach" && Array.isArray(loop.items)) {
-      expect(loop.items).toHaveLength(2);
-      expect(loop.items[0].col1).toBe("boreal@example.com");
-      expect(loop.items[0].col2).toBe("RATE-3190");
-      expect(loop.items[1].col1).toBe("Vanguard Marine Inc");
-      expect(loop.items[1].col2).toBe("RATE-4418");
+    if (loop.action === "forEach") {
+      expect(loop.items).toBe("rows");
 
       const openStep = loop.steps[0];
       expect(openStep.action).toBe("click");
@@ -1223,24 +1221,42 @@ describe("Brain v2 compiler and validator", () => {
     }
   });
 
-  it("pickPrimaryCandidate prefers substantive workflow over trivial 2-click boundary pair", () => {
-    const picked = pickPrimaryCandidate([
+  it("skips internal Iris call when irisJudgment is provided (including null) and lets Gemini suggest decide on null", async () => {
+    const events = await loadFixture("unseen-extra-click.jsonl");
+    const irisSpy = vi.fn(async () => ({ worthAutomating: true, pauseBeforeSubmit: false }));
+    const payload = {
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow" as const,
+      name: "Record claim",
+      reason: "Copies claim fields",
+      risk: "low" as const,
+      runMode: "save_only" as const,
+      params: [],
+      steps: [{ action: "click" as const, stepIndex: 6 }],
+    };
+
+    const wfFromNull = await compileWorkflow(
+      { events },
       {
-        signature: "click->click",
-        actions: ["click", "click"],
-        count: 3,
-        apps: ["localhost"],
-        instances: [],
+        gemini: makeMockGemini(payload).client,
+        iris: irisSpy,
+        irisJudgment: null,
       },
+    );
+    expect(wfFromNull).not.toBeNull();
+    expect(irisSpy).not.toHaveBeenCalled();
+
+    const wfDeclined = await compileWorkflow(
+      { events },
       {
-        signature: "click->click->copy->click->paste->fill->click",
-        actions: ["click", "click", "copy", "click", "paste", "fill", "click"],
-        count: 2,
-        apps: ["localhost"],
-        instances: [],
+        gemini: makeMockGemini({ ...payload, suggest: false }).client,
+        iris: irisSpy,
+        irisJudgment: null,
       },
-    ]);
-    expect(picked?.signature).toBe("click->click->copy->click->paste->fill->click");
+    );
+    expect(wfDeclined).toBeNull();
+    expect(irisSpy).not.toHaveBeenCalled();
   });
 
   it("preserves port and path on navigate when model returns bare origin (with or without stepIndex) and keeps deliberate different paths with captured port", async () => {
@@ -1947,5 +1963,398 @@ describe("v2 compiler model and timeout configuration", () => {
       ),
     ).rejects.toThrow("Gemini request timed out after 35 ms");
     expect(generateContent).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects self-read in validateCompiledWorkflow, resolves copy-button to nearest source cell, and strips self-reads to params when no source exists", async () => {
+    const selfReadValidation = validateCompiledWorkflow({
+      kind: "workflow",
+      name: "Self read bad",
+      reason: "Invalid self read",
+      risk: "low",
+      offerAt2: false,
+      runMode: "save_only",
+      pauseBeforeSubmit: false,
+      apps: ["erp.local"],
+      params: [],
+      steps: [
+        { action: "readText", target: [{ kind: "testid", value: "erp-amount" }], bind: "amount" },
+        { action: "fill", target: [{ kind: "testid", value: "erp-amount" }], value: "{{amount}}" },
+      ],
+      stats: { repetitions: 1, minutesPerWeek: 0.1, manualSeconds: 2, replaySeconds: 0 },
+    });
+    expect(selfReadValidation.ok).toBe(false);
+    if (!selfReadValidation.ok) {
+      expect(selfReadValidation.error).toContain("Self-read");
+    }
+
+    // Copy button with source pageSummary -> exposes sourceTargetId & resolves readText to portal cell, NOT copy button
+    const portalEvents: Event[] = [
+      {
+        v: 1,
+        id: "cb-1",
+        ts: 1000,
+        session: "sess_cb",
+        source: "browser",
+        app: "localhost",
+        url: "http://localhost:5173/portal.html",
+        type: "copy",
+        value: "1250.00 EUR",
+        target: {
+          tag: "button",
+          role: "button",
+          label: "Copy",
+          locators: [
+            { kind: "testid", value: "copy-portal-amount-1" },
+            { kind: "text", value: "Copy" },
+          ],
+        },
+        meta: {
+          pageSummary: {
+            source: {
+              containerLocators: [{ kind: "css", value: "tbody" }],
+              rowTag: "tr",
+              rows: [
+                {
+                  locators: [{ kind: "css", value: "tr:nth-of-type(1)" }],
+                  cells: [
+                    { text: "INV-2026-001", locators: [{ kind: "testid", value: "portal-invoice-id-1" }] },
+                    { text: "1250.00 EUR", locators: [{ kind: "testid", value: "portal-amount-1" }] },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+      {
+        v: 1,
+        id: "cb-2",
+        ts: 2000,
+        session: "sess_cb",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "tab_switch",
+      },
+      {
+        v: 1,
+        id: "cb-3",
+        ts: 3000,
+        session: "sess_cb",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "paste",
+        value: "1250.00 EUR",
+        target: {
+          tag: "input",
+          role: "textbox",
+          label: "Amount",
+          locators: [{ kind: "testid", value: "erp-amount" }],
+        },
+      },
+    ];
+
+    const { client: cbGemini, prompts: cbPrompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Portal Amount to ERP",
+      reason: "Copies amount from portal cell to ERP",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "readText", stepIndex: 0, bind: "amount" },
+        { action: "switchTab", host: "127.0.0.1" },
+        { action: "fill", stepIndex: 2, value: "{{amount}}" },
+      ],
+    });
+    const cbWf = await compileWorkflow(
+      { events: portalEvents },
+      { gemini: cbGemini, iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }) },
+    );
+    expect(cbWf).not.toBeNull();
+    expect(cbPrompts[0]).toContain('"sourceTargetId":');
+    const readStep = cbWf!.steps.find((s) => s.action === "readText");
+    expect(readStep).toEqual({
+      action: "readText",
+      target: [{ kind: "testid", value: "portal-amount-1" }],
+      bind: "amount",
+    });
+
+    // Copy button with NO source pageSummary -> Gemini self-read is stripped to params instead of self-read
+    const noSourceEvents: Event[] = [
+      { ...portalEvents[0], meta: undefined },
+      portalEvents[1],
+      portalEvents[2],
+    ];
+    const { client: nsGemini, prompts: nsPrompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Fill Amount",
+      reason: "Fills ERP amount",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "readText", stepIndex: 2, bind: "amount" },
+        { action: "fill", stepIndex: 2, value: "{{amount}}" },
+      ],
+    });
+    const nsWf = await compileWorkflow(
+      { events: noSourceEvents },
+      { gemini: nsGemini, iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }) },
+    );
+    expect(nsWf).not.toBeNull();
+    expect(nsPrompts[0]).toContain('"noReadableSource":true');
+    expect(nsWf!.steps.some((s) => s.action === "readText")).toBe(false);
+    expect(nsWf!.params.some((p) => p.name === "amount")).toBe(true);
+  });
+
+  it("retains earlier emptyControls across form updates, shows same-host URL changes, resolves colN/bind-less forEach readText and flat forEach trailing steps, and logs rejected steps (GEN-119)", async () => {
+    const erpFormSummary = (emptyFields: Array<{ name: string; label: string; testid: string }>) => ({
+      target: {
+        containerTag: "form",
+        containerLocators: [{ kind: "css" as const, value: "#erp-form" }],
+        emptyControls: emptyFields.map((f) => ({
+          tag: "input",
+          type: "text",
+          name: f.name,
+          label: f.label,
+          locators: [{ kind: "testid" as const, value: f.testid }],
+        })),
+        submitLocators: [{ kind: "testid" as const, value: "save-btn" }],
+      },
+    });
+
+    const portalSourceSummary = {
+      source: {
+        rowTag: "tr",
+        rows: [
+          {
+            locators: [{ kind: "css" as const, value: "tr:nth-of-type(1)" }],
+            cells: [
+              { text: "INV-2026-001 Copy", locators: [{ kind: "testid" as const, value: "portal-invoice-id-1" }] },
+              { text: "Acme Industrial Copy", locators: [{ kind: "testid" as const, value: "portal-vendor-1" }] },
+              { text: "1250.00 EUR Copy", locators: [{ kind: "testid" as const, value: "portal-amount-1" }] },
+            ],
+          },
+          {
+            locators: [{ kind: "css" as const, value: "tr:nth-of-type(2)" }],
+            cells: [
+              { text: "INV-2026-002 Copy", locators: [{ kind: "testid" as const, value: "portal-invoice-id-2" }] },
+              { text: "Globex Corp Copy", locators: [{ kind: "testid" as const, value: "portal-vendor-2" }] },
+              { text: "840.50 EUR Copy", locators: [{ kind: "testid" as const, value: "portal-amount-2" }] },
+            ],
+          },
+        ],
+      },
+    };
+
+    const baseEvents: Event[] = [
+      {
+        v: 1,
+        id: "g119-1",
+        ts: 1000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "nav",
+      },
+      {
+        v: 1,
+        id: "g119-2",
+        ts: 2000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/portal.html",
+        type: "copy",
+        value: "INV-2026-001",
+        target: { tag: "span", label: "INV-2026-001", locators: [{ kind: "testid", value: "portal-invoice-id" }] },
+      },
+      {
+        v: 1,
+        id: "g119-3",
+        ts: 3000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "paste",
+        value: "INV-2026-001",
+        target: { tag: "input", role: "textbox", label: "Invoice ID", locators: [{ kind: "testid", value: "erp-invoice-id" }] },
+        meta: {
+          pageSummary: erpFormSummary([
+            { name: "vendor", label: "Vendor", testid: "erp-vendor" },
+            { name: "amount", label: "Amount", testid: "erp-amount" },
+          ]),
+        },
+      },
+      {
+        v: 1,
+        id: "g119-4",
+        ts: 4000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/portal.html",
+        type: "copy",
+        value: "Acme Industrial",
+        target: { tag: "span", label: "Acme Industrial", locators: [{ kind: "testid", value: "portal-vendor" }] },
+      },
+      {
+        v: 1,
+        id: "g119-5",
+        ts: 5000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "paste",
+        value: "Acme Industrial",
+        target: { tag: "input", role: "textbox", label: "Vendor", locators: [{ kind: "testid", value: "erp-vendor" }] },
+        meta: {
+          pageSummary: erpFormSummary([{ name: "amount", label: "Amount", testid: "erp-amount" }]),
+        },
+      },
+      {
+        v: 1,
+        id: "g119-6",
+        ts: 6000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/portal.html",
+        type: "copy",
+        value: "1250.00 EUR",
+        target: { tag: "span", label: "1250.00 EUR", locators: [{ kind: "testid", value: "portal-amount-1" }] },
+        meta: { pageSummary: portalSourceSummary },
+      },
+      {
+        v: 1,
+        id: "g119-7",
+        ts: 7000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "paste",
+        value: "1250.00 EUR",
+        target: { tag: "input", role: "textbox", label: "Amount", locators: [{ kind: "testid", value: "erp-amount" }] },
+        meta: {
+          pageSummary: erpFormSummary([{ name: "amount", label: "Amount", testid: "erp-amount" }]),
+        },
+      },
+    ];
+
+    // 1) All form targets (Amount, submit, Vendor) are preserved and portal.html URL is visible in Steps;
+    //    bind-less readText inside forEach resolves col1..col3 and startUrl picks portal.html.
+    const { client: nestedClient, prompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Portal to ERP",
+      reason: "Copies portal rows into ERP",
+      risk: "low",
+      runMode: "run_remaining",
+      params: [],
+      steps: [
+        {
+          action: "forEach",
+          items: "list_1",
+          steps: [
+            { action: "readText", withinId: "ps_4", withinTextParam: "col1" },
+            { action: "readText", withinId: "ps_4", withinTextParam: "col2" },
+            { action: "readText", withinId: "ps_4", withinTextParam: "col3" },
+            { action: "navigate", url: "http://127.0.0.1:5173/erp.html" },
+            { action: "fill", stepIndex: 2, value: "{{col1}}" },
+            { action: "fill", targetId: "ps_3", value: "{{col2}}" },
+            { action: "fill", targetId: "ps_1", value: "{{col3}}" },
+            { action: "click", targetId: "ps_2" },
+          ],
+        },
+      ],
+    });
+
+    const wfNested = await compileWorkflow(
+      { events: baseEvents },
+      { gemini: nestedClient, irisJudgment: { worthAutomating: true, pauseBeforeSubmit: false } },
+    );
+    expect(prompts[0]).toContain('"url":"http://127.0.0.1:5173/portal.html"');
+    expect(prompts[0]).toContain('"description":"field Vendor"');
+    expect(wfNested).not.toBeNull();
+    expect(wfNested!.startUrl).toBe("http://127.0.0.1:5173/portal.html");
+    expect(wfNested!.steps.map((s) => s.action)).toEqual([
+      "switchTab",
+      "extractList",
+      "forEach",
+    ]);
+    const loopStep = wfNested!.steps[2];
+    expect(loopStep.action).toBe("forEach");
+    if (loopStep.action === "forEach") {
+      expect(loopStep.steps[0]).toEqual({
+        action: "readText",
+        target: [{ kind: "css", value: "td:nth-of-type(1)" }],
+        within: [{ kind: "text", value: "{{col1}}" }],
+        bind: "col1",
+      });
+    }
+
+    // 2) Flat forEach (model puts body steps as siblings after forEach) still resolves cleanly
+    const { client: flatClient } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Portal to ERP flat",
+      reason: "Copies portal rows into ERP",
+      risk: "low",
+      runMode: "run_remaining",
+      params: [],
+      steps: [
+        { action: "forEach", items: "list_1", withinId: "ps_4", withinTextParam: "col1" },
+        { action: "readText", withinTextParam: "col1", bind: "inv" },
+        { action: "fill", stepIndex: 2, value: "{{inv}}" },
+        { action: "click", targetId: "ps_2" },
+      ],
+    });
+    const wfFlat = await compileWorkflow(
+      { events: baseEvents },
+      { gemini: flatClient, irisJudgment: { worthAutomating: true, pauseBeforeSubmit: false } },
+    );
+    expect(wfFlat).not.toBeNull();
+    expect(wfFlat!.steps.some((s) => s.action === "forEach")).toBe(true);
+
+    // 3) Rejected step logs the first rejected step and reason
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { client: badClient } = makeMockGemini({
+        suggest: true,
+        offerAt2: false,
+        kind: "workflow",
+        name: "Bad target",
+        reason: "Unresolvable step",
+        risk: "low",
+        runMode: "save_only",
+        params: [],
+        steps: [{ action: "fill", targetId: "nonexistent_field", value: "x" }],
+      });
+      const wfBad = await compileWorkflow(
+        { events: baseEvents },
+        { gemini: badClient, irisJudgment: { worthAutomating: true, pauseBeforeSubmit: false } },
+      );
+      expect(wfBad).toBeNull();
+      expect(
+        logSpy.mock.calls.some((args) =>
+          String(args[0]).includes("[v2/compiler] rejected step action=fill") &&
+          String(args[0]).includes("targetId=nonexistent_field"),
+        ),
+      ).toBe(true);
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

@@ -112,6 +112,7 @@ const HELP_404_HTML = `<!doctype html>
 </html>`;
 
 test("3-repeat form with Help excursion drops Help click and reload so existing 3 rows remain and next row saves", async () => {
+  test.skip(true, "removed by f35b69c / GEN-114");
   const testInfo = test.info();
   test.skip(
     !process.env.GOOGLE_CLOUD_PROJECT,

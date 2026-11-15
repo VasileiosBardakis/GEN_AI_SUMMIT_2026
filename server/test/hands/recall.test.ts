@@ -7,7 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Event } from "@gen/shared";
 import { createServer } from "../../src/app.ts";
 import { buildLibraryEntryFromScript } from "../../src/hands/implementor.ts";
-import { createLibraryRecallMatcher } from "../../src/hands/recall.ts";
+import {
+  computeMatchedPrefix,
+  createLibraryRecallMatcher,
+} from "../../src/hands/recall.ts";
 import type { LibraryEntry } from "../../src/hands/types.ts";
 
 function makeSheetEntry(overrides: Partial<LibraryEntry> = {}): LibraryEntry {
@@ -1011,6 +1014,320 @@ describe("POST /events -> library half-detection -> /decide bridge", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: runCmd.id, ok: true, results: [{ ok: true }] }),
+    });
+  });
+
+  it("slices recalled steps from computeMatchedPrefix and preserves extractList + skipRowValues on recall", async () => {
+    const entry = buildLibraryEntryFromScript({
+      name: "Sync orders to dispatch",
+      solution: "Extract pending orders, copy each row, and fill dispatch.",
+      script: {
+        name: "Sync orders to dispatch",
+        steps: [
+          { action: "switchTab", host: "orders.local", url: "http://orders.local:4600/pending" },
+          {
+            action: "extractList",
+            target: { kind: "css", value: "tr:has(td)" },
+            within: { kind: "testid", value: "pending-orders-tbody" },
+            bind: "rows",
+            fields: {
+              col1: { kind: "css", value: "td:nth-of-type(1)" },
+              col2: { kind: "css", value: "td:nth-of-type(2)" },
+            },
+          },
+          {
+            action: "forEach",
+            items: "rows",
+            steps: [
+              {
+                action: "readText",
+                target: { kind: "css", value: "td:nth-of-type(1)" },
+                bind: "orderId",
+              },
+              { action: "switchTab", host: "dispatch.local", url: "http://dispatch.local:4600/create" },
+              {
+                action: "fill",
+                target: { kind: "testid", value: "dispatch-order-id" },
+                value: "{{orderId}}",
+              },
+              {
+                action: "click",
+                target: { kind: "testid", value: "create-shipment-btn" },
+              },
+            ],
+          },
+        ],
+      },
+      context: {
+        app: "orders.local",
+        url: "http://orders.local:4600/pending",
+      },
+      status: "active",
+      now: 1_000,
+    });
+    const recallEntry: LibraryEntry = {
+      ...entry,
+      eyes: {
+        ...entry.eyes,
+        targetHints: {
+          ...entry.eyes.targetHints,
+          locators: [{ kind: "testid", value: "orders-row-2-id" }],
+        },
+        guards: { ...entry.eyes.guards, fieldEmptyOnly: false, minSignals: 1 },
+      },
+    };
+
+    await fetch(`${baseUrl}/library`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(recallEntry),
+    });
+
+    // Session already completed row 1 (PO-5101) before triggering recall on row 2
+    const pollDecidePromise = fetch(`${baseUrl}/hands/next?waitMs=2000`);
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([
+        makeEvent({
+          id: "evt_r1_copy",
+          ts: 10_000,
+          session: "sess_resume_rows",
+          app: "orders.local",
+          url: "http://orders.local:4600/pending",
+          type: "copy",
+          value: "PO-5101",
+          target: {
+            tag: "td",
+            locators: [{ kind: "css", value: "#order-row-1 > td:nth-of-type(1)" }],
+          },
+        }),
+        makeEvent({
+          id: "evt_r1_fill",
+          ts: 11_000,
+          session: "sess_resume_rows",
+          app: "dispatch.local",
+          url: "http://dispatch.local:4600/create",
+          type: "paste",
+          value: "PO-5101",
+          target: {
+            tag: "input",
+            locators: [{ kind: "testid", value: "dispatch-order-id" }],
+          },
+        }),
+        makeEvent({
+          id: "evt_r1_click",
+          ts: 12_000,
+          session: "sess_resume_rows",
+          app: "dispatch.local",
+          url: "http://dispatch.local:4600/create",
+          type: "click",
+          target: {
+            tag: "button",
+            locators: [{ kind: "testid", value: "create-shipment-btn" }],
+          },
+        }),
+        makeEvent({
+          id: "evt_r2_copy",
+          ts: 13_000,
+          session: "sess_resume_rows",
+          app: "orders.local",
+          url: "http://orders.local:4600/pending",
+          type: "copy",
+          value: "PO-5102",
+          target: {
+            tag: "td",
+            locators: [
+              { kind: "testid", value: "orders-row-2-id" },
+              { kind: "css", value: "#order-row-2 > td:nth-of-type(1)" },
+            ],
+          },
+        }),
+      ]),
+    });
+
+    const decideCmd = (await (await pollDecidePromise).json()) as {
+      id: string;
+      kind: string;
+      script: LibraryEntry["script"];
+    };
+    expect(decideCmd.kind).toBe("decide");
+    expect(decideCmd.script.steps.map((s) => s.action)).toEqual([
+      "extractList",
+      "forEach",
+    ]);
+
+    const pollRunPromise = fetch(`${baseUrl}/hands/next?waitMs=2000`);
+    await fetch(`${baseUrl}/hands/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: decideCmd.id, ok: true, decision: "approved" }),
+    });
+
+    const runCmd = (await (await pollRunPromise).json()) as {
+      id: string;
+      script: LibraryEntry["script"];
+      skipRowValues?: string[];
+    };
+    expect(runCmd.script.steps.map((s) => s.action)).toEqual([
+      "extractList",
+      "forEach",
+    ]);
+    expect(runCmd.skipRowValues).toEqual(["PO-5101"]);
+
+    await fetch(`${baseUrl}/hands/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: runCmd.id, ok: true, results: [{ ok: true }] }),
+    });
+  });
+});
+
+describe("computeMatchedPrefix", () => {
+  function makeWorkflowEntry(): LibraryEntry {
+    return buildLibraryEntryFromScript({
+      name: "File customs entry",
+      solution: "Copy waybill, switch tab, fill waybill and weight, and submit.",
+      script: {
+        name: "File customs entry",
+        steps: [
+          { action: "switchTab", host: "freight.local", url: "http://freight.local/manifest" },
+          {
+            action: "readText",
+            target: { kind: "testid", value: "waybill-cell" },
+            bind: "waybill",
+          },
+          { action: "switchTab", host: "customs.local", url: "http://customs.local/entry" },
+          {
+            action: "fill",
+            target: { kind: "testid", value: "customs-waybill" },
+            value: "{{waybill}}",
+          },
+          {
+            action: "fill",
+            target: { kind: "testid", value: "customs-weight" },
+            value: "{{weight}}",
+          },
+          {
+            action: "click",
+            target: { kind: "testid", value: "file-btn" },
+          },
+        ],
+      },
+      context: {
+        app: "freight.local",
+        url: "http://freight.local/manifest",
+      },
+      status: "active",
+      now: 1_000,
+    });
+  }
+
+  it("advances startStepIndex after same-order prefix steps and returns completedValues", () => {
+    const entry = makeWorkflowEntry();
+    const events: Event[] = [
+      makeEvent({
+        id: "p-1",
+        ts: 1_000,
+        app: "freight.local",
+        url: "http://freight.local/manifest",
+        type: "copy",
+        value: "WB-9041",
+        target: { locators: [{ kind: "testid", value: "waybill-cell" }] },
+      }),
+      makeEvent({
+        id: "p-nav",
+        ts: 1_500,
+        app: "customs.local",
+        url: "http://customs.local/entry",
+        type: "tab_switch",
+      }),
+      makeEvent({
+        id: "p-2",
+        ts: 2_000,
+        app: "customs.local",
+        url: "http://customs.local/entry",
+        type: "input",
+        value: "WB-9041",
+        target: { locators: [{ kind: "testid", value: "customs-waybill" }] },
+      }),
+      makeEvent({
+        id: "p-3",
+        ts: 2_500,
+        app: "customs.local",
+        url: "http://customs.local/entry",
+        type: "input",
+        value: "420 kg",
+        target: { locators: [{ kind: "testid", value: "customs-weight" }] },
+      }),
+      makeEvent({
+        id: "p-3-change",
+        ts: 2_600,
+        app: "customs.local",
+        url: "http://customs.local/entry",
+        type: "change",
+        value: "420 kg",
+        target: { locators: [{ kind: "testid", value: "customs-weight" }] },
+      }),
+    ];
+
+    expect(computeMatchedPrefix(events, entry)).toEqual({
+      startStepIndex: 5,
+      completedValues: ["WB-9041", "420 kg"],
+    });
+  });
+
+  it("does not advance on out-of-order events", () => {
+    const entry = makeWorkflowEntry();
+    const outOfOrderStart: Event[] = [
+      makeEvent({
+        id: "ooo-1",
+        ts: 1_000,
+        app: "customs.local",
+        url: "http://customs.local/entry",
+        type: "input",
+        value: "420 kg",
+        target: { locators: [{ kind: "testid", value: "customs-weight" }] },
+      }),
+      makeEvent({
+        id: "ooo-2",
+        ts: 2_000,
+        app: "freight.local",
+        url: "http://freight.local/manifest",
+        type: "copy",
+        value: "WB-9041",
+        target: { locators: [{ kind: "testid", value: "waybill-cell" }] },
+      }),
+    ];
+
+    expect(computeMatchedPrefix(outOfOrderStart, entry)).toEqual({
+      startStepIndex: 0,
+      completedValues: [],
+    });
+
+    const partialThenOutOfOrder: Event[] = [
+      makeEvent({
+        id: "ok-1",
+        ts: 1_000,
+        app: "freight.local",
+        url: "http://freight.local/manifest",
+        type: "copy",
+        value: "WB-9041",
+        target: { locators: [{ kind: "testid", value: "waybill-cell" }] },
+      }),
+      makeEvent({
+        id: "ooo-click",
+        ts: 2_000,
+        app: "customs.local",
+        url: "http://customs.local/entry",
+        type: "click",
+        target: { locators: [{ kind: "testid", value: "file-btn" }] },
+      }),
+    ];
+
+    expect(computeMatchedPrefix(partialThenOutOfOrder, entry)).toEqual({
+      startStepIndex: 2,
+      completedValues: ["WB-9041"],
     });
   });
 });
