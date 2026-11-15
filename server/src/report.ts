@@ -148,7 +148,12 @@ function convertCompiledLeafStep(step: CompiledLeafStep): ScriptStep {
     case "wait":
       return { action: "wait", ms: step.ms, ...opt };
     case "switchTab":
-      return { action: "switchTab", host: step.host, ...opt };
+      return {
+        action: "switchTab",
+        host: step.host,
+        ...(step.url ? { url: step.url } : {}),
+        ...opt,
+      };
     case "key": {
       const target = toScriptLocators(step.target);
       const within = toScriptLocators(step.within);

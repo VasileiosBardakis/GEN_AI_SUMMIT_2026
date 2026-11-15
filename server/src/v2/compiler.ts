@@ -1630,13 +1630,50 @@ function resolveLeafStep(
         }
       }
 
+      const findMatchingHostUrl = (
+        targetHost: string,
+        exactHostWithPort?: string,
+      ): string | undefined => {
+        if (exactHostWithPort && exactHostWithPort.includes(":")) {
+          const exactNormalized = normalizeHost(exactHostWithPort);
+          const portMatch = ctx.indexedSteps.find((s) => {
+            if (!s.url) return false;
+            try {
+              return (
+                normalizeHost(new URL(restoreText(s.url, restoreMap)).host) ===
+                exactNormalized
+              );
+            } catch {
+              return false;
+            }
+          });
+          if (portMatch?.url) {
+            return normalizeUrlHost(restoreText(portMatch.url, restoreMap));
+          }
+        }
+        const match = ctx.indexedSteps.find((s) => {
+          if (!s.url) return false;
+          if (normalizeHost(s.app) === targetHost) return true;
+          try {
+            return (
+              normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname) ===
+              targetHost
+            );
+          } catch {
+            return false;
+          }
+        });
+        return match?.url
+          ? normalizeUrlHost(restoreText(match.url, restoreMap))
+          : undefined;
+      };
+
       const rawUrl = raw.url?.trim() ? raw.url.trim() : undefined;
+      const restoredRawUrl = rawUrl ? restoreText(rawUrl, restoreMap) : undefined;
       let rawUrlHost: string | undefined;
-      if (rawUrl) {
+      if (restoredRawUrl) {
         try {
-          rawUrlHost = normalizeHost(
-            new URL(restoreText(rawUrl, restoreMap)).hostname,
-          );
+          rawUrlHost = normalizeHost(new URL(restoredRawUrl).hostname);
         } catch {
           // ignore invalid URL when inferring host
         }
@@ -1645,11 +1682,12 @@ function resolveLeafStep(
         rawUrlHost !== undefined && seenHostnames.has(rawUrlHost);
 
       if (captured?.url) {
+        const restoredCapturedUrl = restoreText(captured.url, restoreMap);
         const mergedUrl =
-          rawUrl && rawUrlSeen
-            ? mergeCapturedNavigateUrl(rawUrl, captured.url)
-            : captured.url;
-        const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
+          restoredRawUrl && rawUrlSeen
+            ? mergeCapturedNavigateUrl(restoredRawUrl, restoredCapturedUrl)
+            : restoredCapturedUrl;
+        const normalized = normalizeUrlHost(mergedUrl);
         let navHost = stepHost;
         try {
           navHost = normalizeHost(new URL(normalized).hostname);
@@ -1663,7 +1701,7 @@ function resolveLeafStep(
         };
       }
 
-      if (rawUrl && !rawUrlSeen) {
+      if (restoredRawUrl && !rawUrlSeen) {
         return null;
       }
 
@@ -1675,35 +1713,31 @@ function resolveLeafStep(
             ? normalizeHost(captured.app)
             : undefined);
       const matchingHostUrl = targetHost
-        ? ctx.indexedSteps.find((s) => {
-            if (!s.url) return false;
-            if (normalizeHost(s.app) === targetHost) return true;
-            try {
-              return (
-                normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname) ===
-                targetHost
-              );
-            } catch {
-              return false;
-            }
-          })?.url
+        ? findMatchingHostUrl(targetHost)
         : undefined;
-      const candidateUrl = rawUrl
-        ? mergeCapturedNavigateUrl(rawUrl, matchingHostUrl)
+      const candidateUrl = restoredRawUrl
+        ? mergeCapturedNavigateUrl(restoredRawUrl, matchingHostUrl)
         : matchingHostUrl;
       if (!candidateUrl) {
         if (raw.host?.trim()) {
-          const host = normalizeHost(raw.host);
+          const rawHostTrimmed = raw.host.trim();
+          const host = normalizeHost(rawHostTrimmed.replace(/:\d+$/, ""));
           if (!seenHostnames.has(host)) return null;
+          const switchUrl = stepUrl ?? findMatchingHostUrl(host, rawHostTrimmed);
           return {
-            step: { action: "switchTab", host, ...optionalPart },
+            step: {
+              action: "switchTab",
+              host,
+              ...(switchUrl ? { url: switchUrl } : {}),
+              ...optionalPart,
+            },
             host,
-            url: stepUrl,
+            url: switchUrl ?? stepUrl,
           };
         }
         return null;
       }
-      const normalized = normalizeUrlHost(restoreText(candidateUrl, restoreMap));
+      const normalized = normalizeUrlHost(candidateUrl);
       let navHost = stepHost;
       try {
         navHost = normalizeHost(new URL(normalized).hostname);
@@ -1724,23 +1758,88 @@ function resolveLeafStep(
       };
     }
     case "switchTab": {
+      const restoredRawUrl = raw.url?.trim()
+        ? restoreText(raw.url.trim(), restoreMap)
+        : undefined;
       let rawHost = raw.host?.trim() || "";
-      if (!rawHost && raw.url?.trim()) {
+      if (!rawHost && restoredRawUrl) {
         try {
-          rawHost = new URL(raw.url.trim()).hostname;
+          rawHost = new URL(restoredRawUrl).hostname;
         } catch {
-          rawHost = raw.url.trim();
+          rawHost = restoredRawUrl;
         }
       }
       if (!rawHost) {
         rawHost = captured?.app ?? "";
+        if (!rawHost && captured?.url) {
+          try {
+            rawHost = new URL(restoreText(captured.url, restoreMap)).hostname;
+          } catch {
+            // ignore invalid captured URL
+          }
+        }
       }
       if (!rawHost.trim()) return null;
-      const host = normalizeHost(rawHost);
+      const host = normalizeHost(rawHost.replace(/:\d+$/, ""));
+      const capturedUrl = captured?.url
+        ? normalizeUrlHost(restoreText(captured.url, restoreMap))
+        : undefined;
+      const matchingStep = ctx.indexedSteps.find((s) => {
+        if (!s.url) return false;
+        if (rawHost.includes(":")) {
+          try {
+            if (
+              normalizeHost(new URL(restoreText(s.url, restoreMap)).host) ===
+              normalizeHost(rawHost)
+            ) {
+              return true;
+            }
+          } catch {
+            // ignore
+          }
+        }
+        if (normalizeHost(s.app) === host) return true;
+        try {
+          return (
+            normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname) ===
+            host
+          );
+        } catch {
+          return false;
+        }
+      });
+      const matchingHostUrl = matchingStep?.url
+        ? normalizeUrlHost(restoreText(matchingStep.url, restoreMap))
+        : undefined;
+      const fallbackUrl = capturedUrl ?? matchingHostUrl;
+      let switchUrl: string | undefined;
+      if (restoredRawUrl) {
+        let rawUrlHostMatches = false;
+        try {
+          rawUrlHostMatches =
+            normalizeHost(new URL(restoredRawUrl).hostname) === host;
+        } catch {
+          rawUrlHostMatches = false;
+        }
+        if (capturedUrl && !rawUrlHostMatches) {
+          switchUrl = capturedUrl;
+        } else {
+          switchUrl = normalizeUrlHost(
+            mergeCapturedNavigateUrl(restoredRawUrl, fallbackUrl),
+          );
+        }
+      } else {
+        switchUrl = fallbackUrl;
+      }
       return {
-        step: { action: "switchTab", host, ...optionalPart },
+        step: {
+          action: "switchTab",
+          host,
+          ...(switchUrl ? { url: switchUrl } : {}),
+          ...optionalPart,
+        },
         host,
-        url: stepUrl,
+        url: switchUrl ?? stepUrl,
       };
     }
     case "key": {
@@ -2098,10 +2197,17 @@ export async function compileWorkflow(
           : undefined;
 
   const steps = [...resolved.steps];
+  const startSwitchStep: CompiledStep = {
+    action: "switchTab",
+    host: startHost,
+    ...(rawStartUrl ? { url: rawStartUrl } : {}),
+  };
   if (steps[0]?.action !== "switchTab") {
-    steps.unshift({ action: "switchTab", host: startHost });
+    steps.unshift(startSwitchStep);
   } else if (steps[0].host !== startHost) {
-    steps.unshift({ action: "switchTab", host: startHost });
+    steps.unshift(startSwitchStep);
+  } else if (!steps[0].url && rawStartUrl) {
+    steps[0] = { ...steps[0], url: rawStartUrl };
   }
 
   const appsSet = new Set<string>([startHost, ...resolved.hosts]);

@@ -103,10 +103,19 @@ describe("Brain v2 compiler and validator", () => {
       expect(wf).not.toBeNull();
       expect(wf!.runMode).toBe("run_remaining");
       expect(wf!.startUrl).toBe("http://freight.local:4100/manifest");
-      expect(wf!.steps[0]).toEqual({ action: "switchTab", host: "freight.local" });
+      expect(wf!.steps[0]).toEqual({
+        action: "switchTab",
+        host: "freight.local",
+        url: "http://freight.local:4100/manifest",
+      });
       const loop = wf!.steps[1];
       expect(loop.action).toBe("forEach");
       if (loop.action === "forEach") {
+        expect(loop.steps[0]).toEqual({
+          action: "switchTab",
+          host: "customs.local",
+          url: "http://customs.local:4100/entry",
+        });
         expect(Array.isArray(loop.items)).toBe(true);
         if (Array.isArray(loop.items)) {
           expect(loop.items).toHaveLength(2);
@@ -121,7 +130,7 @@ describe("Brain v2 compiler and validator", () => {
       expect(wf!.stats.minutesPerWeek).toBeGreaterThan(0);
     }
 
-    // 2. unseen-sheet-loop.jsonl: generic within exact-text + forEach list loop + 127.0.0.1 -> localhost
+    // 2. unseen-sheet-loop.jsonl: generic within exact-text + forEach list loop + 127.0.0.1 kept distinct from localhost
     {
       const events = await loadFixture("unseen-sheet-loop.jsonl");
       const { client } = makeMockGemini({
@@ -173,9 +182,13 @@ describe("Brain v2 compiler and validator", () => {
       );
 
       expect(wf).not.toBeNull();
-      expect(wf!.apps).toEqual(["localhost"]);
-      expect(wf!.startUrl).toBe("http://localhost:5173/sheet.html");
-      expect(wf!.steps[0]).toEqual({ action: "switchTab", host: "localhost" });
+      expect(wf!.apps).toEqual(["127.0.0.1"]);
+      expect(wf!.startUrl).toBe("http://127.0.0.1:5173/sheet.html");
+      expect(wf!.steps[0]).toEqual({
+        action: "switchTab",
+        host: "127.0.0.1",
+        url: "http://127.0.0.1:5173/sheet.html",
+      });
 
       const loop = wf!.steps[1];
       expect(loop.action).toBe("forEach");
@@ -242,7 +255,11 @@ describe("Brain v2 compiler and validator", () => {
       );
 
       expect(wf).not.toBeNull();
-      expect(wf!.steps[0]).toEqual({ action: "switchTab", host: "lims.local" });
+      expect(wf!.steps[0]).toEqual({
+        action: "switchTab",
+        host: "lims.local",
+        url: "http://lims.local:4150/assay",
+      });
       const fills = wf!.steps.filter((s) => s.action === "fill");
       expect(fills).toHaveLength(3);
       if (
@@ -761,8 +778,9 @@ describe("Brain v2 compiler and validator", () => {
   });
 
   it("validateCompiledWorkflow checks normalizeHost, step cap, {{param}} bindings, and PII markers", () => {
-    expect(normalizeHost("127.0.0.1")).toBe("localhost");
-    expect(normalizeHost("127.0.0.1:5173")).toBe("localhost:5173");
+    expect(normalizeHost("127.0.0.1")).toBe("127.0.0.1");
+    expect(normalizeHost("127.0.0.1:5173")).toBe("127.0.0.1:5173");
+    expect(normalizeHost(" LocalHost ")).toBe("localhost");
     expect(normalizeHost(" Freight.Local ")).toBe("freight.local");
 
     const base: CompiledWorkflow = {
@@ -777,7 +795,7 @@ describe("Brain v2 compiler and validator", () => {
       apps: ["localhost"],
       params: [{ name: "query" }],
       steps: [
-        { action: "switchTab", host: "localhost" },
+        { action: "switchTab", host: "localhost", url: "http://localhost:5173/app" },
         {
           action: "fill",
           target: [{ kind: "testid", value: "q" }],
@@ -798,7 +816,7 @@ describe("Brain v2 compiler and validator", () => {
     expect(
       validateCompiledWorkflow({
         ...base,
-        steps: [{ action: "switchTab", host: "127.0.0.1" }],
+        steps: [{ action: "switchTab", host: "LOCALHOST" }],
       }).ok,
     ).toBe(false);
 
@@ -1065,7 +1083,7 @@ describe("Brain v2 compiler and validator", () => {
 
     const script = compiledWorkflowToActionScript(wf!);
     expect(script.steps).toEqual([
-      { action: "switchTab", host: "search.local" },
+      { action: "switchTab", host: "search.local", url: "http://search.local/" },
       { action: "fill", target: searchLocators, value: "{{query}}" },
       { action: "pressKey", key: "Enter", target: searchLocators },
     ]);
@@ -1401,11 +1419,40 @@ describe("Brain v2 compiler and validator", () => {
     expect(withStepIndex).not.toBeNull();
     expect(withStepIndex!.steps[1]).toEqual({
       action: "navigate",
-      url: "http://localhost:4173/form.html",
+      url: "http://127.0.0.1:4173/form.html",
     });
 
-    // 2) Without stepIndex, model returns bare "http://localhost"
+    // 2) Without stepIndex, model returns bare "http://127.0.0.1"
     const withoutStepIndex = await compileWorkflow(
+      { events },
+      {
+        gemini: makeMockGemini({
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Open form and save",
+          reason: "Navigates to form and saves",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [
+            { action: "navigate", url: "http://127.0.0.1" },
+            { action: "fill", stepIndex: 1, value: "Ada" },
+            { action: "click", stepIndex: 2 },
+          ],
+        }).client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(withoutStepIndex).not.toBeNull();
+    expect(withoutStepIndex!.steps[1]).toEqual({
+      action: "navigate",
+      url: "http://127.0.0.1:4173/form.html",
+    });
+
+    // 2b) Without stepIndex, model returns bare "http://localhost" when only 127.0.0.1 was seen -> rejected
+    const localhostMismatch = await compileWorkflow(
       { events },
       {
         gemini: makeMockGemini({
@@ -1426,12 +1473,7 @@ describe("Brain v2 compiler and validator", () => {
         iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
       },
     );
-
-    expect(withoutStepIndex).not.toBeNull();
-    expect(withoutStepIndex!.steps[1]).toEqual({
-      action: "navigate",
-      url: "http://localhost:4173/form.html",
-    });
+    expect(localhostMismatch).toBeNull();
 
     // 3) Deliberate different path on same host keeps /other + captured port
     const differentPathPromptCheck = makeMockGemini({
@@ -1444,7 +1486,7 @@ describe("Brain v2 compiler and validator", () => {
       runMode: "save_only",
       params: [],
       steps: [
-        { action: "navigate", url: "http://localhost/other" },
+        { action: "navigate", url: "http://127.0.0.1/other" },
         { action: "fill", stepIndex: 1, value: "Ada" },
         { action: "click", stepIndex: 2 },
       ],
@@ -1460,7 +1502,7 @@ describe("Brain v2 compiler and validator", () => {
     expect(differentPath).not.toBeNull();
     expect(differentPath!.steps[1]).toEqual({
       action: "navigate",
-      url: "http://localhost:4173/other",
+      url: "http://127.0.0.1:4173/other",
     });
     expect(differentPathPromptCheck.prompts[0]).toContain("full URL including port and path");
   });
@@ -1496,12 +1538,43 @@ describe("Brain v2 compiler and validator", () => {
     expect(
       validateCompiledWorkflow(validWithPort, { seenHosts: ["127.0.0.1:4173"] })
         .ok,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       validateCompiledWorkflow(validWithPort, {
         seenHosts: new Set(["localhost:4173"]),
       }).ok,
     ).toBe(true);
+    // Reject switchTab.url with wrong port or 127.0.0.1 vs localhost mismatch
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            {
+              action: "switchTab",
+              host: "localhost",
+              url: "http://localhost:9999/form.html",
+            },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
+    expect(
+      validateCompiledWorkflow(
+        {
+          ...validWithPort,
+          steps: [
+            {
+              action: "switchTab",
+              host: "localhost",
+              url: "http://127.0.0.1:4173/form.html",
+            },
+          ],
+        },
+        { seenHosts: ["localhost:4173"] },
+      ).ok,
+    ).toBe(false);
 
     // Reject navigate.url with unseen host
     expect(
@@ -1684,7 +1757,7 @@ describe("Brain v2 compiler and validator", () => {
     expect(withStepIndexInvented).not.toBeNull();
     expect(withStepIndexInvented!.steps[1]).toEqual({
       action: "navigate",
-      url: "http://localhost:4173/form.html",
+      url: "http://127.0.0.1:4173/form.html",
     });
 
     // 2) stepIndex is absent and model invents an unseen host -> dropped/rejected (null)
@@ -1736,6 +1809,125 @@ describe("Brain v2 compiler and validator", () => {
     );
 
     expect(withoutStepIndexWrongPort).toBeNull();
+  });
+
+  it("keeps 127.0.0.1 vs localhost vs distinct ports separate across compiler and validator, and carries switchTab.url through compiledWorkflowToActionScript", async () => {
+    expect(normalizeHost("127.0.0.1")).toBe("127.0.0.1");
+    expect(normalizeHost("localhost")).toBe("localhost");
+    expect(normalizeHost("127.0.0.1:4173")).not.toBe(normalizeHost("localhost:4173"));
+    expect(normalizeHost("127.0.0.1:4173")).not.toBe(normalizeHost("127.0.0.1:5173"));
+
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "xt-1",
+        ts: 1000,
+        session: "s_xtab_ports",
+        source: "browser",
+        app: "localhost",
+        url: "http://localhost:4173/portal.html",
+        type: "copy",
+        target: {
+          tag: "span",
+          label: "Invoice",
+          locators: [{ kind: "testid", value: "portal-inv" }],
+        },
+        value: "INV-100",
+      },
+      {
+        v: 1,
+        id: "xt-2",
+        ts: 2000,
+        session: "s_xtab_ports",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "tab_switch",
+        meta: { tabId: 2, subType: "cross_app_switch" },
+      },
+      {
+        v: 1,
+        id: "xt-3",
+        ts: 3000,
+        session: "s_xtab_ports",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "paste",
+        target: {
+          tag: "input",
+          label: "Invoice",
+          locators: [{ kind: "testid", value: "erp-inv" }],
+        },
+        value: "INV-100",
+      },
+      {
+        v: 1,
+        id: "xt-4",
+        ts: 4000,
+        session: "s_xtab_ports",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "click",
+        target: {
+          tag: "button",
+          label: "Save",
+          locators: [{ kind: "testid", value: "erp-save" }],
+        },
+      },
+    ];
+
+    const { client } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Portal to ERP",
+      reason: "Copies invoice from localhost portal to 127.0.0.1 ERP",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "readText", stepIndex: 0, bind: "inv" },
+        { action: "switchTab", host: "127.0.0.1" },
+        { action: "fill", stepIndex: 2, value: "{{inv}}" },
+        { action: "click", stepIndex: 3 },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events },
+      {
+        gemini: client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(wf).not.toBeNull();
+    expect(wf!.apps).toEqual(["localhost", "127.0.0.1"]);
+    expect(wf!.startUrl).toBe("http://localhost:4173/portal.html");
+    expect(wf!.steps[0]).toEqual({
+      action: "switchTab",
+      host: "localhost",
+      url: "http://localhost:4173/portal.html",
+    });
+    expect(wf!.steps[2]).toEqual({
+      action: "switchTab",
+      host: "127.0.0.1",
+      url: "http://127.0.0.1:5173/erp.html",
+    });
+
+    const script = compiledWorkflowToActionScript(wf!);
+    expect(script.steps[0]).toEqual({
+      action: "switchTab",
+      host: "localhost",
+      url: "http://localhost:4173/portal.html",
+    });
+    expect(script.steps[2]).toEqual({
+      action: "switchTab",
+      host: "127.0.0.1",
+      url: "http://127.0.0.1:5173/erp.html",
+    });
   });
 });
 

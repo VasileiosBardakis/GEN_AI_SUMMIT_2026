@@ -880,11 +880,7 @@ function normalizeUrlPath(pathname: string): string {
 }
 
 function normalizeLoopbackHost(host: string): string {
-  const lower = host.trim().toLowerCase();
-  if (lower === "127.0.0.1" || lower === "::1" || lower === "[::1]") return "localhost";
-  if (lower.startsWith("127.0.0.1:")) return `localhost${lower.slice("127.0.0.1".length)}`;
-  if (lower.startsWith("[::1]:")) return `localhost${lower.slice("[::1]".length)}`;
-  return lower;
+  return host.trim().toLowerCase();
 }
 
 function urlsMatchForPrecheck(stepUrl: string, openTabUrl: string): boolean {

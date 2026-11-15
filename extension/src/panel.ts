@@ -855,6 +855,36 @@ function substituteStepValue<T>(value: T, vars: Record<string, unknown>): T {
   return value;
 }
 
+function normalizeUrlPath(pathname: string): string {
+  if (pathname.length > 1 && pathname.endsWith("/")) {
+    return pathname.slice(0, -1);
+  }
+  return pathname;
+}
+
+function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string): number {
+  if (!tabUrl) return 0;
+  if (tabUrl === targetUrl) return 4;
+  try {
+    const tabParsed = new URL(tabUrl);
+    const targetParsed = new URL(targetUrl);
+    if (tabParsed.href.replace(/#.*$/, "") === targetParsed.href.replace(/#.*$/, "")) return 4;
+    if (tabParsed.origin.toLowerCase() !== targetParsed.origin.toLowerCase()) return 0;
+    if (
+      normalizeUrlPath(tabParsed.pathname) === normalizeUrlPath(targetParsed.pathname) &&
+      tabParsed.search === targetParsed.search
+    ) {
+      return 3;
+    }
+    if (normalizeUrlPath(tabParsed.pathname) === normalizeUrlPath(targetParsed.pathname)) {
+      return targetParsed.search ? 0 : 2;
+    }
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
 function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
   if (!url) return false;
   try {
@@ -931,25 +961,45 @@ async function runStepsInTab(
 
       if (step.action === "switchTab") {
         const allTabs = (await chromeApi.tabs?.query?.({ url: ["http://*/*", "https://*/*"] })) ?? [];
-        const matches = allTabs.filter(
-          (t) => t.id !== undefined && tabMatchesHost(t.url, step.host)
-        );
-        matches.sort((a, b) => {
-          const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
-          if (accessDiff !== 0) return accessDiff;
-          if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;
-          return 0;
-        });
-        const match = matches[0];
+        let match: ChromeTab | undefined;
+        if (step.url) {
+          const urlMatches = allTabs
+            .map((t) => ({ tab: t, score: scoreTabUrlMatch(t.url, step.url!) }))
+            .filter((entry) => entry.tab.id !== undefined && entry.score > 0);
+          urlMatches.sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            const accessDiff = (b.tab.lastAccessed ?? 0) - (a.tab.lastAccessed ?? 0);
+            if (accessDiff !== 0) return accessDiff;
+            if (Boolean(a.tab.active) !== Boolean(b.tab.active)) return a.tab.active ? -1 : 1;
+            return 0;
+          });
+          match = urlMatches[0]?.tab;
+        }
+        if (!match) {
+          const matches = allTabs.filter(
+            (t) => t.id !== undefined && tabMatchesHost(t.url, step.host)
+          );
+          matches.sort((a, b) => {
+            const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
+            if (accessDiff !== 0) return accessDiff;
+            if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;
+            return 0;
+          });
+          match = matches[0];
+        }
         if (match?.id === undefined) {
-          throw new Error(`No open tab for ${step.host}`);
+          throw new Error(`No open tab for ${step.url ?? step.host}`);
         }
         await chromeApi.tabs?.update?.(match.id, { active: true });
         if (match.windowId !== undefined) {
           await chromeApi.windows?.update?.(match.windowId, { focused: true });
         }
         currentTabId = match.id;
-        results.push({ ok: true, tab: step.host });
+        results.push({
+          ok: true,
+          tab: step.host,
+          ...(match.url || step.url ? { url: match.url ?? step.url } : {}),
+        });
         continue;
       }
 
