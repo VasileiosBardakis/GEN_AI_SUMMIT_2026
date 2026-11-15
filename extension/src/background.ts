@@ -1429,6 +1429,13 @@ async function runStepsInternal(
 
       if (step.action === "navigate") {
         lastFieldFrameByTab.delete(currentTabId);
+        const currentTab = tabsApi?.get
+          ? await tabsApi.get(currentTabId).catch(() => undefined)
+          : undefined;
+        if (currentTab?.url && scoreTabUrlMatch(currentTab.url, step.url) >= 3) {
+          results.push({ ok: true, url: currentTab.url });
+          continue;
+        }
         await tabsApi?.update?.(currentTabId, { url: step.url });
         await waitForTabLoad(currentTabId);
         const updatedTab = tabsApi?.get
