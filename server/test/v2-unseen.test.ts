@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import type http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -13,7 +13,10 @@ import type { ActionScript } from "../src/hands/types.ts";
 import { createGeminiClient, type GeminiClient, type ZodLikeSchema } from "../src/llm/gemini.ts";
 import type { StageLogEvent } from "../src/propose.ts";
 import { readLibrary } from "../src/hands/library.ts";
-import { COMPILER_RESPONSE_SCHEMA } from "../src/v2/compiler.ts";
+import {
+  COMPILER_RESPONSE_SCHEMA,
+  ModelCompileOutputSchema,
+} from "../src/v2/compiler.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -62,6 +65,7 @@ async function postHandsResult(
 }
 
 type RecordedAnswer = {
+  file: string;
   promptHash: string;
   response: unknown;
 };
@@ -78,7 +82,8 @@ async function loadRecordedAnswers(): Promise<RecordedAnswer[]> {
   return Promise.all(
     files.map(async (f) => {
       const raw = await readFile(path.join(fixturesDir, f), "utf-8");
-      return JSON.parse(raw) as RecordedAnswer;
+      const parsed = JSON.parse(raw) as { promptHash: string; response: unknown };
+      return { file: f, promptHash: parsed.promptHash, response: parsed.response };
     }),
   );
 }
@@ -194,13 +199,15 @@ function buildCompilerSchemaForPrompt(prompt: string): Record<string, unknown> {
 function makeRecordedGeminiClient(records: readonly RecordedAnswer[]): {
   client: GeminiClient;
   prompts: string[];
+  matchedFiles: string[];
   callCount: () => number;
 } {
-  const byHash = new Map<string, unknown>();
+  const byHash = new Map<string, RecordedAnswer>();
   for (const rec of records) {
-    byHash.set(rec.promptHash, rec.response);
+    byHash.set(rec.promptHash, rec);
   }
   const prompts: string[] = [];
+  const matchedFiles: string[] = [];
   let calls = 0;
 
   const client: GeminiClient = {
@@ -214,10 +221,12 @@ function makeRecordedGeminiClient(records: readonly RecordedAnswer[]): {
       calls += 1;
       prompts.push(prompt);
       const hash = sha256Hex(prompt);
-      if (!byHash.has(hash)) {
+      const rec = byHash.get(hash);
+      if (!rec) {
         throw new Error(`No recorded Gemini answer for prompt sha256=${hash}`);
       }
-      const parsed = schema.safeParse(byHash.get(hash));
+      matchedFiles.push(rec.file);
+      const parsed = schema.safeParse(rec.response);
       if (!parsed.success) {
         const msg = parsed.error.message ?? "invalid";
         throw new Error(`Recorded Gemini answer failed schema validation: ${msg}`);
@@ -226,15 +235,17 @@ function makeRecordedGeminiClient(records: readonly RecordedAnswer[]): {
     },
   };
 
-  return { client, prompts, callCount: () => calls };
+  return { client, prompts, matchedFiles, callCount: () => calls };
 }
 
 function makeLiveGeminiClient(): {
   client: GeminiClient;
   prompts: string[];
+  matchedFiles: string[];
   callCount: () => number;
 } {
   const prompts: string[] = [];
+  const matchedFiles: string[] = [];
   let calls = 0;
 
   const client: GeminiClient = {
@@ -260,7 +271,7 @@ function makeLiveGeminiClient(): {
     },
   };
 
-  return { client, prompts, callCount: () => calls };
+  return { client, prompts, matchedFiles, callCount: () => calls };
 }
 
 const TEST_TIMEOUT_MS = process.env.V2_UNSEEN_LIVE === "1" ? 30_000 : 10_000;
@@ -268,6 +279,7 @@ const TEST_TIMEOUT_MS = process.env.V2_UNSEEN_LIVE === "1" ? 30_000 : 10_000;
 async function getUnseenGeminiClient(): Promise<{
   client: GeminiClient;
   prompts: string[];
+  matchedFiles: string[];
   callCount: () => number;
 }> {
   if (process.env.V2_UNSEEN_LIVE === "1") {
@@ -347,8 +359,15 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     expectedRunMode: "run_remaining" | "save_only";
     approve: boolean;
     expectPauseBeforeSubmit?: boolean;
+    expectedAnswerFile?: string;
   }) {
-    const { client: gemini } = await getUnseenGeminiClient();
+    const answerFile =
+      opts.expectedAnswerFile ?? opts.file.replace(/\.jsonl$/, ".answer.json");
+    if (process.env.V2_UNSEEN_LIVE !== "1") {
+      await access(path.join(__dirname, "fixtures", answerFile));
+    }
+
+    const { client: gemini, matchedFiles, callCount } = await getUnseenGeminiClient();
     const { baseUrl, dataDir: srvDataDir } = await startV2Server({
       gemini,
       iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
@@ -367,6 +386,10 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     const precheckPoll = await pollHandsNext(baseUrl, waitMs);
     expect(precheckPoll.status).toBe(200);
     expect(precheckPoll.cmd?.kind).toBe("precheck");
+    expect(callCount()).toBe(1);
+    if (process.env.V2_UNSEEN_LIVE !== "1") {
+      expect(matchedFiles).toEqual([answerFile]);
+    }
     await postHandsResult(baseUrl, {
       id: precheckPoll.cmd!.id,
       ok: true,
@@ -491,6 +514,76 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     TEST_TIMEOUT_MS,
   );
 
+  it("recorded answers exist, pass ModelCompileOutputSchema, and match prompt hashes for known-failing fixtures before expected runMode failure", async () => {
+    const expectedFixtures = [
+      "unseen-two-repeats",
+      "unseen-rows-wrongtab",
+      "unseen-multifield-tab",
+      "unseen-extra-click",
+      "unseen-enter-controls",
+      "unseen-pii-risky",
+      "unseen-interleaved",
+      "unseen-sheet-loop",
+      "unseen-realcapture",
+    ];
+    const records = await loadRecordedAnswers();
+    expect(records.map((r) => r.file)).toEqual(
+      expectedFixtures.map((name) => `${name}.answer.json`).sort(),
+    );
+    for (const rec of records) {
+      expect(typeof rec.promptHash).toBe("string");
+      expect(rec.promptHash).toMatch(/^[0-9a-f]{64}$/);
+      const parsed = ModelCompileOutputSchema.safeParse(rec.response);
+      expect(parsed.success, `${rec.file} should match ModelCompileOutputSchema`).toBe(true);
+    }
+
+    if (process.env.V2_UNSEEN_LIVE === "1") {
+      return;
+    }
+
+    // Verify the two it.fails fixtures load their exact recorded answer, match sha256(prompt),
+    // pass precheck, and reach /decide (where they honestly emit run_remaining instead of save_only).
+    for (const [idx, name] of ["unseen-multifield-tab", "unseen-extra-click"].entries()) {
+      const answerFile = `${name}.answer.json`;
+      await access(path.join(__dirname, "fixtures", answerFile));
+      const { client: gemini, matchedFiles } = await getUnseenGeminiClient();
+      const { baseUrl } = await startV2Server({
+        gemini,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+        siteCooldownMs: 5 * 60 * 1000,
+        subDir: `verify-known-failing-${idx}`,
+      });
+      const events = await loadFixtureEvents(`${name}.jsonl`);
+      const postRes = await fetch(`${baseUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(events),
+      });
+      expect(postRes.status).toBe(200);
+
+      const precheckPoll = await pollHandsNext(baseUrl);
+      expect(precheckPoll.status).toBe(200);
+      expect(precheckPoll.cmd?.kind).toBe("precheck");
+      expect(matchedFiles).toEqual([answerFile]);
+      await postHandsResult(baseUrl, {
+        id: precheckPoll.cmd!.id,
+        ok: true,
+        results: [{ index: 0, action: "click", ok: true, matchCount: 1, unique: true }],
+      });
+
+      const decidePoll = await pollHandsNext(baseUrl);
+      expect(decidePoll.status).toBe(200);
+      expect(decidePoll.cmd?.kind).toBe("decide");
+      // Honest confirmation of why the it.fails test fails: real Gemini emitted run_remaining.
+      expect(decidePoll.cmd?.script?.runMode).toBe("run_remaining");
+      await postHandsResult(baseUrl, {
+        id: decidePoll.cmd!.id,
+        ok: true,
+        decision: "dismissed",
+      });
+    }
+  });
+
   it.fails(
     "unseen-multifield-tab.jsonl: compiles and saves save_only workflow with recorded real Gemini output",
     async () => {
@@ -498,6 +591,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
         file: "unseen-multifield-tab.jsonl",
         expectedRunMode: "save_only",
         approve: true,
+        expectedAnswerFile: "unseen-multifield-tab.answer.json",
       });
     },
     TEST_TIMEOUT_MS,
@@ -510,6 +604,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
         file: "unseen-extra-click.jsonl",
         expectedRunMode: "save_only",
         approve: true,
+        expectedAnswerFile: "unseen-extra-click.answer.json",
       });
     },
     TEST_TIMEOUT_MS,
@@ -800,7 +895,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     "enforces 1 popup / site / 5 min rate limit and resets after 5 min",
     async () => {
       let fakeNow = 1_000_000;
-    const { client: gemini } = await getUnseenGeminiClient();
+    const { client: gemini, matchedFiles } = await getUnseenGeminiClient();
     const stageLogs: StageLogEvent[] = [];
     const { baseUrl } = await startV2Server({
       gemini,
@@ -809,8 +904,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       stageLogs,
     });
 
-    const baseEvents = await loadFixtureEvents("unseen-extra-click.jsonl");
-    // Session 1 on claims.local -> succeeds
+    const baseEvents = await loadFixtureEvents("unseen-enter-controls.jsonl");
+    // Session 1 on intake.local -> succeeds
     await fetch(`${baseUrl}/events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -819,6 +914,9 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
 
     const pre1 = await pollHandsNext(baseUrl);
     expect(pre1.cmd?.kind).toBe("precheck");
+    if (process.env.V2_UNSEEN_LIVE !== "1") {
+      expect(matchedFiles[0]).toBe("unseen-enter-controls.answer.json");
+    }
     await postHandsResult(baseUrl, {
       id: pre1.cmd!.id,
       ok: true,
@@ -832,12 +930,12 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       decision: "dismissed",
     });
 
-    // Advance 2 min (< 5 min): Session 2 on SAME site (claims.local) -> rate limited!
+    // Advance 2 min (< 5 min): Session 2 on SAME site (intake.local) -> rate limited!
     fakeNow += 2 * 60 * 1000;
     const sess2Events = baseEvents.map((e, i) => ({
       ...e,
       id: `b2000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
-      session: "sess_claims_2",
+      session: "sess_intake_2",
     }));
     await fetch(`${baseUrl}/events`, {
       method: "POST",
@@ -849,7 +947,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       () => {
         expect(
           stageLogs.some(
-            (e) => e.stage === "rate_limit" && e.session === "sess_claims_2",
+            (e) => e.stage === "rate_limit" && e.session === "sess_intake_2",
           ),
         ).toBe(true);
       },
@@ -858,12 +956,12 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     const rateLimitedPoll = await pollHandsNext(baseUrl, 40);
     expect(rateLimitedPoll.status).toBe(204);
 
-    // Advance past 5 min: Session 3 on claims.local -> allowed!
+    // Advance past 5 min: Session 3 on intake.local -> allowed!
     fakeNow += 4 * 60 * 1000;
     const sess3Events = baseEvents.map((e, i) => ({
       ...e,
       id: `b3000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
-      session: "sess_claims_3",
+      session: "sess_intake_3",
     }));
     await fetch(`${baseUrl}/events`, {
       method: "POST",
@@ -1092,21 +1190,25 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     expect(saved[0].kind).toBe("snippet");
     expect(saved[0].startSignature).toContain("mail.local");
 
-    // Part B: Save a workflow (from unseen-extra-click) and verify Move-1 recall fires
-    const { client: claimGemini } = await getUnseenGeminiClient();
+    // Part B: Save a workflow (from good unseen-enter-controls recording) and verify Move-1 recall fires
+    const { client: ticketGemini, matchedFiles: ticketMatchedFiles } =
+      await getUnseenGeminiClient();
     const { baseUrl: recallUrl, dataDir: recallDataDir } = await startV2Server({
-      gemini: claimGemini,
+      gemini: ticketGemini,
       subDir: "move1-recall",
     });
-    const claimEvents = await loadFixtureEvents("unseen-extra-click.jsonl");
+    const ticketEvents = await loadFixtureEvents("unseen-enter-controls.jsonl");
     await fetch(`${recallUrl}/events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(claimEvents),
+      body: JSON.stringify(ticketEvents),
     });
 
     const cPre = await pollHandsNext(recallUrl);
     expect(cPre.cmd?.kind).toBe("precheck");
+    if (process.env.V2_UNSEEN_LIVE !== "1") {
+      expect(ticketMatchedFiles).toEqual(["unseen-enter-controls.answer.json"]);
+    }
     await postHandsResult(recallUrl, {
       id: cPre.cmd!.id,
       ok: true,
@@ -1114,45 +1216,36 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
     const cDec = await pollHandsNext(recallUrl);
     expect(cDec.cmd?.kind).toBe("decide");
+    expect(cDec.cmd?.script?.runMode).toBe("save_only");
     await postHandsResult(recallUrl, {
       id: cDec.cmd!.id,
       ok: true,
       decision: "approved",
     });
-    if (cDec.cmd?.script?.runMode === "run_remaining") {
-      const cRun = await pollHandsNext(recallUrl);
-      expect(cRun.status).toBe(200);
-      expect(cRun.cmd?.kind).toBeUndefined();
-      await postHandsResult(recallUrl, {
-        id: cRun.cmd!.id,
-        ok: true,
-        results: [{ ok: true }],
-      });
-    }
 
     await vi.waitFor(async () => {
       const lib = await readLibrary(recallDataDir);
       expect(lib).toHaveLength(1);
     });
-    const [claimEntry] = (await readLibrary(recallDataDir)) as LibraryEntry[];
-    expect(claimEntry.startSignature).toContain("claims.local");
+    const [ticketEntry] = (await readLibrary(recallDataDir)) as LibraryEntry[];
+    expect(ticketEntry.startSignature).toContain("intake.local");
 
-    // Now post Move-1 (single copy event) in a brand new session on claims.local
+    // Now post Move-1 (single copy event) in a brand new session on intake.local
     const move1Event: Event = {
       v: 1,
       id: "f9000000-0000-4000-8000-000000000001",
       ts: 1745000000000,
       session: "sess_move1_recall",
       source: "browser",
-      app: "claims.local",
-      window: "Claims Queue",
-      url: "http://claims.local:4200/queue",
+      app: "intake.local",
+      window: "Ticket Triage — Incoming Requests",
+      url: "http://intake.local:4400/triage",
       type: "copy",
-      value: "CLM-9901",
+      value: "TKT-8199",
       target: {
         tag: "span",
-        label: "Claim ID",
-        locators: [{ kind: "testid", value: "claim-id" }],
+        label: "Ticket ID",
+        locators: [{ kind: "testid", value: "triage-ticket-id" }],
       },
     };
     const recallPollPromise = pollHandsNext(recallUrl);
@@ -1165,21 +1258,22 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     const recallDecide = await recallPollPromise;
     expect(recallDecide.status).toBe(200);
     expect(recallDecide.cmd?.kind).toBe("decide");
-    expect(recallDecide.cmd?.name).toBe(claimEntry.name);
+    expect(recallDecide.cmd?.name).toBe(ticketEntry.name);
+    expect((recallDecide.cmd?.name ?? "").length).toBeGreaterThan(0);
     expect(recallDecide.cmd?.script?.runMode).toBe("run_remaining");
 
     await postHandsResult(recallUrl, {
       id: recallDecide.cmd!.id,
       ok: true,
       decision: "approved",
-      params: { claimId: "CLM-9901" },
+      params: { priority: "critical" },
     });
 
     const recallRun = await pollHandsNext(recallUrl);
     expect(recallRun.status).toBe(200);
     expect(recallRun.cmd?.kind).toBeUndefined();
     expect((recallRun.cmd as unknown as { paramValues?: Record<string, string> })?.paramValues).toEqual({
-      claimId: "CLM-9901",
+      priority: "critical",
     });
     await postHandsResult(recallUrl, {
       id: recallRun.cmd!.id,
@@ -1191,7 +1285,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
   it(
     "offers at rep 2 when offerAt2 === true, blocks precheck matchCount === 0, and builds GET /report across >10-min gaps",
     async () => {
-    const { client: gemini } = await getUnseenGeminiClient();
+    const { client: gemini, matchedFiles } = await getUnseenGeminiClient();
     const { baseUrl } = await startV2Server({
       gemini,
       subDir: "offer-at-2-and-gap",
@@ -1212,6 +1306,9 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     // matchCount === 0 blocks decide
     const pre0 = await pollHandsNext(baseUrl);
     expect(pre0.cmd?.kind).toBe("precheck");
+    if (process.env.V2_UNSEEN_LIVE !== "1") {
+      expect(matchedFiles[0]).toBe("unseen-two-repeats.answer.json");
+    }
     await postHandsResult(baseUrl, {
       id: pre0.cmd!.id,
       ok: true,
@@ -1249,10 +1346,10 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       decision: "dismissed",
     });
 
-    // Also verify GET /report works in v2 mode for 3+ repeats across >10-min gap
-    const rep3 = await loadFixtureEvents("unseen-extra-click.jsonl");
+    // Also verify GET /report works in v2 mode for 3+ repeats across >10-min gap (using good unseen-enter-controls recording)
+    const rep3 = await loadFixtureEvents("unseen-enter-controls.jsonl");
     const spaced3 = rep3.map((ev, idx) =>
-      idx >= 15 ? { ...ev, ts: ev.ts + 20 * 60 * 1000 } : ev,
+      idx >= 18 ? { ...ev, ts: ev.ts + 20 * 60 * 1000 } : ev,
     );
     await fetch(`${baseUrl}/events`, {
       method: "POST",
@@ -1262,6 +1359,9 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
 
     const pre3 = await pollHandsNext(baseUrl);
     expect(pre3.cmd?.kind).toBe("precheck");
+    if (process.env.V2_UNSEEN_LIVE !== "1") {
+      expect(matchedFiles).toContain("unseen-enter-controls.answer.json");
+    }
     await postHandsResult(baseUrl, {
       id: pre3.cmd!.id,
       ok: true,
@@ -1269,6 +1369,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
     const dec3 = await pollHandsNext(baseUrl);
     expect(dec3.cmd?.kind).toBe("decide");
+    expect(dec3.cmd?.script?.runMode).toBe("save_only");
+    expect((dec3.cmd?.name ?? "").length).toBeGreaterThan(0);
     await postHandsResult(baseUrl, {
       id: dec3.cmd!.id,
       ok: true,
@@ -1276,11 +1378,122 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     });
 
     const reportRes = await fetch(
-      `${baseUrl}/report?session=sess_unseen_extra_click`,
+      `${baseUrl}/report?session=sess_unseen_enter_controls`,
     );
     expect(reportRes.status).toBe(200);
     const report = (await reportRes.json()) as Report;
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0].title).toBe(dec3.cmd?.name);
   }, TEST_TIMEOUT_MS);
+
+  it("caches rep-2 precompile when offerAt2 === false and reuses on rep-3 via cache_hit without a second Gemini call", async () => {
+    let calls = 0;
+    const gemini: GeminiClient = {
+      async generateText() {
+        throw new Error("unexpected");
+      },
+      async generateJson<T>(
+        _prompt: string,
+        schema: Parameters<GeminiClient["generateJson"]>[1],
+      ): Promise<T> {
+        calls += 1;
+        const payload = {
+          suggest: true,
+          offerAt2: false,
+          kind: "workflow",
+          name: "Post pending stock transfers",
+          reason: "Transfers remaining SKU/Bin pairs from Stock Transfers to ERP",
+          risk: "low",
+          runMode: "run_remaining",
+          params: [],
+          steps: [
+            {
+              action: "forEach",
+              itemIds: ["item_1_3", "item_1_4", "item_1_5", "item_1_6"],
+              steps: [
+                { action: "switchTab", stepIndex: 3 },
+                { action: "fill", stepIndex: 4, value: "{{SKU}}" },
+                { action: "fill", stepIndex: 5, value: "{{Bin}}" },
+                { action: "click", stepIndex: 6 },
+              ],
+            },
+          ],
+        };
+        const parsed = schema.safeParse(payload);
+        if (!parsed.success) {
+          throw new Error(`invalid mock: ${parsed.error.message ?? "invalid"}`);
+        }
+        return parsed.data as T;
+      },
+    };
+
+    const stageLogs: StageLogEvent[] = [];
+    const { baseUrl } = await startV2Server({
+      gemini,
+      stageLogs,
+      subDir: "rep2-cache-hit",
+    });
+
+    const twoRepEvents = await loadFixtureEvents("unseen-two-repeats.jsonl");
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(twoRepEvents),
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        stageLogs.some(
+          (e) => e.stage === "precompile" && e.session === "sess_unseen_two_repeats",
+        ),
+      ).toBe(true);
+    });
+    expect(calls).toBe(1);
+    const noPopupAt2 = await pollHandsNext(baseUrl, 20);
+    expect(noPopupAt2.status).toBe(204);
+
+    // Post rep-3 events with identical constants/targets
+    const rep3Events: Event[] = twoRepEvents.slice(7, 14).map((ev, idx) => ({
+      ...ev,
+      id: `d4000004-0000-4000-8000-9900000000${String(idx + 1).padStart(2, "0")}`,
+      ts: ev.ts + 10_000,
+      value: ev.value
+        ? ev.value === "SKU-4402"
+          ? "SKU-4403"
+          : ev.value === "BIN-B07"
+            ? "BIN-C04"
+            : ev.value
+        : undefined,
+    }));
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(rep3Events),
+    });
+
+    const precheckPoll = await pollHandsNext(baseUrl);
+    expect(precheckPoll.status).toBe(200);
+    expect(precheckPoll.cmd?.kind).toBe("precheck");
+    await postHandsResult(baseUrl, {
+      id: precheckPoll.cmd!.id,
+      ok: true,
+      results: [{ index: 0, action: "fill", ok: true, matchCount: 1, unique: true }],
+    });
+
+    const decidePoll = await pollHandsNext(baseUrl);
+    expect(decidePoll.status).toBe(200);
+    expect(decidePoll.cmd?.kind).toBe("decide");
+    expect(
+      stageLogs.some(
+        (e) => e.stage === "cache_hit" && e.session === "sess_unseen_two_repeats",
+      ),
+    ).toBe(true);
+    expect(calls).toBe(1);
+
+    await postHandsResult(baseUrl, {
+      id: decidePoll.cmd!.id,
+      ok: true,
+      decision: "dismissed",
+    });
+  });
 });
