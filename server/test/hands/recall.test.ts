@@ -1181,6 +1181,94 @@ describe("POST /events -> library half-detection -> /decide bridge", () => {
       body: JSON.stringify({ id: runCmd.id, ok: true, results: [{ ok: true }] }),
     });
   });
+
+  it("GEN-131 UPDATE: recall popup slices full gov.gr -> DYPA flow to start at DYPA filters when recalled on DYPA search page", async () => {
+    const govToDypaEntry = buildLibraryEntryFromScript({
+      name: "Search Job Openings on DYPA",
+      kind: "workflow",
+      solution: "Search DYPA jobs from gov.gr",
+      status: "active",
+      context: {
+        app: "www.dypa.gov.gr",
+        url: "https://www.dypa.gov.gr/anazitisi-thesis-ergasias",
+        locators: [{ kind: "css", value: "div.jobsearchAccord-toggle" }],
+      },
+      script: {
+        name: "Search Job Openings on DYPA",
+        steps: [
+          {
+            action: "switchTab",
+            host: "www.gov.gr",
+            url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia",
+          },
+          {
+            action: "navigate",
+            url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia",
+          },
+          {
+            action: "click",
+            target: [{ kind: "css", value: 'a[href="https://www.dypa.gov.gr/anazitisi-thesis-ergasias"]' }],
+          },
+          {
+            action: "click",
+            target: [{ kind: "css", value: "div.jobsearchAccord-toggle" }],
+          },
+          {
+            action: "click",
+            target: [{ kind: "css", value: "#act-job-search" }],
+          },
+        ],
+      },
+    });
+    const recallEntry: LibraryEntry = {
+      ...govToDypaEntry,
+      eyes: {
+        ...govToDypaEntry.eyes,
+        guards: { ...govToDypaEntry.eyes.guards, fieldEmptyOnly: false, minSignals: 1 },
+      },
+    };
+    await fetch(`${baseUrl}/library`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(recallEntry),
+    });
+
+    const pollDecide = fetch(`${baseUrl}/hands/next?waitMs=2000`);
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify([
+        makeEvent({
+          app: "www.dypa.gov.gr",
+          url: "https://www.dypa.gov.gr/anazitisi-thesis-ergasias",
+          type: "click",
+          target: {
+            locators: [{ kind: "css", value: "div.jobsearchAccord-toggle" }],
+            tag: "div",
+          },
+        }),
+      ]),
+    });
+
+    const decideRes = await pollDecide;
+    expect(decideRes.status).toBe(200);
+    const decideCmd = (await decideRes.json()) as {
+      id: string;
+      kind: string;
+      script: LibraryEntry["script"];
+    };
+    expect(decideCmd.kind).toBe("decide");
+    expect(decideCmd.script.steps).toEqual([
+      { action: "click", target: [{ kind: "css", value: "div.jobsearchAccord-toggle" }] },
+      { action: "click", target: [{ kind: "css", value: "#act-job-search" }] },
+    ]);
+
+    await fetch(`${baseUrl}/hands/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: decideCmd.id, ok: true, decision: "dismissed" }),
+    });
+  });
 });
 
 describe("computeMatchedPrefix", () => {

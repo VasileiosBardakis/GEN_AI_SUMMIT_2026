@@ -13,7 +13,12 @@ import {
   formatStartSignature,
   type ImplementContext,
 } from "./hands/implementor.ts";
-import { canonicalStepCount, findMatchingLibraryEntry } from "./hands/library.ts";
+import {
+  canonicalStepCount,
+  canonicalStepsMatch,
+  extractCanonicalSteps,
+  findMatchingLibraryEntry,
+} from "./hands/library.ts";
 import { toLocatorList, type ActionScript, type LibraryEntry } from "./hands/types.ts";
 import type { SameTaskIrisJudgment, WorkflowIrisJudgment } from "./llm/iris.ts";
 import {
@@ -118,6 +123,7 @@ export type ProposerDeps = {
     script: ActionScript;
     workflow?: CompiledWorkflow;
     finding: Finding;
+    replaceEntryId?: string;
   }) => Promise<{ shouldRun?: boolean } | void>;
   now?: () => number;
   stageLog?: (event: StageLogEvent) => void;
@@ -297,6 +303,49 @@ function addNormalizedHost(out: Set<string>, raw?: string): void {
   }
 }
 
+function collectScriptHosts(steps: ActionScript["steps"], hosts: Set<string>): void {
+  for (const step of collectFlatSteps(steps)) {
+    if ("host" in step && typeof step.host === "string") {
+      addNormalizedHost(hosts, step.host);
+    }
+    if ("url" in step && typeof step.url === "string") {
+      addNormalizedHost(hosts, hostnameFromUrl(step.url, { collapseLoopback: true }));
+    }
+    if ("target" in step && step.target) {
+      for (const loc of toLocatorList(step.target)) {
+        const matches = loc.value.matchAll(/https?:\/\/[^\s"'<>)\]]+/gi);
+        for (const m of matches) {
+          addNormalizedHost(hosts, hostnameFromUrl(m[0], { collapseLoopback: true }));
+        }
+      }
+    }
+  }
+}
+
+function isLongerAndContains(
+  newScript: ActionScript,
+  savedScript: ActionScript,
+): boolean {
+  const savedCanonical = extractCanonicalSteps(savedScript.steps);
+  const newCanonical = extractCanonicalSteps(newScript.steps);
+  if (savedCanonical.length === 0) return false;
+
+  const savedFlatLen = collectFlatSteps(savedScript.steps).length;
+  const newFlatLen = collectFlatSteps(newScript.steps).length;
+  const isStrictlyLonger =
+    newCanonical.length > savedCanonical.length ||
+    (newCanonical.length === savedCanonical.length && newFlatLen > savedFlatLen);
+  if (!isStrictlyLonger) return false;
+
+  let si = 0;
+  for (let ni = 0; ni < newCanonical.length && si < savedCanonical.length; ni += 1) {
+    if (canonicalStepsMatch(savedCanonical[si]!, newCanonical[ni]!)) {
+      si += 1;
+    }
+  }
+  return si === savedCanonical.length;
+}
+
 function collectWorkflowHosts(
   site: string,
   workflow: CompiledWorkflow,
@@ -308,13 +357,7 @@ function collectWorkflowHosts(
     addNormalizedHost(hosts, app);
   }
   addNormalizedHost(hosts, hostnameFromUrl(workflow.startUrl, { collapseLoopback: true }));
-  for (const step of collectFlatSteps(script.steps)) {
-    if (step.action === "switchTab" && step.host) {
-      addNormalizedHost(hosts, step.host);
-    } else if (step.action === "navigate" && step.url) {
-      addNormalizedHost(hosts, hostnameFromUrl(step.url, { collapseLoopback: true }));
-    }
-  }
+  collectScriptHosts(script.steps, hosts);
   return hosts;
 }
 
@@ -326,28 +369,38 @@ function collectLibraryEntryHosts(entry: LibraryEntry): Set<string> {
   for (const pat of entry.eyes.scope.urlPatterns) {
     if (/^https?:\/\//i.test(pat)) {
       addNormalizedHost(hosts, hostnameFromUrl(pat, { collapseLoopback: true }));
+    } else if (!pat.startsWith("/") && !pat.startsWith("*") && pat.includes(".")) {
+      addNormalizedHost(hosts, pat);
     }
   }
   if (entry.startSignature) {
-    const firstPart = entry.startSignature.split("|")[0]?.trim();
+    const parts = entry.startSignature.split("|");
+    const firstPart = parts[0]?.trim();
     if (firstPart && (firstPart.includes(".") || firstPart === "localhost")) {
       addNormalizedHost(hosts, firstPart);
     }
-  }
-  for (const step of collectFlatSteps(entry.script.steps)) {
-    if (step.action === "switchTab" && step.host) {
-      addNormalizedHost(hosts, step.host);
-    } else if (step.action === "navigate" && step.url) {
-      addNormalizedHost(hosts, hostnameFromUrl(step.url, { collapseLoopback: true }));
+    const secondPart = parts[1]?.trim();
+    if (secondPart && /^https?:\/\//i.test(secondPart)) {
+      addNormalizedHost(hosts, hostnameFromUrl(secondPart, { collapseLoopback: true }));
     }
   }
+  collectScriptHosts(entry.script.steps, hosts);
   return hosts;
+}
+
+function stripWww(host: string): string {
+  return host.startsWith("www.") && host.length > 4 ? host.slice(4) : host;
 }
 
 function hasHostOverlap(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size === 0 || b.size === 0) return false;
+  const bNorm = new Set<string>();
+  for (const h of b) {
+    bNorm.add(h);
+    bNorm.add(stripWww(h));
+  }
   for (const h of a) {
-    if (b.has(h)) return true;
+    if (bNorm.has(h) || bNorm.has(stripWww(h))) return true;
   }
   return false;
 }
@@ -392,7 +445,9 @@ function summarizeScriptSteps(steps: readonly ActionScript["steps"][number][]): 
     const label = "target" in step ? firstTargetLabel(step.target) : "";
     switch (step.action) {
       case "switchTab":
-        out.push(`switchTab(${step.host})`);
+        out.push(
+          `switchTab(${step.host || ""}${step.url ? ` ${step.url}` : ""})`.trim(),
+        );
         break;
       case "navigate":
         out.push(`navigate(${step.url})`);
@@ -453,8 +508,26 @@ export function createProposer(deps: ProposerDeps): Proposer {
   const pendingRerunSessions = new Set<string>();
   const shownFlowTipLabels: string[] = [];
   const flowTipCheckedAt = new Map<string, number>();
+  const knownWorkflowHostsByKey = new Map<string, Set<string>>();
   let flowTipPending = false;
   let closed = false;
+
+  function entryLookupKey(name: string, solution: string): string {
+    return `${name.trim().toLowerCase()}::${solution.trim().toLowerCase()}`;
+  }
+
+  function getLibraryEntryHosts(entry: LibraryEntry): Set<string> {
+    const hosts = collectLibraryEntryHosts(entry);
+    const extra = knownWorkflowHostsByKey.get(
+      entryLookupKey(entry.name, entry.solution),
+    );
+    if (extra) {
+      for (const h of extra) {
+        hosts.add(h);
+      }
+    }
+    return hosts;
+  }
 
   async function proposeV2Finding(
     sessionId: string,
@@ -463,51 +536,9 @@ export function createProposer(deps: ProposerDeps): Proposer {
     script: ActionScript,
     workflow: CompiledWorkflow,
     decisionMeta?: ProposerDecisionMeta,
-    existingEntries?: readonly LibraryEntry[],
   ): Promise<void> {
     const name = finding.title.trim() || script.name?.trim() || "Proposed automation";
     const solution = finding.why.trim() || name;
-    if (workflow.kind === "workflow" && deps.judgeSameTask) {
-      const libraryEntries =
-        existingEntries ??
-        (deps.readLibrary ? await deps.readLibrary().catch(() => []) : []);
-      const candidateHosts = collectWorkflowHosts(site, workflow, script);
-      const sameHostEntries = libraryEntries.filter(
-        (entry) =>
-          entry.kind === "workflow" &&
-          hasHostOverlap(candidateHosts, collectLibraryEntryHosts(entry)),
-      );
-      if (sameHostEntries.length > 0) {
-        const candidateSummary = {
-          name,
-          reason: solution,
-          host: site,
-          steps: summarizeScriptSteps(script.steps),
-        };
-        const judgments = await Promise.all(
-          sameHostEntries.map((entry) =>
-            deps
-              .judgeSameTask!({
-                host: site,
-                candidate: candidateSummary,
-                existing: {
-                  id: entry.id,
-                  name: entry.name,
-                  description: entry.description,
-                  steps: summarizeScriptSteps(entry.script.steps),
-                },
-              })
-              .catch(() => null),
-          ),
-        );
-        const matchedIdx = judgments.findIndex((j) => j?.sameTask === true);
-        if (matchedIdx >= 0) {
-          const matchedEntry = sameHostEntries[matchedIdx]!;
-          safeLog(`[propose:v2] ${name} -> same as ${matchedEntry.id}, skipped`);
-          return;
-        }
-      }
-    }
 
     // No "Save skill" popup: every offered flow is offered as Run.
     let shouldRun = true;
@@ -585,6 +616,16 @@ export function createProposer(deps: ProposerDeps): Proposer {
         });
         if (hookRes && typeof hookRes.shouldRun === "boolean") {
           shouldRun = hookRes.shouldRun;
+        }
+        if (workflow.kind === "workflow") {
+          knownWorkflowHostsByKey.set(
+            entryLookupKey(workflow.name ?? name, finding.why || script.name || finding.title),
+            collectWorkflowHosts(site, workflow, script),
+          );
+          knownWorkflowHostsByKey.set(
+            entryLookupKey(name, solution),
+            collectWorkflowHosts(site, workflow, script),
+          );
         }
         safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} saved`);
       } catch (err) {
@@ -806,55 +847,132 @@ export function createProposer(deps: ProposerDeps): Proposer {
       return;
     }
 
-    let existingEntries: LibraryEntry[] = [];
-    if (deps.readLibrary) {
-      existingEntries = await deps.readLibrary().catch(() => []);
-      if (existingEntries.length > 0) {
-        const context: ImplementContext = {
-          ...(compiled.apps[0] ? { app: compiled.apps[0] } : {}),
-          ...(compiled.startUrl ? { url: compiled.startUrl } : {}),
-        };
-        const candidateEntry = buildLibraryEntryFromScript({
-          name: compiled.name || script.name || finding.title,
-          description: compiled.reason || finding.why,
-          kind: compiled.kind ?? (finding.verdict === "rung1" ? "snippet" : "workflow"),
-          solution: finding.why || script.name || finding.title,
-          script,
-          context,
-          status: "active",
-        });
-        const sigObj = buildStartSignature(script, context);
-        const candidateWithSig: LibraryEntry = {
-          ...candidateEntry,
-          startSignature: formatStartSignature(sigObj),
-        };
-        const matched = findMatchingLibraryEntry(existingEntries, candidateWithSig);
-        if (matched) {
-          proposedKeys.add(sessionScopedKey);
+    const site = extractSiteHost(compiled, script, windowedEvents);
 
-          const isUpgrade =
-            canonicalStepCount(script) > canonicalStepCount(matched.script);
-          if (isUpgrade && deps.onApproved) {
-            safeLog(
-              `[propose:v2] upgrading existing library entry id=${matched.id} name="${matched.name}"`,
+    if (deps.readLibrary) {
+      const existingEntries = await deps.readLibrary().catch(() => []);
+      if (existingEntries.length > 0) {
+        let irisAnswered = false;
+        if (compiled.kind === "workflow" && deps.judgeSameTask) {
+          const name =
+            finding.title.trim() || script.name?.trim() || "Proposed automation";
+          const solution = finding.why.trim() || name;
+          const candidateHosts = collectWorkflowHosts(site, compiled, script);
+          const sameHostEntries = existingEntries.filter(
+            (entry) =>
+              entry.kind === "workflow" &&
+              hasHostOverlap(candidateHosts, getLibraryEntryHosts(entry)),
+          );
+          if (sameHostEntries.length > 0) {
+            const candidateSummary = {
+              name,
+              reason: solution,
+              host: site,
+              hosts: Array.from(candidateHosts),
+              steps: summarizeScriptSteps(script.steps),
+            };
+            const judgments = await Promise.all(
+              sameHostEntries.map((entry) => {
+                const entryHosts = getLibraryEntryHosts(entry);
+                const sharedHosts = Array.from(candidateHosts).filter((h) =>
+                  hasHostOverlap(new Set([h]), entryHosts),
+                );
+                return deps
+                  .judgeSameTask!({
+                    host: site,
+                    sharedHosts,
+                    candidate: candidateSummary,
+                    existing: {
+                      id: entry.id,
+                      name: entry.name,
+                      description: entry.description,
+                      hosts: Array.from(entryHosts),
+                      steps: summarizeScriptSteps(entry.script.steps),
+                    },
+                  })
+                  .catch(() => null);
+              }),
             );
-            await deps.onApproved({
-              sessionId,
-              script,
-              workflow: compiled,
-              finding,
-            }).catch(() => {});
-          } else {
-            safeLog(
-              `[propose:v2] skipping duplicate of existing library entry id=${matched.id} name="${matched.name}"`,
-            );
+            irisAnswered = judgments.some((j) => j !== null);
+            const matchedIdx = judgments.findIndex((j) => j?.sameTask === true);
+            if (matchedIdx >= 0) {
+              const matchedEntry = sameHostEntries[matchedIdx]!;
+              proposedKeys.add(sessionScopedKey);
+              if (isLongerAndContains(script, matchedEntry.script)) {
+                if (deps.onApproved) {
+                  await deps
+                    .onApproved({
+                      sessionId,
+                      script,
+                      workflow: compiled,
+                      finding,
+                      replaceEntryId: matchedEntry.id,
+                    })
+                    .catch(() => {});
+                }
+                knownWorkflowHostsByKey.set(
+                  entryLookupKey(matchedEntry.name, matchedEntry.solution),
+                  candidateHosts,
+                );
+                knownWorkflowHostsByKey.set(
+                  entryLookupKey(name, solution),
+                  candidateHosts,
+                );
+                safeLog(
+                  `[propose:v2] ${name} -> replaces ${matchedEntry.id} (more complete)`,
+                );
+              } else {
+                safeLog(`[propose:v2] ${name} -> same as ${matchedEntry.id}, skipped`);
+              }
+              return;
+            }
           }
-          return;
+        }
+        if (!irisAnswered && !(compiled.kind === "workflow" && deps.judgeSameTask)) {
+          const context: ImplementContext = {
+            ...(compiled.apps[0] ? { app: compiled.apps[0] } : {}),
+            ...(compiled.startUrl ? { url: compiled.startUrl } : {}),
+          };
+          const candidateEntry = buildLibraryEntryFromScript({
+            name: compiled.name || script.name || finding.title,
+            description: compiled.reason || finding.why,
+            kind: compiled.kind ?? (finding.verdict === "rung1" ? "snippet" : "workflow"),
+            solution: finding.why || script.name || finding.title,
+            script,
+            context,
+            status: "active",
+          });
+          const sigObj = buildStartSignature(script, context);
+          const candidateWithSig: LibraryEntry = {
+            ...candidateEntry,
+            startSignature: formatStartSignature(sigObj),
+          };
+          const matched = findMatchingLibraryEntry(existingEntries, candidateWithSig);
+          if (matched) {
+            proposedKeys.add(sessionScopedKey);
+
+            const isUpgrade =
+              canonicalStepCount(script) > canonicalStepCount(matched.script);
+            if (isUpgrade && deps.onApproved) {
+              safeLog(
+                `[propose:v2] upgrading existing library entry id=${matched.id} name="${matched.name}"`,
+              );
+              await deps.onApproved({
+                sessionId,
+                script,
+                workflow: compiled,
+                finding,
+              }).catch(() => {});
+            } else {
+              safeLog(
+                `[propose:v2] skipping duplicate of existing library entry id=${matched.id} name="${matched.name}"`,
+              );
+            }
+            return;
+          }
         }
       }
     }
-
-    const site = extractSiteHost(compiled, script, windowedEvents);
 
     if (deps.precheck) {
       let precheckOutcome: PrecheckOutcome;
@@ -917,7 +1035,6 @@ export function createProposer(deps: ProposerDeps): Proposer {
       script,
       compiled,
       decisionMeta,
-      existingEntries,
     );
   }
 

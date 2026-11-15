@@ -12,6 +12,7 @@ import {
   type OptimizationItem,
 } from "../src/library.ts";
 import { buildDeciderSuggestion } from "../src/suggestion.ts";
+import { renderOptimizationCard } from "../src/panel.ts";
 
 describe("optimization library helpers", () => {
   it("formats durations and relative timestamps in user-friendly units", () => {
@@ -357,5 +358,53 @@ describe("optimization library helpers", () => {
     expect(merged[0].runCount).toBe(3);
     expect(merged[0].timeSavedPerRunSec).toBe(14.61);
     expect(merged[0].totalTimeSavedSec).toBeCloseTo(43.83);
+  });
+
+  it("GEN-131: renders workflow cards with only Run (never Add/Dismiss) and keeps Insert for snippets", () => {
+    const activeWorkflow: OptimizationItem = {
+      id: "wf_active_1",
+      title: "Submit DYPA form",
+      description: "Submits DYPA form automatically.",
+      kind: "workflow",
+      status: "active",
+      app: "www.dypa.gov.gr",
+      timeSavedPerRunSec: 20,
+      runCount: 0,
+      totalTimeSavedSec: 0,
+      createdAt: 1_000,
+    };
+    const legacySuggestedWorkflow: OptimizationItem = {
+      ...activeWorkflow,
+      id: "wf_legacy_suggested",
+      status: "suggested",
+    };
+    const activeSnippet: OptimizationItem = {
+      id: "snip_active_1",
+      title: "Shipping reply",
+      description: "Insert shipping reply.",
+      kind: "snippet",
+      status: "active",
+      snippetText: "Ships Friday.",
+      preview: "Ships Friday.",
+      app: "mail.example",
+      timeSavedPerRunSec: 10,
+      runCount: 1,
+      totalTimeSavedSec: 10,
+      createdAt: 2_000,
+    };
+
+    for (const wf of [activeWorkflow, legacySuggestedWorkflow]) {
+      const html = renderOptimizationCard(wf);
+      expect(html).toContain('data-action="run"');
+      expect(html).toContain(">Run<");
+      expect(html).not.toContain('data-action="activate"');
+      expect(html).not.toContain('data-action="dismiss"');
+      expect(html).not.toContain(">Add<");
+      expect(html).not.toContain(">Dismiss<");
+    }
+
+    const snippetHtml = renderOptimizationCard(activeSnippet);
+    expect(snippetHtml).toContain('data-action="run"');
+    expect(snippetHtml).toContain(">Insert<");
   });
 });

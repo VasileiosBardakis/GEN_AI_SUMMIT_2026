@@ -2508,4 +2508,213 @@ describe("GEN-95: offer popup tab targeting and Run flow-start tab switch", () =
     expect(updatedTabs).toEqual([501]);
     expect(executedOnTabs).toEqual([501]);
   });
+
+  it("GEN-131: handleHandsCommand stores workflow decide items as active automatically and keeps snippet items suggested", async () => {
+    const postedResults: unknown[] = [];
+    const baseUrl = await startResultServer(postedResults);
+    let storedLibrary: Array<{ id: string; kind: string; status: string }> = [];
+
+    (globalThis as Record<string, unknown>).chrome = {
+      storage: {
+        local: {
+          get: vi.fn(async () => ({ eyes_optimization_library_v1: storedLibrary })),
+          set: vi.fn(async (obj: Record<string, unknown>) => {
+            if (Array.isArray(obj.eyes_optimization_library_v1)) {
+              storedLibrary = obj.eyes_optimization_library_v1 as Array<{
+                id: string;
+                kind: string;
+                status: string;
+              }>;
+            }
+          }),
+        },
+      },
+      tabs: {
+        query: vi.fn(async () => [
+          { id: 801, url: "https://www.dypa.gov.gr/form", active: true, lastAccessed: 1000 },
+        ]),
+        sendMessage: vi.fn(async () => ({ ok: true, decision: "dismissed" })),
+      },
+    };
+
+    await handleHandsCommand(
+      {
+        id: "dec-gen131-wf",
+        kind: "decide",
+        name: "Submit DYPA application",
+        solution: "Submits the DYPA application form",
+        url: "https://www.dypa.gov.gr/form",
+        script: {
+          name: "Submit DYPA application",
+          steps: [
+            { action: "fill", target: { kind: "css", value: "#afm" }, value: "{{afm}}" },
+            { action: "click", target: { kind: "css", value: "#submit" } },
+          ],
+        },
+      },
+      baseUrl,
+    );
+
+    await vi.waitFor(() => {
+      expect(storedLibrary.some((item) => item.kind === "workflow")).toBe(true);
+    });
+    const wfItem = storedLibrary.find((item) => item.kind === "workflow");
+    expect(wfItem?.status).toBe("active");
+
+    await handleHandsCommand(
+      {
+        id: "dec-gen131-snip",
+        kind: "decide",
+        name: "Greeting snippet",
+        solution: "Insert repeated greeting",
+        url: "https://www.dypa.gov.gr/form",
+        script: {
+          name: "Greeting snippet",
+          steps: [{ action: "insertText", value: "Hello from snippet" }],
+        },
+      },
+      baseUrl,
+    );
+
+    await vi.waitFor(() => {
+      expect(storedLibrary.some((item) => item.kind === "snippet")).toBe(true);
+    });
+    const snipItem = storedLibrary.find((item) => item.kind === "snippet");
+    expect(snipItem?.status).toBe("suggested");
+  });
+
+  it("GEN-131 UPDATE: Run starts at the first step matching the current tab page (host+path) and falls back to start when no step matches", async () => {
+    const postedResults: unknown[] = [];
+    const baseUrl = await startResultServer(postedResults);
+
+    const govToDypaScript = {
+      name: "Search Job Openings on DYPA",
+      steps: [
+        {
+          action: "switchTab" as const,
+          host: "www.gov.gr",
+          url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia",
+        },
+        {
+          action: "navigate" as const,
+          url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia",
+        },
+        {
+          action: "click" as const,
+          target: [
+            {
+              kind: "css" as const,
+              value: 'a.govgr-link[href="/el/services/1001277/anazetese-theseon-ergasias"]',
+            },
+          ],
+        },
+        {
+          action: "click" as const,
+          target: [
+            {
+              kind: "css" as const,
+              value: 'a[href="https://www.dypa.gov.gr/anazitisi-thesis-ergasias"]',
+            },
+          ],
+        },
+        {
+          action: "click" as const,
+          target: [{ kind: "css" as const, value: "div.jobsearchAccord-toggle" }],
+        },
+        {
+          action: "click" as const,
+          target: [{ kind: "css" as const, value: "#act-job-search" }],
+        },
+      ],
+    };
+
+    let currentTabUrl = "https://www.dypa.gov.gr/anazitisi-thesis-ergasias?utm=1";
+    const updatedTabs: number[] = [];
+    const executedSelectors: string[] = [];
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        get: vi.fn(async (tabId: number) => ({
+          id: tabId,
+          url:
+            tabId === 902
+              ? "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia"
+              : currentTabUrl,
+          status: "complete",
+        })),
+        query: vi.fn(async ({ active }: { active?: boolean }) => {
+          const all = [
+            { id: 901, url: currentTabUrl, active: true, windowId: 1, status: "complete", lastAccessed: 999 },
+            { id: 902, url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia", active: false, windowId: 1, status: "complete", lastAccessed: 500 },
+          ];
+          return active ? all.filter((t) => t.active) : all;
+        }),
+        update: vi.fn(async (tabId: number) => {
+          updatedTabs.push(tabId);
+          return { id: tabId, url: currentTabUrl, status: "complete" };
+        }),
+      },
+      windows: { update: vi.fn(async () => ({})) },
+      scripting: {
+        executeScript: vi.fn(async ({ args }: { args: [Step] }) => {
+          const step = args[0] as { target?: Array<{ value: string }> };
+          executedSelectors.push(step.target?.[0]?.value ?? "");
+          return [{ frameId: 0, result: { ok: true, url: currentTabUrl } }];
+        }),
+      },
+    };
+
+    // 1. Panel Run (HANDS_RUN_SCRIPT) on DYPA search page -> starts at div.jobsearchAccord-toggle, skips gov.gr steps
+    const panelRes = await new Promise<Record<string, unknown>>((resolve) => {
+      handleRuntimeMessage(
+        {
+          kind: "HANDS_RUN_SCRIPT",
+          url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia",
+          appHost: "www.gov.gr",
+          script: govToDypaScript,
+        },
+        {},
+        (res) => resolve((res ?? {}) as Record<string, unknown>),
+      );
+    });
+    expect(panelRes.ok).toBe(true);
+    expect(updatedTabs).toEqual([]);
+    expect(executedSelectors).toEqual(["div.jobsearchAccord-toggle", "#act-job-search"]);
+
+    // 2. Popup Run (handleHandsCommand) on DYPA search page -> also starts at filters
+    executedSelectors.length = 0;
+    updatedTabs.length = 0;
+    await handleHandsCommand(
+      {
+        id: "run-gen131-popup",
+        tabId: 901,
+        url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia",
+        script: govToDypaScript,
+      },
+      baseUrl,
+    );
+    expect(updatedTabs).toEqual([]);
+    expect(executedSelectors).toEqual(["div.jobsearchAccord-toggle", "#act-job-search"]);
+
+    // 3. Unrelated current tab (google.com) -> no step matches -> runs from the start (switches to gov.gr)
+    currentTabUrl = "https://www.google.com/search?q=dypa";
+    executedSelectors.length = 0;
+    updatedTabs.length = 0;
+    await handleHandsCommand(
+      {
+        id: "run-gen131-from-start",
+        tabId: 901,
+        url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia",
+        script: govToDypaScript,
+      },
+      baseUrl,
+    );
+    expect(updatedTabs).toEqual([902]);
+    expect(executedSelectors).toEqual([
+      'a.govgr-link[href="/el/services/1001277/anazetese-theseon-ergasias"]',
+      'a[href="https://www.dypa.gov.gr/anazitisi-thesis-ergasias"]',
+      "div.jobsearchAccord-toggle",
+      "#act-job-search",
+    ]);
+  });
 });
