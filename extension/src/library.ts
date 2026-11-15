@@ -1,7 +1,7 @@
 import type { Finding } from "@gen/shared";
 import type { EyesDetectionSpec, LibraryEntry } from "@gen/shared/schema.ts";
 import type { ActionScript } from "./types.ts";
-import type { FlowNode, Suggestion } from "./suggestion.ts";
+import { buildDeciderSuggestion, type FlowNode, type Suggestion } from "./suggestion.ts";
 
 export type OptimizationKind = "snippet" | "workflow";
 export type OptimizationStatus = "active" | "suggested" | "paused";
@@ -16,6 +16,8 @@ export interface OptimizationItem {
   preview?: string;
   shortcut?: string;
   timeSavedPerRunSec: number;
+  manualSecPerRun?: number;
+  replaySecPerRun?: number;
   runCount: number;
   totalTimeSavedSec: number;
   detectedCount?: number;
@@ -33,6 +35,8 @@ export interface OptimizationItem {
 
 export interface LibrarySummary {
   totalTimeSavedSec: number;
+  totalManualSpentSec: number;
+  potentialSavedPerRunSec: number;
   totalRuns: number;
   activeCount: number;
   suggestedCount: number;
@@ -72,6 +76,8 @@ export function formatRelativeTime(ts?: number, now = Date.now()): string {
 
 export function computeLibrarySummary(items: OptimizationItem[]): LibrarySummary {
   let totalTimeSavedSec = 0;
+  let totalManualSpentSec = 0;
+  let potentialSavedPerRunSec = 0;
   let totalRuns = 0;
   let activeCount = 0;
   let suggestedCount = 0;
@@ -79,12 +85,18 @@ export function computeLibrarySummary(items: OptimizationItem[]): LibrarySummary
   for (const item of items) {
     totalTimeSavedSec += item.totalTimeSavedSec;
     totalRuns += item.runCount;
+    potentialSavedPerRunSec += item.timeSavedPerRunSec;
+    const manualPerRun = item.manualSecPerRun ?? item.timeSavedPerRunSec;
+    const observedManualReps = item.detectedCount ?? (item.runCount > 0 ? 1 : 0);
+    totalManualSpentSec += manualPerRun * observedManualReps;
     if (item.status === "active") activeCount += 1;
     if (item.status === "suggested") suggestedCount += 1;
   }
 
   return {
     totalTimeSavedSec,
+    totalManualSpentSec,
+    potentialSavedPerRunSec,
     totalRuns,
     activeCount,
     suggestedCount,
@@ -234,12 +246,29 @@ export function libraryEntryToOptimization(entry: LibraryEntryWithStats): Optimi
     typeof entry.stats?.timeSavedSeconds === "number"
       ? entry.stats.timeSavedSeconds
       : 0;
+  const manualSecPerRun =
+    typeof entry.stats?.manualSeconds === "number"
+      ? entry.stats.manualSeconds
+      : undefined;
+  const replaySecPerRun =
+    typeof entry.stats?.replaySeconds === "number"
+      ? entry.stats.replaySeconds
+      : undefined;
   const app = entry.eyes.scope.apps[0] || "Browser";
   const preview = snippetText
     ? snippetText.length > 64
       ? `${snippetText.slice(0, 64).trim()}...`
       : snippetText
     : entry.name;
+
+  const flows =
+    entry.script.steps.length > 0
+      ? buildDeciderSuggestion({
+          name: entry.name,
+          solution: entry.solution || entry.description || entry.name,
+          script: entry.script,
+        }).flows
+      : undefined;
 
   return {
     id: entry.id,
@@ -253,7 +282,10 @@ export function libraryEntryToOptimization(entry: LibraryEntryWithStats): Optimi
     solution: entry.solution,
     script: entry.script,
     eyes: entry.eyes,
+    ...(flows ? { flows } : {}),
     timeSavedPerRunSec,
+    ...(manualSecPerRun !== undefined ? { manualSecPerRun } : {}),
+    ...(replaySecPerRun !== undefined ? { replaySecPerRun } : {}),
     runCount: entry.runCount,
     totalTimeSavedSec: entry.runCount * timeSavedPerRunSec,
     ...(typeof entry.stats?.repetitions === "number"
@@ -318,8 +350,8 @@ export function mergeServerAndLocalOptimizations(
                   entry.solution.startsWith(item.solution.replace(/\.\.\.$/, "")))
             );
       if (fuzzyMatchIdx !== -1) {
+        const target = merged[fuzzyMatchIdx];
         if (item.runCount > 0) {
-          const target = merged[fuzzyMatchIdx];
           const runCount = Math.max(target.runCount, item.runCount);
           merged[fuzzyMatchIdx] = {
             ...target,
@@ -329,7 +361,10 @@ export function mergeServerAndLocalOptimizations(
               target.totalTimeSavedSec
             ),
             lastRunAt: Math.max(target.lastRunAt ?? 0, item.lastRunAt ?? 0) || undefined,
+            flows: item.flows ?? target.flows,
           };
+        } else if (item.flows && !target.flows) {
+          merged[fuzzyMatchIdx] = { ...target, flows: item.flows };
         }
         continue;
       }

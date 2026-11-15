@@ -28,6 +28,10 @@ function cssEscapeIdent(val: string): string {
   return val.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~ ])/g, "\\$1");
 }
 
+function escapeCssAttr(val: string): string {
+  return val.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function cleanLabelText(labelEl: HTMLElement): string {
   const clone = labelEl.cloneNode(true) as HTMLElement;
   for (const nested of Array.from(
@@ -87,10 +91,6 @@ function getReadableLabel(el: HTMLElement): string | undefined {
   return undefined;
 }
 
-function escapeCssAttr(val: string): string {
-  return val.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
 function getStableHrefAttr(el: HTMLElement): string | null {
   if (el.tagName.toLowerCase() !== "a") return null;
   const href = el.getAttribute("href")?.trim();
@@ -125,7 +125,7 @@ function buildCssSelector(el: HTMLElement): { selector: string; unique: boolean 
 
   const name = el.getAttribute("name");
   if (name) {
-    const nameSel = `${tag}[name="${cssEscapeIdent(name)}"]`;
+    const nameSel = `${tag}[name="${escapeCssAttr(name)}"]`;
     if (isUniqueCssSelector(nameSel)) {
       return { selector: nameSel, unique: true };
     }
@@ -133,7 +133,7 @@ function buildCssSelector(el: HTMLElement): { selector: string; unique: boolean 
 
   const dataCell = el.getAttribute("data-cell");
   if (dataCell) {
-    const cellSel = `${tag}[data-cell="${cssEscapeIdent(dataCell)}"]`;
+    const cellSel = `${tag}[data-cell="${escapeCssAttr(dataCell)}"]`;
     if (isUniqueCssSelector(cellSel)) {
       return { selector: cellSel, unique: true };
     }
@@ -257,11 +257,11 @@ export function extractTarget(rawEl: EventTarget | null): {
 
   const label = getReadableLabel(interactive);
   if (role && label && label.length <= 60) {
-    locators.push({ kind: "aria", value: `${role}[name="${label.replace(/"/g, '\\"')}"]` });
+    locators.push({ kind: "aria", value: `${role}[name="${escapeCssAttr(label)}"]` });
   } else if (interactive.getAttribute("aria-label")) {
     locators.push({
       kind: "aria",
-      value: `[aria-label="${interactive.getAttribute("aria-label")!.replace(/"/g, '\\"')}"]`,
+      value: `[aria-label="${escapeCssAttr(interactive.getAttribute("aria-label")!)}"]`,
     });
   }
 

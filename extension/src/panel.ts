@@ -139,9 +139,12 @@ function renderPreview(item: OptimizationItem): string {
       </div>
     `;
   }
+  if (!item.preview || item.preview.trim() === item.title.trim()) {
+    return "";
+  }
   return `
     <div class="preview-row">
-      <span class="keycap">${escapeHtml(item.preview ?? item.title)}</span>
+      <span class="keycap">${escapeHtml(item.preview)}</span>
     </div>
   `;
 }
@@ -171,6 +174,45 @@ function render(): void {
   if (sumSaved) sumSaved.textContent = formatDuration(summary.totalTimeSavedSec);
   if (sumRuns) sumRuns.textContent = String(summary.totalRuns);
   if (sumActive) sumActive.textContent = String(summary.activeCount);
+
+  const manualValEl = document.getElementById("meter-manual-val");
+  const reclaimedValEl = document.getElementById("meter-reclaimed-val");
+  const manualBarEl = document.getElementById("meter-manual-bar") as HTMLElement | null;
+  const reclaimedBarEl = document.getElementById("meter-reclaimed-bar") as HTMLElement | null;
+  const meterNoteEl = document.getElementById("meter-note");
+
+  const manualSec = summary.totalManualSpentSec;
+  const reclaimedSec = summary.totalTimeSavedSec;
+  const scaleMax = Math.max(manualSec, reclaimedSec, 1);
+
+  if (manualSec > 0 || reclaimedSec > 0) {
+    const manualPct = manualSec > 0 ? Math.max(4, Math.round((manualSec / scaleMax) * 100)) : 0;
+    const reclaimedPct = reclaimedSec > 0 ? Math.max(4, Math.round((reclaimedSec / scaleMax) * 100)) : 0;
+    if (manualValEl) manualValEl.textContent = formatDuration(manualSec);
+    if (reclaimedValEl) reclaimedValEl.textContent = formatDuration(reclaimedSec);
+    if (manualBarEl) manualBarEl.style.width = `${manualPct}%`;
+    if (reclaimedBarEl) reclaimedBarEl.style.width = `${reclaimedPct}%`;
+    if (meterNoteEl) {
+      if (reclaimedSec > manualSec) {
+        meterNoteEl.textContent = `+${formatDuration(reclaimedSec - manualSec)} ahead of manual time spent`;
+      } else if (reclaimedSec > 0) {
+        meterNoteEl.textContent = `${formatDuration(manualSec - reclaimedSec)} left to break even on manual time`;
+      } else {
+        meterNoteEl.textContent = `${formatDuration(manualSec)} spent manually · ~${formatDuration(summary.potentialSavedPerRunSec)} saved per run`;
+      }
+    }
+  } else {
+    if (manualValEl) manualValEl.textContent = "0s";
+    if (reclaimedValEl) reclaimedValEl.textContent = "0s";
+    if (manualBarEl) manualBarEl.style.width = "0%";
+    if (reclaimedBarEl) reclaimedBarEl.style.width = "0%";
+    if (meterNoteEl) {
+      meterNoteEl.textContent =
+        summary.potentialSavedPerRunSec > 0
+          ? `Ready to save ~${formatDuration(summary.potentialSavedPerRunSec)} per run`
+          : "Run an automation to reclaim manual time";
+    }
+  }
 
   const countAll = document.getElementById("count-all");
   const countActive = document.getElementById("count-active");
@@ -219,12 +261,13 @@ function render(): void {
         <article class="opt-card${isPaused ? " paused" : ""}" data-opt-id="${escapeHtml(item.id)}">
           <div class="opt-head">
             <div>
+              <div class="opt-eyebrow">${item.kind === "snippet" ? "Snippet" : "Workflow"} · ${escapeHtml(item.app ?? "Browser")}</div>
               <h2 class="opt-title">${escapeHtml(item.title)}</h2>
               <p class="opt-desc">${escapeHtml(item.description)}</p>
             </div>
             ${
               isSuggested
-                ? '<span class="suggested-tag"><span class="suggested-dot" aria-hidden="true"></span>Ready</span>'
+                ? '<span class="suggested-tag">Ready</span>'
                 : `<button class="switch" type="button" role="switch" aria-checked="${
                     item.status === "active" ? "true" : "false"
                   }" aria-label="Toggle ${escapeHtml(item.title)}" data-action="toggle" data-id="${escapeHtml(item.id)}"></button>`
@@ -233,21 +276,9 @@ function render(): void {
 
           ${renderPreview(item)}
 
-          <div class="opt-metrics">
-            <div class="metric-cell">
-              <span class="metric-val">~${escapeHtml(formatDuration(item.timeSavedPerRunSec))}</span>
-              <span class="metric-lbl">Saves / run</span>
-            </div>
-            <div class="metric-cell">
-              <span class="metric-val">${item.runCount}</span>
-              <span class="metric-lbl">${item.runCount === 1 ? "Run" : "Runs"}</span>
-            </div>
-            <div class="metric-cell">
-              <span class="metric-val${item.totalTimeSavedSec > 0 ? " saved" : ""}">${escapeHtml(
-                formatDuration(item.totalTimeSavedSec)
-              )}</span>
-              <span class="metric-lbl">Total saved</span>
-            </div>
+          <div class="opt-stats-line">
+            <span>~${escapeHtml(formatDuration(item.timeSavedPerRunSec))}/run · <strong>${item.runCount}</strong> ${item.runCount === 1 ? "run" : "runs"}</span>
+            <span class="${item.totalTimeSavedSec > 0 ? "saved" : ""}">${escapeHtml(formatDuration(item.totalTimeSavedSec))} saved</span>
           </div>
 
           ${renderDag(item, isFlowOpen)}
