@@ -2357,4 +2357,88 @@ describe("v2 compiler model and timeout configuration", () => {
       logSpy.mockRestore();
     }
   });
+
+  it("compiles repeated pastes into one field as kind=snippet without prepending switchTab and steers prompt/schema", async () => {
+    const reply = "Hi, thanks for your order. It ships Friday and tracking will follow shortly.";
+    const replyTarget: NonNullable<Event["target"]> = {
+      tag: "textarea",
+      role: "textbox",
+      label: "Reply to customer",
+      locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+    };
+    const clearTarget: NonNullable<Event["target"]> = {
+      tag: "button",
+      role: "button",
+      label: "Clear reply",
+      locators: [{ kind: "css", value: "#clear-reply" }],
+    };
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "55000000-0000-4000-8000-000000000001",
+        ts: 1000,
+        session: "sess_snip_compile",
+        source: "browser",
+        app: "localhost",
+        url: "http://localhost:5173/",
+        type: "paste",
+        target: replyTarget,
+        value: reply,
+      },
+      {
+        v: 1,
+        id: "55000000-0000-4000-8000-000000000002",
+        ts: 2000,
+        session: "sess_snip_compile",
+        source: "browser",
+        app: "localhost",
+        url: "http://localhost:5173/",
+        type: "click",
+        target: clearTarget,
+      },
+      {
+        v: 1,
+        id: "55000000-0000-4000-8000-000000000003",
+        ts: 3000,
+        session: "sess_snip_compile",
+        source: "browser",
+        app: "localhost",
+        url: "http://localhost:5173/",
+        type: "paste",
+        target: replyTarget,
+        value: reply,
+      },
+    ];
+
+    const { client, prompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "snippet",
+      name: "Reply to customer",
+      reason: "Inserts repeated customer reply text",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [{ action: "insertText", stepIndex: 0, value: reply }],
+    });
+
+    const wf = await compileWorkflow(
+      { events },
+      { gemini: client, irisJudgment: { worthAutomating: true, pauseBeforeSubmit: false } },
+    );
+    expect(wf).not.toBeNull();
+    expect(wf!.kind).toBe("snippet");
+    expect(wf!.apps).toEqual(["localhost"]);
+    expect(wf!.startUrl).toBe("http://localhost:5173/");
+    expect(wf!.steps).toEqual([
+      {
+        action: "insertText",
+        target: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+        value: reply,
+      },
+    ]);
+    expect(prompts[0]).toContain("SNIPPET:");
+    expect(prompts[0]).toContain('kind: "snippet"');
+    expect(COMPILER_RESPONSE_SCHEMA.properties.kind.description).toContain("snippet");
+  });
 });

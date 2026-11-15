@@ -90,4 +90,44 @@ describe("buildDeciderSuggestion", () => {
     expect(tip.meta).toBe("Flow tip");
     expect(tip.flows).toEqual({ user: [], proposed: [] });
   });
+
+  it("treats targeted or switchTab-prefixed single insertText scripts as text snippets so the card offers Insert", () => {
+    const targetedSnippet = buildDeciderSuggestion({
+      name: "Reply to customer",
+      solution: "Insert repeated customer reply.",
+      runMode: "run",
+      script: {
+        name: "Reply to customer",
+        steps: [
+          {
+            action: "insertText",
+            target: { kind: "css", value: 'textarea[name="customer_reply"]' },
+            value: "Hi, thanks for your order.",
+          },
+        ],
+      },
+    });
+    expect(targetedSnippet.kind).toBe("text");
+    expect(targetedSnippet.snippetText).toBe("Hi, thanks for your order.");
+    expect(targetedSnippet.primaryLabel).toBeUndefined();
+
+    const withSwitchTab = buildDeciderSuggestion({
+      name: "Reply to customer",
+      solution: "Insert repeated customer reply.",
+      runMode: "run",
+      script: {
+        name: "Reply to customer",
+        steps: [
+          { action: "switchTab", host: "localhost", url: "http://localhost:5173/" },
+          {
+            action: "insertText",
+            target: { kind: "css", value: 'textarea[name="customer_reply"]' },
+            value: "Hi, thanks for your order.",
+          },
+        ],
+      },
+    });
+    expect(withSwitchTab.kind).toBe("text");
+    expect(withSwitchTab.snippetText).toBe("Hi, thanks for your order.");
+  });
 });
