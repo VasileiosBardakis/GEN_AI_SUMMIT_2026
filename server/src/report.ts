@@ -245,8 +245,11 @@ export function pickPrimaryCandidate(
     return !subsumed;
   });
   const pool = nonSubsumed.length > 0 ? nonSubsumed : candidates;
+  const isTrivialClickPair = (c: PatternCandidate) =>
+    c.actions.length <= 2 && c.actions.every((a) => a === "click");
   return [...pool].sort(
     (a, b) =>
+      (isTrivialClickPair(a) ? 1 : 0) - (isTrivialClickPair(b) ? 1 : 0) ||
       b.count - a.count ||
       b.count * b.actions.length - a.count * a.actions.length ||
       b.actions.length - a.actions.length ||

@@ -18,6 +18,7 @@ import {
   stopHandsRun,
   substitute,
 } from "../src/background.ts";
+import { precheckStepLocators } from "../src/content.ts";
 import { executeStep, type V2DomStep } from "../src/hands/execute.ts";
 import type { ActionScript, Step } from "../src/types.ts";
 
@@ -1219,6 +1220,201 @@ describe("GEN-69: M2 Hands v2", () => {
     expect(formCancelled.requestSubmit).not.toHaveBeenCalled();
     expect(formCancelled.submit).not.toHaveBeenCalled();
     expect(keySequence3).toEqual(["keydown", "keyup"]);
+  });
+
+  it("within [container, text] scopes to the matching table row in executeStep and precheckStepLocators", async () => {
+    const root = new FakeDomElement("body");
+
+    const clientSection = new FakeDomElement("section", { "data-testid": "client-list" });
+    const clientTbody = new FakeDomElement("tbody");
+    const cRow1 = new FakeDomElement("tr", { "data-testid": "client-row-1" });
+    cRow1.appendChild(new FakeDomElement("td", {}, "Nordic Freight Co"));
+    const cBtn1 = new FakeDomElement("button", { "data-testid": "open-client-1" }, "Open");
+    let clicked1 = 0;
+    cBtn1.addEventListener("click", () => {
+      clicked1 += 1;
+    });
+    const cBtn1Cell = new FakeDomElement("td");
+    cBtn1Cell.appendChild(cBtn1);
+    cRow1.appendChild(cBtn1Cell);
+
+    const cRow2 = new FakeDomElement("tr", { "data-testid": "client-row-2" });
+    cRow2.appendChild(new FakeDomElement("td", {}, "Boreal Timber SA"));
+    const cBtn2 = new FakeDomElement("button", { "data-testid": "open-client-2" }, "Open");
+    let clicked2 = 0;
+    cBtn2.addEventListener("click", () => {
+      clicked2 += 1;
+    });
+    const cBtn2Cell = new FakeDomElement("td");
+    cBtn2Cell.appendChild(cBtn2);
+    cRow2.appendChild(cBtn2Cell);
+
+    clientTbody.appendChild(cRow1);
+    clientTbody.appendChild(cRow2);
+    clientSection.appendChild(clientTbody);
+
+    const sheetSection = new FakeDomElement("table", { "data-testid": "sheet-table" });
+    const sheetTbody = new FakeDomElement("tbody");
+    const sRow2 = new FakeDomElement("tr", { "data-testid": "sheet-row-2" });
+    sRow2.appendChild(new FakeDomElement("td", {}, "Boreal Timber SA"));
+    sRow2.appendChild(new FakeDomElement("td", { "data-col": "lookup" }, "RATE-3190"));
+    const sBtn2 = new FakeDomElement("button", {}, "Open");
+    let sheetClicked = 0;
+    sBtn2.addEventListener("click", () => {
+      sheetClicked += 1;
+    });
+    const sBtn2Cell = new FakeDomElement("td");
+    sBtn2Cell.appendChild(sBtn2);
+    sRow2.appendChild(sBtn2Cell);
+    sheetTbody.appendChild(sRow2);
+    sheetSection.appendChild(sheetTbody);
+
+    root.appendChild(clientSection);
+    root.appendChild(sheetSection);
+
+    const dom = installFakeDom(root);
+    restoreDom = dom.restore;
+
+    const withinLocs = [
+      { kind: "testid" as const, value: "client-list" },
+      { kind: "text" as const, value: "Boreal Timber SA" },
+    ];
+    const targetLocs = [
+      { kind: "aria" as const, value: 'button[name="Open"]' },
+      { kind: "text" as const, value: "Open" },
+    ];
+
+    const precheck = precheckStepLocators(targetLocs, withinLocs);
+    expect(precheck).toEqual({
+      matchCount: 1,
+      unique: true,
+      matchedLocator: { kind: "aria", value: 'button[name="Open"]' },
+    });
+
+    const clickRes = await executeStep({
+      action: "click",
+      within: withinLocs,
+      target: targetLocs,
+    });
+    expect(clickRes.ok).toBe(true);
+    expect(clicked1).toBe(0);
+    expect(clicked2).toBe(1);
+    expect(sheetClicked).toBe(0);
+
+    const readRes = await executeStep({
+      action: "readText",
+      within: [
+        { kind: "testid", value: "sheet-table" },
+        { kind: "text", value: "Boreal Timber SA" },
+      ],
+      target: { kind: "css", value: 'td[data-col="lookup"]' },
+      bind: "rate",
+    });
+    expect(readRes.ok).toBe(true);
+    expect(readRes.value).toBe("RATE-3190");
+  });
+
+  it("handleHandsCommand forwards step.within on precheck (substituting forEach.items[0]) and script.runMode on decide", async () => {
+    const sendMessage = vi.fn(async (_tabId: number, msg: Record<string, unknown>) => {
+      if (msg.kind === "EYES_PRECHECK_STEP") {
+        return { ok: true, matchCount: 1, unique: true };
+      }
+      return { ok: true, decision: "approved" };
+    });
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        query: vi.fn(async () => [{ id: 77, url: "http://127.0.0.1:5173/sheet.html", active: true }]),
+        sendMessage,
+      },
+    };
+
+    const postedResults: unknown[] = [];
+    mockServer = http.createServer((req, res) => {
+      if (req.method === "POST" && req.url === "/hands/result") {
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
+        req.on("end", () => {
+          postedResults.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        });
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => {
+      mockServer?.listen(0, "127.0.0.1", () => resolve());
+    });
+    const baseUrl = `http://127.0.0.1:${(mockServer.address() as AddressInfo).port}`;
+
+    await handleHandsCommand(
+      {
+        id: "pre-within-1",
+        kind: "precheck",
+        url: "http://localhost:5173/sheet.html",
+        script: {
+          steps: [
+            {
+              action: "forEach",
+              items: [{ col1: "Boreal Timber SA" }],
+              steps: [
+                {
+                  action: "click",
+                  within: [
+                    { kind: "testid", value: "client-list" },
+                    { kind: "text", value: "{{col1}}" },
+                  ],
+                  target: [{ kind: "aria", value: 'button[name="Open"]' }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+      baseUrl,
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      77,
+      expect.objectContaining({
+        kind: "EYES_PRECHECK_STEP",
+        within: [
+          { kind: "testid", value: "client-list" },
+          { kind: "text", value: "Boreal Timber SA" },
+        ],
+      }),
+      { frameId: 0 },
+    );
+
+    await handleHandsCommand(
+      {
+        id: "decide-runmode-1",
+        kind: "decide",
+        name: "Sync",
+        solution: "Sync sheet",
+        script: {
+          name: "Sync",
+          runMode: "run_remaining",
+          steps: [{ action: "click", target: { kind: "testid", value: "open-client-3" } }],
+        },
+      },
+      baseUrl,
+    );
+
+    await vi.waitFor(() => {
+      expect(postedResults).toHaveLength(2);
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      77,
+      expect.objectContaining({
+        kind: "EYES_SHOW_DECIDER",
+        runMode: "run",
+      }),
+      { frameId: 0 },
+    );
   });
 
   it("forwards save_only runMode and params in decide, resolves local PII by piiHash, seeds bindings, and matches loopback tabs", async () => {

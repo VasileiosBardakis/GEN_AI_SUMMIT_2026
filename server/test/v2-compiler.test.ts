@@ -6,7 +6,7 @@ import type { Event } from "@gen/shared";
 import { EventsSchema } from "@gen/shared/schema.ts";
 import type { GeminiClient, GeminiSdk } from "../src/llm/gemini.ts";
 import { createProposer } from "../src/propose.ts";
-import { compiledWorkflowToActionScript } from "../src/report.ts";
+import { compiledWorkflowToActionScript, pickPrimaryCandidate } from "../src/report.ts";
 import {
   COMPILER_RESPONSE_SCHEMA,
   compileWorkflow,
@@ -1101,6 +1101,132 @@ describe("Brain v2 compiler and validator", () => {
     } finally {
       proposer.close();
     }
+  });
+
+  it("parses real-sheet-capture.jsonl {source, target} pageSummary objects (masked) into containers/targets/lists and resolves readText column", async () => {
+    const events = await loadFixture("real-sheet-capture.jsonl");
+    // Inject an email into a copy of the fixture's {source, target} summaries to verify PII scrubbing
+    const lastCopyIdx = events.map((e) => e.type).lastIndexOf("copy");
+    const eventsWithPii = events.map((ev, idx) => {
+      if (idx === lastCopyIdx && ev.meta?.pageSummary && typeof ev.meta.pageSummary === "object") {
+        const cloned = JSON.parse(JSON.stringify(ev)) as Event;
+        const ps = cloned.meta!.pageSummary as {
+          source: { rows: Array<{ cells: Array<{ text: string }> }> };
+        };
+        ps.source.rows[2].cells[0].text = "boreal@example.com";
+        return cloned;
+      }
+      return ev;
+    });
+
+    const { client, prompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Sync real sheet rates",
+      reason: "Copies lookup values from sheet-table to client-detail",
+      risk: "low",
+      runMode: "run_remaining",
+      params: [{ name: "clientName" }, { name: "lookupValue" }],
+      steps: [
+        {
+          action: "forEach",
+          itemIds: ["item_2_3", "item_2_4"],
+          steps: [
+            {
+              action: "click",
+              withinId: "ps_1",
+              withinTextParam: "clientName",
+              stepIndex: 2,
+            },
+            { action: "click", stepIndex: 3 },
+            {
+              action: "readText",
+              withinId: "ps_2",
+              withinTextParam: "clientName",
+              stepIndex: 5,
+              bind: "lookupValue",
+            },
+            { action: "click", stepIndex: 6 },
+            { action: "fill", stepIndex: 8, value: "{{lookupValue}}" },
+            { action: "click", stepIndex: 9 },
+            { action: "click", stepIndex: 10 },
+          ],
+        },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events: eventsWithPii },
+      {
+        gemini: client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(prompts[0]).toContain("PageSummary Containers");
+    expect(prompts[0]).toContain("PageSummary Targets:");
+    expect(prompts[0]).toContain("PageSummary Lists:");
+    expect(prompts[0]).toContain("client-list");
+    expect(prompts[0]).toContain("sheet-table");
+    expect(prompts[0]).toContain("submit form");
+    expect(prompts[0]).not.toContain("boreal@example.com");
+    expect(prompts[0]).toContain("__PII_EMAIL_");
+
+    expect(wf).not.toBeNull();
+    expect(wf!.runMode).toBe("run_remaining");
+    const loop = wf!.steps[1];
+    expect(loop.action).toBe("forEach");
+    if (loop.action === "forEach" && Array.isArray(loop.items)) {
+      expect(loop.items).toHaveLength(2);
+      // Restored locally from piiMap
+      expect(loop.items[0].col1).toBe("boreal@example.com");
+      expect(loop.items[0].col2).toBe("RATE-3190");
+      expect(loop.items[1].col1).toBe("Vanguard Marine Inc");
+      expect(loop.items[1].col2).toBe("RATE-4418");
+
+      const openStep = loop.steps[0];
+      expect(openStep.action).toBe("click");
+      if (openStep.action === "click") {
+        expect(openStep.within).toEqual([
+          { kind: "testid", value: "client-list" },
+          { kind: "css", value: "#client-list-section" },
+          { kind: "text", value: "{{col1}}" },
+        ]);
+      }
+
+      const readStep = loop.steps[2];
+      expect(readStep.action).toBe("readText");
+      if (readStep.action === "readText") {
+        expect(readStep.target).toEqual([{ kind: "css", value: "td:nth-of-type(2)" }]);
+        expect(readStep.within).toEqual([
+          { kind: "testid", value: "sheet-table" },
+          { kind: "css", value: "#sheet-panel > section > table" },
+          { kind: "text", value: "{{col1}}" },
+        ]);
+        expect(readStep.bind).toBe("lookupValue");
+      }
+    }
+  });
+
+  it("pickPrimaryCandidate prefers substantive workflow over trivial 2-click boundary pair", () => {
+    const picked = pickPrimaryCandidate([
+      {
+        signature: "click->click",
+        actions: ["click", "click"],
+        count: 3,
+        apps: ["localhost"],
+        instances: [],
+      },
+      {
+        signature: "click->click->copy->click->paste->fill->click",
+        actions: ["click", "click", "copy", "click", "paste", "fill", "click"],
+        count: 2,
+        apps: ["localhost"],
+        instances: [],
+      },
+    ]);
+    expect(picked?.signature).toBe("click->click->copy->click->paste->fill->click");
   });
 
   it("binds unmapped [REDACTED:EMAIL#h_...] tokens to {{param}} with piiHash and backfills missing param examples without leaking PII", async () => {
