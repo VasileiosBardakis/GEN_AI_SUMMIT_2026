@@ -186,6 +186,15 @@ export function buildFindingKey(finding: Finding, script: ActionScript): string 
   return `${detector}:${finding.verdict}:${hash}`;
 }
 
+function summarizePrecheckCounts(outcome: PrecheckOutcome | HandsOutcome): unknown {
+  const results = outcome.results;
+  if (!Array.isArray(results)) return results ?? null;
+  return results.map((item) => {
+    const rec = (item ?? {}) as { index?: unknown; action?: unknown; matchCount?: unknown };
+    return `${String(rec.index)}:${String(rec.action)}=${String(rec.matchCount)}`;
+  });
+}
+
 function isPrecheckPassed(outcome: PrecheckOutcome | HandsOutcome): boolean {
   if (!outcome.ok) return false;
   const results = outcome.results;
@@ -196,12 +205,13 @@ function isPrecheckPassed(outcome: PrecheckOutcome | HandsOutcome): boolean {
       const rec = item as { ok?: unknown; matchCount?: unknown };
       if (rec.ok === false) return false;
       if (typeof rec.matchCount !== "number") return false;
-      return rec.matchCount === 1;
+      // 0 = target not found; 2+ = ambiguous here, but Run narrows with within/stepIndex and fails closed.
+      return rec.matchCount >= 1;
     });
   }
   if (typeof results === "object" && results !== null && "matchCount" in results) {
     const rec = results as { ok?: unknown; matchCount?: unknown };
-    return rec.ok !== false && rec.matchCount === 1;
+    return rec.ok !== false && typeof rec.matchCount === "number" && rec.matchCount >= 1;
   }
   return false;
 }
@@ -1002,7 +1012,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       });
       if (!passed) {
         safeLog(
-          `[propose:v2] precheck blocked popup for ${compiled.name} (${precheckOutcome.error ?? "matchCount !== 1"})`,
+          `[propose:v2] precheck blocked popup for ${compiled.name} (${precheckOutcome.error ?? `matchCounts ${JSON.stringify(summarizePrecheckCounts(precheckOutcome))}`})`,
         );
         if (!closed && irisYes && deps.suggestFlowTip) {
           await maybeFlowTip(sessionId, events);
