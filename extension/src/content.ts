@@ -586,6 +586,8 @@ export interface ShowSuggestionOptions {
   onDecision?: (decision: "approved" | "dismissed", paramValues?: Record<string, string>) => void;
   script?: ActionScript;
   force?: boolean;
+  isRecall?: boolean;
+  entryId?: string;
 }
 
 export function showSuggestion(
@@ -1142,14 +1144,24 @@ export function showSuggestion(
       }
     }
     if (!isFlowTip) {
-      const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
-      if (options.script) activeItem.script = options.script;
-      sendLibraryMessage({
-        kind: "EYES_ACTIVATE_OPTIMIZATION",
-        id: suggestion.id,
-        item: activeItem,
-        recordRun: !isSaveOnly,
-      });
+      if (options.isRecall) {
+        if (options.entryId) {
+          sendLibraryMessage({
+            kind: "EYES_ACTIVATE_OPTIMIZATION",
+            id: options.entryId,
+            recordRun: !isSaveOnly,
+          });
+        }
+      } else {
+        const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
+        if (options.script) activeItem.script = options.script;
+        sendLibraryMessage({
+          kind: "EYES_ACTIVATE_OPTIMIZATION",
+          id: suggestion.id,
+          item: activeItem,
+          recordRun: !isSaveOnly,
+        });
+      }
     }
     resolveDecision("approved", collectedParams);
     const content = shadow.querySelector<HTMLElement>("[data-eyes-content]");
@@ -2265,6 +2277,8 @@ function setupHandsTracker(): void {
       params?: SuggestionParam[];
       primaryLabel?: string;
       pauseNotice?: string;
+      isRecall?: boolean;
+      entryId?: string;
       target?: WatchLocator | WatchLocator[];
       within?: WatchLocator | WatchLocator[];
       locators?: WatchLocator[];
@@ -2310,6 +2324,8 @@ function setupHandsTracker(): void {
       showSuggestion(suggestion, {
         force: true,
         script: msg.script,
+        isRecall: Boolean(msg.isRecall),
+        ...(typeof msg.entryId === "string" ? { entryId: msg.entryId } : {}),
         onDecision: (decision, paramValues) =>
           sendResponse({
             ok: true,

@@ -1,7 +1,14 @@
 import crypto from "node:crypto";
 import type { Event, Finding, Verdict } from "@gen/shared";
 import { normalizeText, primaryTargetKey } from "./common/target.ts";
-import { toLocatorList, type ActionScript } from "./hands/types.ts";
+import {
+  buildLibraryEntryFromScript,
+  buildStartSignature,
+  formatStartSignature,
+  type ImplementContext,
+} from "./hands/implementor.ts";
+import { canonicalStepCount, findMatchingLibraryEntry } from "./hands/library.ts";
+import { toLocatorList, type ActionScript, type LibraryEntry } from "./hands/types.ts";
 import {
   compiledWorkflowToActionScript,
   compiledWorkflowToFinding,
@@ -84,6 +91,7 @@ export type ProposerDeps = {
   debounceMs?: number;
   log?: (line: string) => void;
   readSessionEvents: (sessionId: string) => Promise<Event[]>;
+  readLibrary?: () => Promise<LibraryEntry[]>;
   compileV2: (input: CompileInput) => Promise<CompiledWorkflow | null>;
   suggestFlowTip?: (events: Event[], exclude?: string[]) => Promise<FlowTip | null>;
   precheck?: (script: ActionScript, meta: { startUrl?: string }) => Promise<PrecheckOutcome>;
@@ -622,6 +630,59 @@ export function createProposer(deps: ProposerDeps): Proposer {
     const sessionScopedKey = `${sessionId}::${buildFindingKey(finding, script)}`;
     if (proposedKeys.has(sessionScopedKey)) {
       return;
+    }
+
+    if (deps.readLibrary) {
+      const existingEntries = await deps.readLibrary().catch(() => []);
+      if (existingEntries.length > 0) {
+        const context: ImplementContext = {
+          ...(compiled.apps[0] ? { app: compiled.apps[0] } : {}),
+          ...(compiled.startUrl ? { url: compiled.startUrl } : {}),
+        };
+        const candidateEntry = buildLibraryEntryFromScript({
+          name: compiled.name || script.name || finding.title,
+          description: compiled.reason || finding.why,
+          kind: compiled.kind ?? (finding.verdict === "rung1" ? "snippet" : "workflow"),
+          solution: finding.why || script.name || finding.title,
+          script,
+          context,
+          status: "active",
+        });
+        const sigObj = buildStartSignature(script, context);
+        const candidateWithSig: LibraryEntry = {
+          ...candidateEntry,
+          startSignature: formatStartSignature(sigObj),
+        };
+        const matched = findMatchingLibraryEntry(existingEntries, candidateWithSig);
+        if (matched) {
+          proposedKeys.add(sessionScopedKey);
+          let sigSet = proposedSignaturesBySession.get(sessionId);
+          if (!sigSet) {
+            sigSet = new Set<string>();
+            proposedSignaturesBySession.set(sessionId, sigSet);
+          }
+          sigSet.add(candidate.signature);
+
+          const isUpgrade =
+            canonicalStepCount(script) > canonicalStepCount(matched.script);
+          if (isUpgrade && deps.onApproved) {
+            safeLog(
+              `[propose:v2] upgrading existing library entry id=${matched.id} name="${matched.name}"`,
+            );
+            await deps.onApproved({
+              sessionId,
+              script,
+              workflow: compiled,
+              finding,
+            }).catch(() => {});
+          } else {
+            safeLog(
+              `[propose:v2] skipping duplicate of existing library entry id=${matched.id} name="${matched.name}"`,
+            );
+          }
+          return;
+        }
+      }
     }
 
     const site = extractSiteHost(compiled, script, events);
