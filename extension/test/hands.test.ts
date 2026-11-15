@@ -1089,16 +1089,20 @@ describe("GEN-69: M2 Hands v2", () => {
     expect(divFillRes.error).toBe("Target is not fillable");
   });
 
-  it("switchTab with host='localhost' and url='http://localhost:4173/erp.html' activates http://127.0.0.1:4173/erp.html over http://localhost:4173/portal.html and replays fill on row 4", async () => {
-    expect(normalizeLoopbackHost("127.0.0.1")).toBe("localhost");
-    expect(normalizeLoopbackHost("127.0.0.1:4173")).toBe("localhost:4173");
+  it("switchTab with host='127.0.0.1' and url='http://127.0.0.1:4173/erp.html' keeps 127.0.0.1 distinct from localhost, activates http://127.0.0.1:4173/erp.html over http://localhost:4173/portal.html, and replays fill on row 4", async () => {
+    expect(normalizeLoopbackHost("127.0.0.1")).toBe("127.0.0.1");
+    expect(normalizeLoopbackHost("127.0.0.1:4173")).toBe("127.0.0.1:4173");
     expect(normalizeLoopbackHost("localhost:4173")).toBe("localhost:4173");
-    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "localhost")).toBe(true);
-    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "localhost:4173")).toBe(true);
-    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "localhost:5173")).toBe(false);
+    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "localhost")).toBe(false);
+    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "127.0.0.1")).toBe(true);
+    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "127.0.0.1:4173")).toBe(true);
+    expect(tabMatchesHost("http://127.0.0.1:4173/erp.html", "127.0.0.1:5173")).toBe(false);
     expect(
       scoreTabUrlMatch("http://127.0.0.1:4173/erp.html", "http://localhost:4173/erp.html"),
-    ).toBe(3);
+    ).toBe(0);
+    expect(
+      scoreTabUrlMatch("http://127.0.0.1:4173/erp.html", "http://127.0.0.1:4173/erp.html"),
+    ).toBe(4);
     expect(
       scoreTabUrlMatch("http://localhost:4173/portal.html", "http://localhost:4173/erp.html"),
     ).toBe(0);
@@ -1144,8 +1148,8 @@ describe("GEN-69: M2 Hands v2", () => {
           steps: [
             {
               action: "switchTab",
-              host: "localhost",
-              url: "http://localhost:4173/erp.html",
+              host: "127.0.0.1",
+              url: "http://127.0.0.1:4173/erp.html",
             },
             {
               action: "fill",
@@ -1176,7 +1180,7 @@ describe("GEN-69: M2 Hands v2", () => {
     });
     expect(results[0]).toMatchObject({
       ok: true,
-      tab: "localhost",
+      tab: "127.0.0.1",
       url: "http://127.0.0.1:4173/erp.html",
     });
   });
@@ -1448,7 +1452,7 @@ describe("GEN-69: M2 Hands v2", () => {
       {
         id: "pre-within-1",
         kind: "precheck",
-        url: "http://localhost:5173/sheet.html",
+        url: "http://127.0.0.1:5173/sheet.html",
         script: {
           steps: [
             {
@@ -1607,7 +1611,7 @@ describe("GEN-69: M2 Hands v2", () => {
             { name: "recipient_email", piiHash: "h_deadbeef" },
           ],
           steps: [
-            { action: "switchTab", host: "localhost" },
+            { action: "switchTab", host: "127.0.0.1" },
             { action: "fill", target: { kind: "testid", value: "hex-code" }, value: "{{hex_code}}" },
             {
               action: "fill",
@@ -1639,7 +1643,7 @@ describe("GEN-69: M2 Hands v2", () => {
       params: { hex_code: "#ff00aa", recipient_email: "alice@local.example" },
     });
 
-    // Run with switchTab host: "localhost" against 127.0.0.1 tab + param seeding from piiHash & example
+    // Run with switchTab host: "127.0.0.1" and matching url against 127.0.0.1 tab + param seeding from piiHash & example
     await runActionScript(701, {
       name: "Submit hex row",
       params: [
@@ -1647,7 +1651,7 @@ describe("GEN-69: M2 Hands v2", () => {
         { name: "recipient_email", piiHash: "h_deadbeef" },
       ],
       steps: [
-        { action: "switchTab", host: "localhost" },
+        { action: "switchTab", host: "127.0.0.1", url: "http://127.0.0.1:4173/unseen-form.html" },
         { action: "fill", target: { kind: "testid", value: "hex-code" }, value: "{{hex_code}}" },
         {
           action: "fill",
@@ -1660,6 +1664,84 @@ describe("GEN-69: M2 Hands v2", () => {
     expect(executedSteps).toHaveLength(2);
     expect((executedSteps[0] as { value?: string }).value).toBe("#112233");
     expect((executedSteps[1] as { value?: string }).value).toBe("alice@local.example");
+  });
+
+  it("switchTab prefers step.url over step.host, keeps 127.0.0.1 vs localhost distinct, and keeps different ports distinct", async () => {
+    const updatedTabs: Array<{ tabId: number; props: { active?: boolean } }> = [];
+    const tabs = [
+      { id: 10, url: "http://localhost:4173/portal.html", windowId: 1, active: true, lastAccessed: 900 },
+      { id: 20, url: "http://127.0.0.1:4173/erp.html", windowId: 1, active: false, lastAccessed: 800 },
+      { id: 30, url: "http://127.0.0.1:5173/erp.html", windowId: 1, active: false, lastAccessed: 950 },
+      { id: 40, url: "http://127.0.0.1:4173/other.html", windowId: 1, active: false, lastAccessed: 990 },
+    ];
+    const executeScript = vi.fn(async ({ target }: { target: { tabId: number } }) => [
+      { frameId: 0, result: { ok: true, url: `tab:${target.tabId}` } },
+    ]);
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        query: vi.fn(async () => tabs),
+        update: vi.fn(async (tabId: number, props: { active?: boolean }) => {
+          updatedTabs.push({ tabId, props });
+          return { id: tabId, ...props };
+        }),
+      },
+      windows: { update: vi.fn(async () => ({})) },
+      scripting: { executeScript },
+    };
+
+    // 1. Prefers step.url (exact erp.html on 127.0.0.1:4173) over more recently accessed other.html or :5173
+    const res1 = await runActionScript(10, {
+      steps: [
+        {
+          action: "switchTab",
+          host: "127.0.0.1",
+          url: "http://127.0.0.1:4173/erp.html",
+        },
+        { action: "click", target: { kind: "testid", value: "save" } },
+      ],
+    });
+    expect(res1[0]).toMatchObject({ ok: true, url: "http://127.0.0.1:4173/erp.html" });
+    expect(updatedTabs[0]).toEqual({ tabId: 20, props: { active: true } });
+    expect(executeScript.mock.calls[0]?.[0].target.tabId).toBe(20);
+
+    // 2. Keeps 127.0.0.1 vs localhost distinct (switchTab host: "localhost" must not match 127.0.0.1:5173, only localhost:4173)
+    updatedTabs.length = 0;
+    const res2 = await runActionScript(20, {
+      steps: [
+        { action: "switchTab", host: "localhost" },
+        { action: "click", target: { kind: "testid", value: "portal-btn" } },
+      ],
+    });
+    expect(res2[0]).toEqual({ ok: true, tab: "localhost" });
+    expect(updatedTabs[0]).toEqual({ tabId: 10, props: { active: true } });
+
+    // 3. Throws when only 127.0.0.1 tab exists for a requested localhost:5173 or unused port
+    await expect(
+      runActionScript(10, {
+        steps: [{ action: "switchTab", host: "localhost:5173" }],
+      }),
+    ).rejects.toThrow("No open tab for localhost:5173");
+
+    await expect(
+      runActionScript(10, {
+        steps: [{ action: "switchTab", host: "127.0.0.1:6173" }],
+      }),
+    ).rejects.toThrow("No open tab for 127.0.0.1:6173");
+
+    // 4. Keeps different ports distinct when step.url specifies port 5173
+    updatedTabs.length = 0;
+    const res4 = await runActionScript(10, {
+      steps: [
+        {
+          action: "switchTab",
+          host: "127.0.0.1",
+          url: "http://127.0.0.1:5173/erp.html",
+        },
+      ],
+    });
+    expect(res4[0]).toMatchObject({ ok: true, url: "http://127.0.0.1:5173/erp.html" });
+    expect(updatedTabs[0]).toEqual({ tabId: 30, props: { active: true } });
   });
 });
 

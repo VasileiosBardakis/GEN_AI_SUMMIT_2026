@@ -1664,19 +1664,54 @@ function resolveLeafStep(
         }
       }
 
+      const findMatchingHostUrl = (
+        targetHost: string,
+        exactHostWithPort?: string,
+      ): string | undefined => {
+        if (exactHostWithPort && exactHostWithPort.includes(":")) {
+          const exactNormalized = normalizeHost(exactHostWithPort);
+          const portMatch = ctx.indexedSteps.find((s) => {
+            if (!s.url) return false;
+            try {
+              return (
+                normalizeHost(new URL(restoreText(s.url, restoreMap)).host) ===
+                exactNormalized
+              );
+            } catch {
+              return false;
+            }
+          });
+          if (portMatch?.url) {
+            return normalizeUrlHost(restoreText(portMatch.url, restoreMap));
+          }
+        }
+        const match = ctx.indexedSteps.find((s) => {
+          if (!s.url) return false;
+          return (
+            resolveStepRealHost(s) === targetHost ||
+            hostnameFromUrl(restoreText(s.url, restoreMap)) === targetHost
+          );
+        });
+        return match?.url
+          ? normalizeUrlHost(restoreText(match.url, restoreMap))
+          : undefined;
+      };
+
       const rawUrl = raw.url?.trim() ? raw.url.trim() : undefined;
-      const rawUrlHost = rawUrl
-        ? hostnameFromUrl(restoreText(rawUrl, restoreMap))
+      const restoredRawUrl = rawUrl ? restoreText(rawUrl, restoreMap) : undefined;
+      const rawUrlHost = restoredRawUrl
+        ? hostnameFromUrl(restoredRawUrl)
         : undefined;
       const rawUrlSeen =
         rawUrlHost !== undefined && seenHostnames.has(rawUrlHost);
 
       if (captured?.url) {
+        const restoredCapturedUrl = restoreText(captured.url, restoreMap);
         const mergedUrl =
-          rawUrl && rawUrlSeen
-            ? mergeCapturedNavigateUrl(rawUrl, captured.url)
-            : captured.url;
-        const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
+          restoredRawUrl && rawUrlSeen
+            ? mergeCapturedNavigateUrl(restoredRawUrl, restoredCapturedUrl)
+            : restoredCapturedUrl;
+        const normalized = normalizeUrlHost(mergedUrl);
         let navHost = stepHost;
         try {
           navHost = normalizeHost(new URL(normalized).hostname);
@@ -1690,7 +1725,7 @@ function resolveLeafStep(
         };
       }
 
-      if (rawUrl && !rawUrlSeen) {
+      if (restoredRawUrl && !rawUrlSeen) {
         return null;
       }
 
@@ -1704,38 +1739,36 @@ function resolveLeafStep(
         if (!isPlaceholderHost(norm)) targetHost = norm;
       }
       const matchingHostUrl = targetHost
-        ? ctx.indexedSteps.find((s) => {
-            if (!s.url) return false;
-            return (
-              resolveStepRealHost(s) === targetHost ||
-              hostnameFromUrl(restoreText(s.url, restoreMap)) === targetHost
-            );
-          })?.url
+        ? findMatchingHostUrl(targetHost)
         : undefined;
-      const candidateUrl = rawUrl
-        ? mergeCapturedNavigateUrl(rawUrl, matchingHostUrl)
+      const candidateUrl = restoredRawUrl
+        ? mergeCapturedNavigateUrl(restoredRawUrl, matchingHostUrl)
         : matchingHostUrl;
       if (!candidateUrl) {
         if (raw.host?.trim()) {
-          const rawNavHost = normalizeHost(raw.host);
+          const rawHostTrimmed = raw.host.trim();
+          const rawNavHost = normalizeHost(rawHostTrimmed.replace(/:\d+$/, ""));
           const host = !isPlaceholderHost(rawNavHost) ? rawNavHost : stepHost;
           if (!host || isPlaceholderHost(host) || !seenHostnames.has(host)) {
             return null;
           }
+          const switchUrl =
+            (stepUrl && hostnameFromUrl(stepUrl) === host ? stepUrl : undefined) ??
+            findMatchingHostUrl(host, rawHostTrimmed);
           return {
             step: {
               action: "switchTab",
               host,
-              ...(stepUrl && hostnameFromUrl(stepUrl) === host ? { url: stepUrl } : {}),
+              ...(switchUrl ? { url: switchUrl } : {}),
               ...optionalPart,
             },
             host,
-            url: stepUrl,
+            url: switchUrl ?? stepUrl,
           };
         }
         return null;
       }
-      const normalized = normalizeUrlHost(restoreText(candidateUrl, restoreMap));
+      const normalized = normalizeUrlHost(candidateUrl);
       let navHost = stepHost;
       try {
         navHost = normalizeHost(new URL(normalized).hostname);
@@ -1756,13 +1789,17 @@ function resolveLeafStep(
       };
     }
     case "switchTab": {
+      const rawHostTrimmed = raw.host?.trim() ?? "";
+      const rawHostWithPort =
+        rawHostTrimmed && !rawHostTrimmed.includes("://")
+          ? rawHostTrimmed.split("/")[0] ?? ""
+          : undefined;
       const candidateFromRawHost = (() => {
-        const trimmed = raw.host?.trim() ?? "";
-        if (!trimmed) return undefined;
-        if (trimmed.includes("://")) {
-          return hostnameFromUrl(trimmed);
+        if (!rawHostTrimmed) return undefined;
+        if (rawHostTrimmed.includes("://")) {
+          return hostnameFromUrl(rawHostTrimmed);
         }
-        const hostOnly = trimmed.split("/")[0] ?? "";
+        const hostOnly = (rawHostWithPort ?? "").replace(/:\d+$/, "");
         const norm = normalizeHost(hostOnly);
         return isPlaceholderHost(norm) ? undefined : norm;
       })();
@@ -1814,7 +1851,37 @@ function resolveLeafStep(
 
       let matchedStep: EnrichedStep | undefined;
       if (directHost) {
+        const portMatchedStep =
+          rawHostWithPort && rawHostWithPort.includes(":")
+            ? (() => {
+                const exactPortHost = normalizeHost(rawHostWithPort);
+                const byTabSwitch = ctx.indexedSteps.find((s) => {
+                  if (s.action !== "tab_switch" || !s.url) return false;
+                  try {
+                    return (
+                      normalizeHost(new URL(restoreText(s.url, restoreMap)).host) ===
+                      exactPortHost
+                    );
+                  } catch {
+                    return false;
+                  }
+                });
+                if (byTabSwitch) return byTabSwitch;
+                return ctx.indexedSteps.find((s) => {
+                  if (!s.url) return false;
+                  try {
+                    return (
+                      normalizeHost(new URL(restoreText(s.url, restoreMap)).host) ===
+                      exactPortHost
+                    );
+                  } catch {
+                    return false;
+                  }
+                });
+              })()
+            : undefined;
         matchedStep =
+          portMatchedStep ??
           (hintStep &&
           resolveStepRealHost(hintStep) === directHost &&
           hintStep.url
@@ -1861,12 +1928,9 @@ function resolveLeafStep(
         ? normalizeUrlHost(restoreText(matchedStep.url.trim(), restoreMap))
         : undefined;
 
-      const resolvedUrl =
+      const fallbackUrl =
         (capturedUrlRestored && hostnameFromUrl(capturedUrlRestored) === finalHost
           ? capturedUrlRestored
-          : undefined) ??
-        (rawUrlRestored && hostnameFromUrl(rawUrlRestored) === finalHost
-          ? rawUrlRestored
           : undefined) ??
         (hintUrlRestored && hostnameFromUrl(hintUrlRestored) === finalHost
           ? hintUrlRestored
@@ -1874,6 +1938,17 @@ function resolveLeafStep(
         (matchedUrlRestored && hostnameFromUrl(matchedUrlRestored) === finalHost
           ? matchedUrlRestored
           : undefined);
+
+      let resolvedUrl: string | undefined;
+      if (capturedUrlRestored && hostnameFromUrl(capturedUrlRestored) === finalHost) {
+        resolvedUrl = capturedUrlRestored;
+      } else if (rawUrlRestored && hostnameFromUrl(rawUrlRestored) === finalHost) {
+        resolvedUrl = normalizeUrlHost(
+          mergeCapturedNavigateUrl(rawUrlRestored, fallbackUrl),
+        );
+      } else {
+        resolvedUrl = fallbackUrl;
+      }
 
       return {
         step: {
@@ -2277,10 +2352,17 @@ export async function compileWorkflow(
 
   const steps = [...resolved.steps];
   if (startHost) {
+    const startSwitchStep: CompiledStep = {
+      action: "switchTab",
+      host: startHost,
+      ...(rawStartUrl ? { url: rawStartUrl } : {}),
+    };
     if (steps[0]?.action !== "switchTab") {
-      steps.unshift({ action: "switchTab", host: startHost });
+      steps.unshift(startSwitchStep);
     } else if (steps[0].host !== startHost) {
-      steps.unshift({ action: "switchTab", host: startHost });
+      steps.unshift(startSwitchStep);
+    } else if (!steps[0].url && rawStartUrl) {
+      steps[0] = { ...steps[0], url: rawStartUrl };
     }
   }
 

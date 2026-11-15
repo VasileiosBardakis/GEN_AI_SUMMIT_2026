@@ -856,14 +856,8 @@ function substituteStepValue<T>(value: T, vars: Record<string, unknown>): T {
 }
 
 export function normalizeLoopbackHost(host: string): string {
-  const trimmed = host.trim().toLowerCase();
-  if (trimmed === "127.0.0.1") return "localhost";
-  if (trimmed.startsWith("127.0.0.1:")) {
-    return `localhost${trimmed.slice("127.0.0.1".length)}`;
-  }
-  return trimmed;
+  return host.trim().toLowerCase();
 }
-
 function normalizeUrlPath(pathname: string): string {
   if (pathname.length > 1 && pathname.endsWith("/")) {
     return pathname.slice(0, -1);
@@ -909,7 +903,12 @@ export function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string):
     }
     const targetParsed = new URL(targetUrl);
     if (tabParsed.href.replace(/#.*$/, "") === targetParsed.href.replace(/#.*$/, "")) return 4;
-    if (normalizeLoopbackHost(tabParsed.host) !== normalizeLoopbackHost(targetParsed.host)) return 0;
+    if (
+      tabParsed.protocol !== targetParsed.protocol ||
+      normalizeLoopbackHost(tabParsed.host) !== normalizeLoopbackHost(targetParsed.host)
+    ) {
+      return 0;
+    }
     if (
       normalizeUrlPath(tabParsed.pathname) === normalizeUrlPath(targetParsed.pathname) &&
       tabParsed.search === targetParsed.search
@@ -990,6 +989,7 @@ async function runStepsInTab(
 
       if (step.action === "switchTab") {
         const allTabs = (await chromeApi.tabs?.query?.({ url: ["http://*/*", "https://*/*"] })) ?? [];
+        let match: ChromeTab | undefined;
         if (step.url) {
           const urlMatches = allTabs
             .map((t) => ({ tab: t, score: scoreTabUrlMatch(t.url, step.url!) }))
@@ -1001,41 +1001,37 @@ async function runStepsInTab(
             if (Boolean(a.tab.active) !== Boolean(b.tab.active)) return a.tab.active ? -1 : 1;
             return 0;
           });
-          const match = urlMatches[0]?.tab;
-          if (match?.id === undefined) {
-            throw new Error(`No open tab for ${step.url}`);
-          }
-          await chromeApi.tabs?.update?.(match.id, { active: true });
-          if (match.windowId !== undefined) {
-            await chromeApi.windows?.update?.(match.windowId, { focused: true });
-          }
-          currentTabId = match.id;
-          results.push({ ok: true, tab: step.host, url: match.url ?? step.url });
-          continue;
+          match = urlMatches[0]?.tab;
         }
-        const matches = allTabs.filter(
-          (t) => t.id !== undefined && tabMatchesHost(t.url, step.host)
-        );
-        matches.sort((a, b) => {
-          const exactDiff =
-            Number(isExactHostMatch(b.url, step.host)) -
-            Number(isExactHostMatch(a.url, step.host));
-          if (exactDiff !== 0) return exactDiff;
-          const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
-          if (accessDiff !== 0) return accessDiff;
-          if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;
-          return 0;
-        });
-        const match = matches[0];
+        if (!match) {
+          const matches = allTabs.filter(
+            (t) => t.id !== undefined && tabMatchesHost(t.url, step.host)
+          );
+          matches.sort((a, b) => {
+            const exactDiff =
+              Number(isExactHostMatch(b.url, step.host)) -
+              Number(isExactHostMatch(a.url, step.host));
+            if (exactDiff !== 0) return exactDiff;
+            const accessDiff = (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0);
+            if (accessDiff !== 0) return accessDiff;
+            if (Boolean(a.active) !== Boolean(b.active)) return a.active ? -1 : 1;
+            return 0;
+          });
+          match = matches[0];
+        }
         if (match?.id === undefined) {
-          throw new Error(`No open tab for ${step.host}`);
+          throw new Error(`No open tab for ${step.url ?? step.host}`);
         }
         await chromeApi.tabs?.update?.(match.id, { active: true });
         if (match.windowId !== undefined) {
           await chromeApi.windows?.update?.(match.windowId, { focused: true });
         }
         currentTabId = match.id;
-        results.push({ ok: true, tab: step.host });
+        results.push({
+          ok: true,
+          tab: step.host,
+          ...(match.url || step.url ? { url: match.url ?? step.url } : {}),
+        });
         continue;
       }
 

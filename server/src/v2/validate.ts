@@ -218,7 +218,10 @@ const CompiledLeafStepSchema: z.ZodType<CompiledLeafStep> = z.discriminatedUnion
     z.object({
       action: z.literal("switchTab"),
       host: nonEmptyString,
-      url: z.string().regex(/^https?:\/\//i, "expected http(s) URL").optional(),
+      url: z
+        .string()
+        .regex(/^https?:\/\//i, "expected http(s) URL")
+        .optional(),
       optional: z.boolean().optional(),
     }),
     z.object({
@@ -288,14 +291,7 @@ export function isPlaceholderHost(host: string): boolean {
 }
 
 export function normalizeHost(host: string): string {
-  const trimmed = host.trim().toLowerCase();
-  if (trimmed === "127.0.0.1") {
-    return "localhost";
-  }
-  if (trimmed.startsWith("127.0.0.1:")) {
-    return `localhost${trimmed.slice("127.0.0.1".length)}`;
-  }
-  return trimmed;
+  return host.trim().toLowerCase();
 }
 
 function countSteps(steps: readonly CompiledStep[]): number {
@@ -480,7 +476,14 @@ function checkSteps(
       if (step.host !== normalizeHost(step.host)) {
         return `Unnormalized switchTab host "${step.host}" at ${stepPath}`;
       }
-      if (
+      if (step.host.includes(":")) {
+        if (
+          seenUrlHosts !== undefined &&
+          !seenUrlHosts.has(normalizeHost(step.host))
+        ) {
+          return `Unseen switchTab host "${step.host}" at ${stepPath}`;
+        }
+      } else if (
         seenHostnames !== undefined &&
         !seenHostnames.has(normalizeHost(step.host))
       ) {

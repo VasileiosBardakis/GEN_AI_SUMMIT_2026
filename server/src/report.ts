@@ -154,7 +154,7 @@ function convertCompiledLeafStep(step: CompiledLeafStep): ScriptStep {
       return {
         action: "switchTab",
         host: step.host,
-        ...(step.url !== undefined ? { url: step.url } : {}),
+        ...(step.url ? { url: step.url } : {}),
         ...opt,
       };
     case "key": {
