@@ -8,7 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "smoke": "playwright test --pass-with-no-tests",
-    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run smoke",
+    "check": "pnpm run build:extension && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run smoke",
     "build:extension": "pnpm --filter @gen/extension build",
     "dev": "node scripts/dev.mjs",
     "dev:build": "node extension/build.mjs",

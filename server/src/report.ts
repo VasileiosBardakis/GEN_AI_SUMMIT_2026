@@ -41,7 +41,8 @@ export interface BuildReportOptions {
 }
 
 export function resolvePipeline(pipeline?: "v1" | "v2"): "v1" | "v2" {
-  return pipeline ?? (process.env.BRAIN_PIPELINE === "v2" ? "v2" : "v1");
+  // v2 is the default since 2026-11-15; set BRAIN_PIPELINE=v1 to use the old pipeline.
+  return pipeline ?? (process.env.BRAIN_PIPELINE === "v1" ? "v1" : "v2");
 }
 
 function toScriptLocators(locators: readonly Locator[] | undefined): ScriptLocator[] | undefined {
