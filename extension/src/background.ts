@@ -952,18 +952,70 @@ type PrecheckStepInput = V2Step & {
   within?: Locator | Locator[];
 };
 
+const PRECHECK_MSG_TIMEOUT_MS = 1200;
+const PRECHECK_TOTAL_BUDGET_MS = 7000;
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 type PrecheckTargetItem = {
   index: number;
   action: string;
+  tabId: number;
   locators: Locator[];
   within?: Locator[];
   step: PrecheckStepInput;
 };
 
+function resolvePrecheckTabForStep(
+  openTabs: ChromeTab[],
+  effectiveUrl?: string,
+  effectiveHost?: string,
+  fallbackTab?: ChromeTab,
+): ChromeTab | undefined {
+  if (effectiveUrl) {
+    const urlMatches = openTabs.filter(
+      (t) =>
+        t.id !== undefined &&
+        t.url &&
+        urlsMatchForPrecheck(effectiveUrl, t.url) &&
+        (!effectiveUrl.startsWith("/") ||
+          !effectiveHost ||
+          tabMatchesHost(t.url, effectiveHost)),
+    );
+    if (urlMatches.length === 0) return undefined;
+    return (
+      findBestTabForTarget(
+        urlMatches,
+        { url: effectiveUrl, ...(effectiveHost ? { host: effectiveHost } : {}) },
+        { allowHostFallback: false },
+      ) ?? urlMatches[0]
+    );
+  }
+  if (effectiveHost) {
+    return findBestTabForTarget(openTabs, { host: effectiveHost });
+  }
+  return fallbackTab?.id !== undefined && isRunnablePageUrl(fallbackTab.url)
+    ? fallbackTab
+    : undefined;
+}
+
 function collectMatchingPrecheckSteps(
   steps: PrecheckStepInput[],
-  openTabUrl: string,
+  openTabs: ChromeTab[],
   initialUrl?: string,
+  fallbackTab?: ChromeTab,
 ): PrecheckTargetItem[] {
   const collected: PrecheckTargetItem[] = [];
   let contextUrl = initialUrl;
@@ -1002,18 +1054,20 @@ function collectMatchingPrecheckSteps(
       const within = withinLocatorsForPrecheck(step);
 
       const effectiveUrl = step.url ?? contextUrl;
-      const effectiveHost = step.host ?? contextHost;
-      let matches = true;
-      if (effectiveUrl) {
-        matches = urlsMatchForPrecheck(effectiveUrl, openTabUrl);
-      } else if (effectiveHost) {
-        matches = tabMatchesHost(openTabUrl, effectiveHost);
-      }
+      const effectiveHost =
+        step.host ?? (step.url ? tryHostFromUrl(step.url) : undefined) ?? contextHost;
+      const matchedTab = resolvePrecheckTabForStep(
+        openTabs,
+        effectiveUrl,
+        effectiveHost,
+        fallbackTab,
+      );
 
-      if (matches) {
+      if (matchedTab?.id !== undefined) {
         collected.push({
           index: currentIdx,
           action: step.action,
+          tabId: matchedTab.id,
           locators,
           ...(within.length > 0 ? { within } : {}),
           step,
@@ -1130,7 +1184,11 @@ function tabMatchesFlowTarget(tabUrl: string | undefined, target: FlowTabTarget)
   return false;
 }
 
-function findBestTabForTarget(tabs: ChromeTab[], target: FlowTabTarget): ChromeTab | undefined {
+function findBestTabForTarget(
+  tabs: ChromeTab[],
+  target: FlowTabTarget,
+  opts?: { allowHostFallback?: boolean },
+): ChromeTab | undefined {
   const runnable = tabs.filter((t) => t.id !== undefined && isRunnablePageUrl(t.url));
   if (target.url) {
     const urlMatches = runnable
@@ -1144,6 +1202,7 @@ function findBestTabForTarget(tabs: ChromeTab[], target: FlowTabTarget): ChromeT
       return 0;
     });
     if (urlMatches[0]?.tab) return urlMatches[0].tab;
+    if (opts?.allowHostFallback === false) return undefined;
   }
   if (target.host) {
     const hostMatches = runnable.filter((t) => tabMatchesHost(t.url, target.host!));
@@ -1508,79 +1567,101 @@ export async function handleHandsCommand(
       error?: string;
     };
     try {
-      let openTab: { id?: number; url?: string } = {};
-      if (cmd.url && api?.tabs?.query) {
-        try {
-          const allTabs = (await api.tabs.query({})) ?? [];
-          const host = tryHostFromUrl(cmd.url);
-          const matched = findBestTabForTarget(allTabs, {
-            url: cmd.url,
-            ...(host ? { host } : {}),
-          });
-          if (matched?.id !== undefined && matched.url) {
-            openTab = { id: matched.id, url: matched.url };
-          }
-        } catch {
-          // fall back to resolveOpenRunnableTab
+      const precheckStartedAt = Date.now();
+      const allTabs = api?.tabs?.query
+        ? ((await api.tabs.query({}).catch(() => [])) ?? [])
+        : [];
+      const runnableTabs = allTabs.filter((t) => t.id !== undefined && isRunnablePageUrl(t.url));
+      let fallbackTab: ChromeTab | undefined =
+        runnableTabs.find((t) => t.active) ?? runnableTabs[0];
+      if (!fallbackTab) {
+        const openTab = await resolveOpenRunnableTab();
+        if (openTab.id !== undefined && openTab.url && isRunnablePageUrl(openTab.url)) {
+          fallbackTab = { id: openTab.id, url: openTab.url, active: true };
         }
       }
-      if (openTab.id === undefined || !openTab.url) {
-        openTab = await resolveOpenRunnableTab();
-      }
-      if (openTab.id === undefined || !openTab.url) {
-        throw new Error("No active web tab open");
-      }
-      if (!api?.tabs?.sendMessage) {
+      const openTabs = runnableTabs.length > 0 ? runnableTabs : fallbackTab ? [fallbackTab] : [];
+      const steps = (cmd.steps ?? cmd.script?.steps ?? []) as PrecheckStepInput[];
+      const targets = collectMatchingPrecheckSteps(steps, openTabs, cmd.url, fallbackTab);
+      if (targets.length > 0 && !api?.tabs?.sendMessage) {
         throw new Error("chrome.tabs.sendMessage unavailable");
       }
-      const steps = (cmd.steps ?? cmd.script?.steps ?? []) as PrecheckStepInput[];
-      const targets = collectMatchingPrecheckSteps(steps, openTab.url, cmd.url);
       const results: NonNullable<typeof payload.results> = [];
+      const injectedTabIds = new Set<number>();
+      const unreachableTabIds = new Set<number>();
       for (const item of targets) {
+        if (Date.now() - precheckStartedAt >= PRECHECK_TOTAL_BUDGET_MS) {
+          break;
+        }
+        if (unreachableTabIds.has(item.tabId)) {
+          continue;
+        }
         const precheckMsg = {
           kind: "EYES_PRECHECK_STEP",
           locators: item.locators,
           ...(item.within && item.within.length > 0 ? { within: item.within } : {}),
           step: item.step,
         };
-        let res = (await Promise.resolve(
-          api.tabs.sendMessage(
-            openTab.id,
-            precheckMsg,
-            { frameId: 0 },
-          ),
-        ).catch(() => undefined)) as
-          | {
-              ok?: boolean;
-              matchCount?: number;
-              unique?: boolean;
-              matchedLocator?: Locator;
-              error?: string;
-            }
-          | undefined;
+        const sendPrecheckMsg = async () =>
+          withTimeout(
+            Promise.resolve(
+              api!.tabs!.sendMessage!(
+                item.tabId,
+                precheckMsg,
+                { frameId: 0 },
+              ),
+            ).catch(() => undefined),
+            PRECHECK_MSG_TIMEOUT_MS,
+          ) as Promise<
+            | {
+                ok?: boolean;
+                matchCount?: number;
+                unique?: boolean;
+                matchedLocator?: Locator;
+                error?: string;
+              }
+            | undefined
+          >;
 
-        if (!res && api.scripting?.executeScript) {
-          await api.scripting.executeScript({
-            target: { tabId: openTab.id, allFrames: false },
-            files: ["dist/content.js"],
-          } as unknown as Parameters<NonNullable<NonNullable<ChromeApi["scripting"]>["executeScript"]>>[0]);
-          res = (await Promise.resolve(
-            api.tabs.sendMessage(
-              openTab.id,
-              precheckMsg,
-              { frameId: 0 },
-            ),
-          ).catch(() => undefined)) as typeof res;
+        let res = await sendPrecheckMsg();
+
+        if (!res && !injectedTabIds.has(item.tabId) && api?.scripting?.executeScript) {
+          injectedTabIds.add(item.tabId);
+          if (Date.now() - precheckStartedAt < PRECHECK_TOTAL_BUDGET_MS) {
+            try {
+              await withTimeout(
+                Promise.resolve(
+                  api.scripting.executeScript({
+                    target: { tabId: item.tabId, allFrames: false },
+                    files: ["dist/content.js"],
+                  } as unknown as Parameters<
+                    NonNullable<NonNullable<ChromeApi["scripting"]>["executeScript"]>
+                  >[0]),
+                ),
+                PRECHECK_MSG_TIMEOUT_MS,
+              );
+            } catch {
+              // ignore injection failures on closed/restricted tabs
+            }
+            if (Date.now() - precheckStartedAt < PRECHECK_TOTAL_BUDGET_MS) {
+              res = await sendPrecheckMsg();
+            }
+          }
+        }
+
+        if (!res) {
+          unreachableTabIds.add(item.tabId);
+          continue;
         }
 
         results.push({
           index: item.index,
           action: item.action,
-          ok: Boolean(res?.ok),
-          matchCount: res?.matchCount ?? 0,
-          unique: Boolean(res?.unique),
-          ...(res?.matchedLocator ? { matchedLocator: res.matchedLocator } : {}),
-          ...(res?.error ? { error: res.error } : {}),
+          ok: Boolean(res.ok),
+          matchCount: res.matchCount ?? 0,
+          unique: Boolean(res.unique),
+          ...(res.matchedLocator ? { matchedLocator: res.matchedLocator } : {}),
+          ...(res.error ? { error: res.error } : {}),
         });
       }
       payload = { id: precheckId, ok: true, results };
