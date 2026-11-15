@@ -161,4 +161,45 @@ describe("createSuggestionEngine", () => {
     expect(detected).not.toBeNull();
     expect(detected?.count).toBe(3);
   });
+
+  it("supports pauseBeforeSubmit, runMode save_only, and {{param}} metadata in buildDeciderSuggestion", () => {
+    const paused = buildDeciderSuggestion({
+      name: "Send vendor payment",
+      solution: "Fill payment form and pause before clicking Pay.",
+      pauseBeforeSubmit: true,
+      script: {
+        name: "Send vendor payment",
+        steps: [
+          { action: "fill", target: { kind: "css", value: "#amount" }, value: "500.00" },
+          { action: "click", target: { kind: "css", value: "#pay-btn" } },
+        ],
+      },
+    });
+    expect(paused.pauseBeforeSubmit).toBe(true);
+    expect(paused.pauseNotice?.toLowerCase()).toContain("you click the final button");
+    expect(paused.primaryLabel).toBeUndefined();
+
+    const saveOnly = buildDeciderSuggestion({
+      name: "Submit expense report",
+      solution: "Save this reusable expense workflow with runtime {{param}} inputs.",
+      runMode: "save_only",
+      params: [
+        { name: "vendor", example: "Acme" },
+        { name: "amount", example: "125.00" },
+      ],
+      script: {
+        name: "Submit expense report",
+        steps: [
+          { action: "fill", target: { kind: "css", value: "#vendor" }, value: "{{vendor}}" },
+          { action: "fill", target: { kind: "css", value: "#amount" }, value: "{{amount}}" },
+        ],
+      },
+    });
+    expect(saveOnly.runMode).toBe("save_only");
+    expect(saveOnly.primaryLabel).toBe("Save skill");
+    expect(saveOnly.params).toEqual([
+      { name: "vendor", example: "Acme" },
+      { name: "amount", example: "125.00" },
+    ]);
+  });
 });

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { Finding, Verdict } from "@gen/shared";
-import type { ActionScript } from "./hands/types.ts";
+import { toLocatorList, type ActionScript } from "./hands/types.ts";
 
 export type HandsDecision = "approved" | "dismissed";
 
@@ -139,7 +139,9 @@ function collectCopyPasteCoverage(
 
     for (const step of collectFlatSteps(script.steps)) {
       if ("target" in step && step.target) {
-        addTargetTokens(step.target, targets);
+        for (const loc of toLocatorList(step.target)) {
+          addTargetTokens(loc, targets);
+        }
       }
       if (step.action === "extractList" && step.fields) {
         for (const [fieldName, fieldLoc] of Object.entries(step.fields)) {
@@ -179,7 +181,9 @@ function isShortCoveredByCopyPasteWorkflow(
   for (const step of collectFlatSteps(script.steps)) {
     if ("target" in step && step.target) {
       const shortTokens = new Set<string>();
-      addTargetTokens(step.target, shortTokens);
+      for (const loc of toLocatorList(step.target)) {
+        addTargetTokens(loc, shortTokens);
+      }
       for (const tok of shortTokens) {
         if (coverage.targets.has(tok)) return true;
       }
@@ -228,7 +232,7 @@ function collectStepSignatures(steps: ActionScript["steps"], verdict: Verdict): 
       parts.push(...collectStepSignatures(step.steps, verdict));
       continue;
     }
-    const target = "target" in step && step.target ? step.target : undefined;
+    const target = "target" in step ? toLocatorList(step.target)[0] : undefined;
     const loc = target ? `${target.kind}:${target.value}` : "";
     if (verdict === "rung1" || !target) {
       const rawVal =
