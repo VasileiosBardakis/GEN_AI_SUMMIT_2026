@@ -1083,4 +1083,59 @@ describe("GEN-69: M2 Hands v2", () => {
     expect(divFillRes.ok).toBe(false);
     expect(divFillRes.error).toBe("Target is not fillable");
   });
+
+  it("skips tabs.update and waitForTabLoad on navigate when tabs.get returns a matching URL (scoreTabUrlMatch >= 3)", async () => {
+    const getTab = vi.fn(async (tabId: number) => ({
+      id: tabId,
+      url: "http://127.0.0.1:4173/form",
+      status: "complete",
+    }));
+    const updateTab = vi.fn(async (tabId: number) => ({ id: tabId }));
+    const addListener = vi.fn();
+    const removeListener = vi.fn();
+    const executeScript = vi.fn(async ({ target }: { target: { tabId: number } }) => [
+      { frameId: 0, result: { ok: true, url: `tab:${target.tabId}` } },
+    ]);
+
+    (globalThis as Record<string, unknown>).chrome = {
+      tabs: {
+        get: getTab,
+        update: updateTab,
+        onUpdated: { addListener, removeListener },
+      },
+      scripting: { executeScript },
+    };
+
+    const results = await runActionScript(101, {
+      steps: [
+        { action: "navigate", url: "http://127.0.0.1:4173/form/" },
+        { action: "click", target: { kind: "css", value: "#save-btn" } },
+      ],
+    });
+
+    expect(getTab).toHaveBeenCalledWith(101);
+    expect(updateTab).not.toHaveBeenCalled();
+    expect(addListener).not.toHaveBeenCalled();
+    expect(results[0]).toEqual({ ok: true, url: "http://127.0.0.1:4173/form" });
+    expect(executeScript).toHaveBeenCalledTimes(1);
+
+    // When tabs.get returns a non-matching URL, tabs.update IS called
+    getTab.mockResolvedValueOnce({
+      id: 101,
+      url: "http://127.0.0.1:4173/other",
+      status: "complete",
+    });
+    getTab.mockResolvedValueOnce({
+      id: 101,
+      url: "http://127.0.0.1:4173/form",
+      status: "complete",
+    });
+    const navResults = await runActionScript(101, {
+      steps: [{ action: "navigate", url: "http://127.0.0.1:4173/form" }],
+    });
+
+    expect(updateTab).toHaveBeenCalledWith(101, { url: "http://127.0.0.1:4173/form" });
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(navResults[0]).toEqual({ ok: true, url: "http://127.0.0.1:4173/form" });
+  });
 });

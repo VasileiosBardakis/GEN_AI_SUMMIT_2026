@@ -936,7 +936,7 @@ function buildCompilePrompt(
     "",
     "RULES:",
     "1. Never write selectors. Every click/fill/select/readText/submit MUST have `stepIndex` of a step with `hasTarget: true` (matching the action, e.g. `fill` stepIndex for `fill`), OR an exact `targetId` from PageSummary Targets. Never emit empty \"\".",
-    "2. Pick ONE clean repetition and drop one-off stray clicks.",
+    "2. Pick ONE clean repetition and drop stray, decorative, or non-essential clicks and side excursions (e.g. help/info/tooltip links) even if repeated in every repetition. Never emit `navigate` to an informational/excursion URL or reload a form page the user is already on.",
     "3. Keep all distinct form fields (multi-field Tab forms keep every `fill` via its own `stepIndex`).",
     "4. Copied values use `readText` with `bind` (REQUIRED on every `readText`, e.g. `\"bind\":\"<varName>\"`, NEVER omit `bind`) and `fill` with `\"{{<varName>}}\"`.",
     "5. User-supplied variables go in `params[]` and `\"{{paramName}}\"`. Never invent placeholder/masked literals; preserve `__PII_*__` tokens if typed literally.",
