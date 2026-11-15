@@ -1309,10 +1309,53 @@ function resolveLeafStep(
       };
     }
     case "navigate": {
-      let targetHost: string | undefined;
-      if (raw.url) {
-        targetHost = hostnameFromUrl(raw.url);
+      const seenHostnames = new Set<string>();
+      for (const s of ctx.indexedSteps) {
+        if (s.app) {
+          const norm = normalizeHost(s.app);
+          if (!isPlaceholderHost(norm)) {
+            seenHostnames.add(norm);
+          }
+        }
+        if (s.url) {
+          const urlHost = hostnameFromUrl(restoreText(s.url, restoreMap));
+          if (urlHost) {
+            seenHostnames.add(urlHost);
+          }
+        }
       }
+
+      const rawUrl = raw.url?.trim() ? raw.url.trim() : undefined;
+      const rawUrlHost = rawUrl
+        ? hostnameFromUrl(restoreText(rawUrl, restoreMap))
+        : undefined;
+      const rawUrlSeen =
+        rawUrlHost !== undefined && seenHostnames.has(rawUrlHost);
+
+      if (captured?.url) {
+        const mergedUrl =
+          rawUrl && rawUrlSeen
+            ? mergeCapturedNavigateUrl(rawUrl, captured.url)
+            : captured.url;
+        const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
+        let navHost = stepHost;
+        try {
+          navHost = normalizeHost(new URL(normalized).hostname);
+        } catch {
+          // Keep stepHost if URL parsing fails; validator will catch invalid URL
+        }
+        return {
+          step: { action: "navigate", url: normalized, ...optionalPart },
+          host: navHost,
+          url: normalized,
+        };
+      }
+
+      if (rawUrl && !rawUrlSeen) {
+        return null;
+      }
+
+      let targetHost = rawUrlHost;
       if (!targetHost && raw.host?.trim()) {
         const norm = normalizeHost(raw.host);
         if (!isPlaceholderHost(norm)) targetHost = norm;
@@ -1324,16 +1367,22 @@ function resolveLeafStep(
       const matchingHostUrl = targetHost
         ? ctx.indexedSteps.find((s) => {
             if (!s.url) return false;
-            return resolveStepRealHost(s) === targetHost || hostnameFromUrl(s.url) === targetHost;
+            return (
+              resolveStepRealHost(s) === targetHost ||
+              hostnameFromUrl(restoreText(s.url, restoreMap)) === targetHost
+            );
           })?.url
         : undefined;
-      const fallbackUrl = captured?.url ?? matchingHostUrl;
-      const candidateUrl = raw.url ?? fallbackUrl;
+      const candidateUrl = rawUrl
+        ? mergeCapturedNavigateUrl(rawUrl, matchingHostUrl)
+        : matchingHostUrl;
       if (!candidateUrl) {
         if (raw.host?.trim()) {
           const rawNavHost = normalizeHost(raw.host);
           const host = !isPlaceholderHost(rawNavHost) ? rawNavHost : stepHost;
-          if (!host || isPlaceholderHost(host)) return null;
+          if (!host || isPlaceholderHost(host) || !seenHostnames.has(host)) {
+            return null;
+          }
           return {
             step: {
               action: "switchTab",
@@ -1347,10 +1396,7 @@ function resolveLeafStep(
         }
         return null;
       }
-      const mergedUrl = raw.url
-        ? mergeCapturedNavigateUrl(raw.url, fallbackUrl)
-        : candidateUrl;
-      const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
+      const normalized = normalizeUrlHost(restoreText(candidateUrl, restoreMap));
       let navHost = stepHost;
       try {
         navHost = normalizeHost(new URL(normalized).hostname);
@@ -2001,8 +2047,35 @@ export async function compileWorkflow(
     stats,
   };
 
+  const seenHosts = new Set<string>();
+  const sourceEntries: ReadonlyArray<{ app?: string; url?: string }> =
+    input.events && input.events.length > 0 ? input.events : rawSteps;
+  for (const e of sourceEntries) {
+    if (e.url) {
+      try {
+        const parsed = new URL(restoreText(e.url, restoreMap));
+        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+          const urlHost = normalizeHost(parsed.host);
+          if (!isPlaceholderHost(urlHost)) {
+            seenHosts.add(urlHost);
+          }
+          continue;
+        }
+      } catch {
+        // fall back to app if URL is invalid
+      }
+    }
+    if (e.app) {
+      const appHost = normalizeHost(e.app);
+      if (!isPlaceholderHost(appHost)) {
+        seenHosts.add(appHost);
+      }
+    }
+  }
+
   const validated = validateCompiledWorkflow(candidate, {
     maxSteps: opts?.maxSteps,
+    seenHosts,
   });
   if (!validated.ok) {
     console.log(`[v2/compiler] validation failed: ${validated.error}`);
