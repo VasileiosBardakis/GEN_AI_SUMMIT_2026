@@ -51,7 +51,17 @@ export type CompileOptions = {
   model?: string;
 };
 
-const DEFAULT_COMPILE_TIMEOUT_MS = 5000;
+export const DEFAULT_V2_COMPILE_MODEL = "gemini-3.1-flash-lite";
+export const DEFAULT_COMPILE_TIMEOUT_MS = 5000;
+
+export function resolveCompileTimeoutMs(): number {
+  const n = Number(process.env.V2_COMPILE_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_COMPILE_TIMEOUT_MS;
+}
+
+export function resolveCompileModel(): string {
+  return process.env.V2_COMPILE_MODEL?.trim() || DEFAULT_V2_COMPILE_MODEL;
+}
 const MAX_PROMPT_STEPS = 60;
 const MAX_SUMMARY_CHARS = 4096;
 
@@ -293,6 +303,44 @@ function normalizeUrlHost(rawUrl: string): string {
   } catch {
     return rawUrl;
   }
+}
+
+function mergeCapturedNavigateUrl(
+  rawUrl: string,
+  fallbackUrl: string | undefined,
+): string {
+  if (!fallbackUrl) return rawUrl;
+  let parsedRaw: URL;
+  let parsedFallback: URL;
+  try {
+    parsedRaw = new URL(rawUrl);
+    parsedFallback = new URL(fallbackUrl);
+  } catch {
+    return rawUrl;
+  }
+  if (
+    normalizeHost(parsedRaw.hostname) !==
+    normalizeHost(parsedFallback.hostname)
+  ) {
+    return rawUrl;
+  }
+  if (!parsedRaw.port && parsedFallback.port) {
+    parsedRaw.port = parsedFallback.port;
+  }
+  const isOriginOnly =
+    parsedRaw.pathname === "/" &&
+    parsedRaw.search === "" &&
+    parsedRaw.hash === "";
+  const fallbackHasPathOrQuery =
+    parsedFallback.pathname !== "/" || parsedFallback.search !== "";
+  if (
+    isOriginOnly &&
+    fallbackHasPathOrQuery &&
+    (!parsedRaw.port || parsedRaw.port === parsedFallback.port)
+  ) {
+    return fallbackUrl;
+  }
+  return parsedRaw.toString();
 }
 
 function stripParamBraces(name: string): string {
@@ -940,11 +988,11 @@ function buildCompilePrompt(
     "",
     "RULES:",
     "1. Never write selectors. Every click/fill/select/readText/key/submit MUST have `stepIndex` of a step with `hasTarget: true` (matching the action, e.g. `fill` stepIndex for `fill`, `key` stepIndex for `key`), OR an exact `targetId` from PageSummary Targets. Never emit empty \"\".",
-    "2. Pick ONE clean repetition and drop one-off stray clicks.",
+    "2. Pick ONE clean repetition and drop stray, decorative, or non-essential clicks and side excursions (e.g. help/info/tooltip links) even if repeated in every repetition. Never emit `navigate` to an informational/excursion URL or reload a form page the user is already on.",
     "3. Keep all distinct form fields (multi-field Tab forms keep every `fill` via its own `stepIndex`). Always preserve Enter-key submissions (`action: \"key\", key: \"Enter\"` with the `key` step's `stepIndex`) rather than dropping them.",
     "4. Copied values use `readText` with `bind` (REQUIRED on every `readText`, e.g. `\"bind\":\"<varName>\"`, NEVER omit `bind`) and `fill` with `\"{{<varName>}}\"`.",
     "5. User-supplied variables go in `params[]` and `\"{{paramName}}\"`. Never invent placeholder/masked literals; preserve `__PII_*__` tokens if typed literally.",
-    "6. Tab switching is automatic; do NOT emit `navigate` for the start page load. `switchTab` uses `stepIndex` or `host` (hostname only), never `url`.",
+    "6. Tab switching is automatic; do NOT emit `navigate` for the start page load. `switchTab` uses `stepIndex` or `host` (hostname only), never `url`. Any `navigate` MUST reuse `stepIndex` or keep the full URL including port and path (never strip to bare host/origin).",
     "7. Use `forEach` ONLY when PageSummary Lists is printed below AND has remaining unprocessed items (`runMode: \"run_remaining\"`, `itemIds` = ONLY remaining `itemId`s). Inside `forEach.steps`, only set `withinId` to a container `targetId` from PageSummary Targets (if any) and `withinTextParam` to an item field name from PageSummary Lists. Otherwise set `runMode: \"save_only\"` and emit flat steps.",
     "8. `offerAt2: true` when clearly generalizable at 2 repeats; `risk: \"high\"` for irreversible external actions (payments/wires/deletes/external sends); `suggest: false` only if one-off.",
     "",
@@ -1227,15 +1275,34 @@ function resolveLeafStep(
       };
     }
     case "navigate": {
-      const hostLookupUrl =
-        !raw.url && !captured?.url && raw.host?.trim()
-          ? ctx.indexedSteps.find(
-              (s) =>
-                normalizeHost(s.app) === normalizeHost(raw.host!) && s.url,
-            )?.url
-          : undefined;
-      const rawUrl = raw.url ?? captured?.url ?? hostLookupUrl;
-      if (!rawUrl) {
+      let targetHost: string | undefined;
+      if (raw.url) {
+        try {
+          targetHost = normalizeHost(new URL(raw.url).hostname);
+        } catch {
+          // ignore invalid URL when inferring host
+        }
+      }
+      if (!targetHost && raw.host?.trim()) {
+        targetHost = normalizeHost(raw.host);
+      }
+      if (!targetHost && captured?.app) {
+        targetHost = normalizeHost(captured.app);
+      }
+      const matchingHostUrl = targetHost
+        ? ctx.indexedSteps.find((s) => {
+            if (!s.url) return false;
+            if (normalizeHost(s.app) === targetHost) return true;
+            try {
+              return normalizeHost(new URL(s.url).hostname) === targetHost;
+            } catch {
+              return false;
+            }
+          })?.url
+        : undefined;
+      const fallbackUrl = captured?.url ?? matchingHostUrl;
+      const candidateUrl = raw.url ?? fallbackUrl;
+      if (!candidateUrl) {
         if (raw.host?.trim()) {
           const host = normalizeHost(raw.host);
           return {
@@ -1246,7 +1313,10 @@ function resolveLeafStep(
         }
         return null;
       }
-      const normalized = normalizeUrlHost(restoreText(rawUrl, restoreMap));
+      const mergedUrl = raw.url
+        ? mergeCapturedNavigateUrl(raw.url, fallbackUrl)
+        : candidateUrl;
+      const normalized = normalizeUrlHost(restoreText(mergedUrl, restoreMap));
       let navHost = stepHost;
       try {
         navHost = normalizeHost(new URL(normalized).hostname);
@@ -1485,11 +1555,11 @@ function createCompileGeminiClient(
   const baseOpts: GeminiClientOptions = opts?.gemini ?? {};
   return createGeminiClient({
     ...baseOpts,
-    ...(opts?.model !== undefined ? { model: opts.model } : {}),
+    model: opts?.model ?? baseOpts.model ?? resolveCompileModel(),
     thinkingBudget: baseOpts.thinkingBudget ?? 0,
     responseSchema:
       baseOpts.responseSchema ?? buildCompilerResponseSchema(ctx),
-    timeoutMs: baseOpts.timeoutMs ?? opts?.timeoutMs ?? DEFAULT_COMPILE_TIMEOUT_MS,
+    timeoutMs: baseOpts.timeoutMs ?? opts?.timeoutMs ?? resolveCompileTimeoutMs(),
   });
 }
 
