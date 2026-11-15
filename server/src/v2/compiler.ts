@@ -263,6 +263,7 @@ export const COMPILER_RESPONSE_SCHEMA = {
 } as const;
 
 type EnrichedStep = V2Step & {
+  cell?: string;
   label?: string;
   role?: string;
   tag?: string;
@@ -574,8 +575,10 @@ function enrichSteps(steps: V2Step[], events?: Event[]): EnrichedStep[] {
             }
           : undefined;
 
+    const gridCell = matched?.meta?.grid?.cellRef;
     return {
       ...step,
+      ...(typeof gridCell === "string" && gridCell ? { cell: gridCell } : {}),
       label: matched?.target?.label,
       role: matched?.target?.role,
       tag: matched?.target?.tag,
@@ -1324,6 +1327,7 @@ function buildCompilePrompt(
     };
     const label = step.label ?? inferLabelFromTarget(step.target);
     if (label) entry.label = label;
+    if (step.cell) entry.cell = step.cell;
     if (step.role) entry.role = step.role;
     if (step.tag) entry.tag = step.tag;
     const copyMatch = ctx.copySourceMatches.get(idx);
@@ -1415,6 +1419,7 @@ function buildCompilePrompt(
     "5. `switchTab` uses `stepIndex` or `host` (hostname only). Any `navigate` must preserve the full URL (scheme, host, port, path).",
     "6. SNIPPET: When the steps are `paste` or `fill` of the same literal text into one field with no `copy`/source read (even with clear clicks or empty clears in between), set `suggest: true`, `kind: \"snippet\"`, `params: []`, `runMode: \"save_only\"`, and emit ONLY ONE `insertText` step with `stepIndex` and that exact repeated text (no `fill`, `click`, or clear steps).",
     "7. WORKFLOW: When PageSummary Lists contains a source list with rows on the source page, ALWAYS emit `forEach` with `runMode: \"run_remaining\"` and `itemIds` (for remaining unprocessed items, or `items: \"<listId>\"` for all rows) and put ALL per-row steps inside `forEach.steps: [...]` (never leave `forEach.steps` empty or put body steps after `forEach`). Inside `forEach.steps`, scope row-level `readText`/`click` steps using `withinId` and `withinTextParam` (NOT on `forEach` itself) plus `stepIndex` (or `targetId`), and fill destination fields using `stepIndex` or exact `ps_*` `targetId`. Otherwise set `runMode: \"save_only\"` with flat steps. Set `risk: \"high\"` for irreversible external actions; set `suggest: true` for repeated workflows (2+ cycles), snippet pastes, or multi-field transfers with a PageSummary list — set `suggest: false` if one-off or incomplete.",
+    "8. GRID/CELLS: Steps with a `cell` field wrote into a grid whose editor element is shared by every cell. If the cycles wrote to successive cells (the row or column advances from one cycle to the next), do NOT replay the recorded cell references: compile one cycle that is relative to the current position, moving with `key` steps (e.g. Tab between columns, Enter or arrow keys to the next row, Home to return to the first column) so each run lands after the previous data instead of overwriting it. Emit a fill/insertText step for EVERY column that was filled in a cycle (even if a value was only partly captured), in the recorded column order, each with its own param or `{{var}}`.",
     "",
     "Steps:",
     ...stepLines,
