@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, expect, test } from "@playwright/test";
 import type { PreviewResult } from "../extension/src/exp/preview-run.ts";
 import type { ActionScript, BindingValue } from "../extension/src/types.ts";
+import { toLocatorList } from "../shared/schema.ts";
 import { resolveChromeExecutable } from "../scripts/lib/chrome.mjs";
 import { startDemoServer } from "../scripts/lib/static-server.mjs";
 
@@ -31,10 +32,12 @@ test("E2E: previewRun checks #profile-form without mutating DOM and detects miss
       path.join(rootDir, "extension/src/exp/preview-run.ts"),
       "utf8",
     );
-    const strippedJs = stripTypeScriptTypes(tsSource).replace(
-      /^export\s+(?=function|const|let|var)/gm,
-      "",
-    );
+    const strippedJs = stripTypeScriptTypes(tsSource)
+      .replace(
+        /^import\s+\{\s*toLocatorList\s*\}\s+from\s+["']@gen\/shared\/schema\.ts["'];?\r?\n?/m,
+        `const toLocatorList = ${toLocatorList.toString()};\n`,
+      )
+      .replace(/^export\s+(?=function|const|let|var)/gm, "");
 
     await page.addScriptTag({
       content: `${strippedJs}\nwindow.__previewRun = previewRun;\nwindow.__isSubmitElement = isSubmitElement;`,
@@ -59,7 +62,10 @@ test("E2E: previewRun checks #profile-form without mutating DOM and detects miss
         },
         {
           action: "fill",
-          target: { kind: "css", value: '#profile-form input[name="owner_email"]' },
+          target: [
+            { kind: "testid", value: "missing-owner-email-testid" },
+            { kind: "css", value: '#profile-form input[name="owner_email"]' },
+          ],
           value: "{{ownerEmail}}",
         },
         {

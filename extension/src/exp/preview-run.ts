@@ -1,3 +1,4 @@
+import { toLocatorList } from "@gen/shared/schema.ts";
 import type { ActionScript, BindingValue, DomStep, Locator, Step } from "../types.ts";
 
 export type PreviewStepStatus = "found" | "missing" | "skipped";
@@ -359,7 +360,7 @@ function resolveText(raw: string, root: ParentNode): Element[] {
   return [...submitInputs, ...textMatched];
 }
 
-function resolveAll(locator: Locator, root: ParentNode): Element[] {
+function resolveAllForLocator(locator: Locator, root: ParentNode): Element[] {
   if (locator.kind === "css") {
     try {
       return Array.from(root.querySelectorAll(locator.value));
@@ -397,9 +398,21 @@ function resolveAll(locator: Locator, root: ParentNode): Element[] {
   return resolveText(locator.value, root);
 }
 
-function resolveElement(locator: Locator, root: ParentNode): Element | null {
-  const found = resolveAll(locator, root);
-  return found.find(isElementVisible) ?? found[0] ?? null;
+function resolveAll(target: Locator | Locator[], root: ParentNode): Element[] {
+  for (const locator of toLocatorList(target)) {
+    const found = resolveAllForLocator(locator, root);
+    if (found.length > 0) return found;
+  }
+  return [];
+}
+
+function resolveElement(target: Locator | Locator[], root: ParentNode): Element | null {
+  for (const locator of toLocatorList(target)) {
+    const found = resolveAllForLocator(locator, root);
+    const match = found.find(isElementVisible) ?? found[0] ?? null;
+    if (match) return match;
+  }
+  return null;
 }
 
 function lookupBinding(
@@ -492,8 +505,10 @@ function readElementValue(element: Element): string {
   return (element.textContent ?? "").trim();
 }
 
-function formatLocator(locator: Locator): string {
-  return `${locator.kind}: ${locator.value}`;
+function formatLocator(target: Locator | Locator[]): string {
+  const list = toLocatorList(target);
+  if (list.length === 0) return "empty target";
+  return list.map((locator) => `${locator.kind}: ${locator.value}`).join(" | ");
 }
 
 function previewStep(

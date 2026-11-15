@@ -467,4 +467,73 @@ describe("previewRun", () => {
       expect(el.textContentSetSpy).not.toHaveBeenCalled();
     }
   });
+
+  it("normalizes Locator[] targets with toLocatorList and tries each locator in order", () => {
+    const form = new MockElement("form", { id: "profile-form" });
+    const company = new MockElement("input", { name: "company_name" });
+    const row1 = new MockElement("li", { class: "row" }, "Item 1");
+    const row2 = new MockElement("li", { class: "row" }, "Item 2");
+    const submitBtn = new MockElement("button", { type: "submit" }, "Save");
+    form.appendChild(company);
+    form.appendChild(row1);
+    form.appendChild(row2);
+    form.appendChild(submitBtn);
+    doc.body.appendChild(form);
+
+    const script: ActionScript = {
+      steps: [
+        {
+          action: "fill",
+          target: [
+            { kind: "testid", value: "missing-company" },
+            { kind: "css", value: 'input[name="company_name"]' },
+          ],
+          value: "Acme",
+        },
+        {
+          action: "extractList",
+          target: [
+            { kind: "css", value: ".no-such-row" },
+            { kind: "css", value: ".row" },
+          ],
+          bind: "rows",
+        },
+        {
+          action: "click",
+          target: [
+            { kind: "testid", value: "missing-submit" },
+            { kind: "css", value: 'button[type="submit"]' },
+          ],
+        },
+      ],
+    };
+
+    const okResult = previewRun(script);
+    expect(okResult.ready).toBe(true);
+    expect(okResult.found).toBe(2);
+    expect(okResult.total).toBe(3);
+    expect(okResult.summary).toBe("ready: 2 of 3 steps found");
+    expect(okResult.steps[2]).toEqual({
+      index: 2,
+      action: "click",
+      status: "skipped",
+      reason: "Submit click skipped in dry-run preview",
+    });
+
+    const missingResult = previewRun({
+      steps: [
+        {
+          action: "fill",
+          target: [
+            { kind: "testid", value: "no-id" },
+            { kind: "css", value: 'input[name="no_field"]' },
+          ],
+          value: "x",
+        },
+      ],
+    });
+    expect(missingResult.ready).toBe(false);
+    expect(missingResult.steps[0].status).toBe("missing");
+    expect(missingResult.steps[0].reason).toContain("testid: no-id | css: input[name=\"no_field\"]");
+  });
 });
