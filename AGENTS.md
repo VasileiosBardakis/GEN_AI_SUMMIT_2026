@@ -18,3 +18,4 @@
 - Never commit secrets; `.env` is gitignored.
 - Gemini uses ADC only (`GOOGLE_GENAI_USE_VERTEXAI=true GOOGLE_CLOUD_PROJECT=genaihack26ath-52 GOOGLE_CLOUD_LOCATION=global`), no API keys.
 - Changing `shared/contract.ts` requires a Linear issue and review by both sides.
+- Before changing server/ or extension/src/hands, read docs/ARCHITECTURE.md.
