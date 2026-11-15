@@ -264,18 +264,29 @@ export const ScriptStepSchema: z.ZodType<ScriptStep, z.ZodTypeDef, unknown> = z.
   ]),
 );
 
+export const ScriptParamSchema = z.object({
+  name: z.string().refine((s) => s.trim().length > 0, "expected non-empty string"),
+  description: z.string().optional(),
+  example: z.string().optional(),
+  piiHash: z.string().min(1).optional(),
+});
+
+export type ScriptParam = z.infer<typeof ScriptParamSchema>;
+
 export const ActionScriptSchema = z
   .object({
     name: z.string().optional(),
     steps: z.array(ScriptStepSchema).min(1),
     pauseBeforeSubmit: z.boolean().optional(),
     runMode: z.enum(["run_remaining", "save_only"]).optional(),
+    params: z.array(ScriptParamSchema).optional(),
   })
-  .transform(({ name, steps, pauseBeforeSubmit, runMode }) => ({
+  .transform(({ name, steps, pauseBeforeSubmit, runMode, params }) => ({
     ...(name ? { name } : {}),
     steps,
     ...(pauseBeforeSubmit !== undefined ? { pauseBeforeSubmit } : {}),
     ...(runMode !== undefined ? { runMode } : {}),
+    ...(params && params.length > 0 ? { params } : {}),
   }));
 
 export type ActionScript = z.infer<typeof ActionScriptSchema>;

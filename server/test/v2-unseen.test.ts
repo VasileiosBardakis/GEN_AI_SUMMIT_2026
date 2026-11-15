@@ -1066,16 +1066,21 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     expect(recallDecide.status).toBe(200);
     expect(recallDecide.cmd?.kind).toBe("decide");
     expect(recallDecide.cmd?.name).toBe("Record claim approval");
+    expect(recallDecide.cmd?.script?.runMode).toBe("run_remaining");
 
     await postHandsResult(recallUrl, {
       id: recallDecide.cmd!.id,
       ok: true,
       decision: "approved",
+      params: { claimId: "CLM-9901" },
     });
 
     const recallRun = await pollHandsNext(recallUrl);
     expect(recallRun.status).toBe(200);
     expect(recallRun.cmd?.kind).toBeUndefined();
+    expect((recallRun.cmd as unknown as { paramValues?: Record<string, string> })?.paramValues).toEqual({
+      claimId: "CLM-9901",
+    });
     await postHandsResult(recallUrl, {
       id: recallRun.cmd!.id,
       ok: true,

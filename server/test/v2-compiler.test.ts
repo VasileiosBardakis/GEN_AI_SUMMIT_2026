@@ -969,4 +969,105 @@ describe("Brain v2 compiler and validator", () => {
       proposer.close();
     }
   });
+
+  it("binds unmapped [REDACTED:EMAIL#h_...] tokens to {{param}} with piiHash and backfills missing param examples without leaking PII", async () => {
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "u-1",
+        ts: 1000,
+        session: "s_unmapped_pii",
+        source: "browser",
+        app: "wire.local",
+        url: "http://wire.local/wire",
+        type: "input",
+        target: {
+          tag: "input",
+          role: "textbox",
+          label: "Recipient Email",
+          locators: [{ kind: "testid", value: "recipient-email" }],
+        },
+        value: "[REDACTED:EMAIL#h_9a8b7c6d]",
+      },
+      {
+        v: 1,
+        id: "u-2",
+        ts: 1500,
+        session: "s_unmapped_pii",
+        source: "browser",
+        app: "wire.local",
+        url: "http://wire.local/wire",
+        type: "input",
+        target: {
+          tag: "input",
+          role: "textbox",
+          label: "Amount",
+          locators: [{ kind: "testid", value: "wire-amount" }],
+        },
+        value: "500.00",
+      },
+      {
+        v: 1,
+        id: "u-3",
+        ts: 2000,
+        session: "s_unmapped_pii",
+        source: "browser",
+        app: "wire.local",
+        url: "http://wire.local/wire",
+        type: "click",
+        target: {
+          tag: "button",
+          role: "button",
+          label: "Wire funds",
+          locators: [{ kind: "testid", value: "wire-funds-btn" }],
+        },
+      },
+    ];
+
+    // No piiMap passed -> server only has hash h_9a8b7c6d, simulating real Chrome extension local PII
+    const { client } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Wire funds to __PII_EMAIL_1__",
+      reason: "Fills email and amount and pauses before Wire funds",
+      risk: "high",
+      runMode: "save_only",
+      params: [{ name: "wire_amount" }],
+      steps: [
+        { action: "fill", stepIndex: 0, value: "__PII_EMAIL_1__" },
+        { action: "fill", stepIndex: 1, value: "{{wire_amount}}" },
+        { action: "click", stepIndex: 2 },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events },
+      {
+        gemini: client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: true }),
+      },
+    );
+
+    expect(wf).not.toBeNull();
+    expect(wf!.pauseBeforeSubmit).toBe(true);
+    expect(wf!.runMode).toBe("save_only");
+    const serialized = JSON.stringify(wf);
+    expect(serialized).not.toContain("[REDACTED:");
+    expect(serialized).not.toMatch(/__PII_[A-Za-z0-9_]+__/);
+
+    const amountParam = wf!.params.find((p) => p.name === "wire_amount");
+    expect(amountParam?.example).toBe("500.00");
+
+    const piiParam = wf!.params.find((p) => p.piiHash === "h_9a8b7c6d");
+    expect(piiParam).toBeDefined();
+    const emailFill = wf!.steps[1];
+    expect(emailFill.action).toBe("fill");
+    if (emailFill.action === "fill") {
+      expect(emailFill.value).toBe(`{{${piiParam!.name}}}`);
+    }
+
+    const script = compiledWorkflowToActionScript(wf!);
+    expect(script.params).toEqual(wf!.params);
+  });
 });

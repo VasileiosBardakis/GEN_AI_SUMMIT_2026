@@ -368,6 +368,15 @@ export function buildStartSignature(
   let fieldEmptyOnly = false;
   const stepRoles: string[] = [];
 
+  const targetSource =
+    domStep && "target" in domStep
+      ? (domStep.target as Locator | Locator[] | undefined)
+      : fallbackWaitFor && "target" in fallbackWaitFor
+        ? (fallbackWaitFor.target as Locator | Locator[] | undefined)
+        : undefined;
+  const stepLocators = normalizeTargetLocators(targetSource);
+  const locators = dedupeLocators([...(context?.locators ?? []), ...stepLocators], 6);
+
   switch (domStep?.action) {
     case "readText":
     case "readValue":
@@ -387,23 +396,28 @@ export function buildStartSignature(
       stepRoles.push("combobox");
       break;
     case "click":
-    default:
+    default: {
       action = "click";
       fieldEmptyOnly = false;
       if (domStep?.action === "click") {
-        stepRoles.push("button");
+        const ariaRole = stepLocators
+          .map((loc) =>
+            loc.kind === "aria"
+              ? /^([a-z]+)\[\s*name\s*=/i.exec(loc.value.trim())?.[1]?.toLowerCase()
+              : undefined,
+          )
+          .find(Boolean);
+        if (ariaRole === "searchbox" || ariaRole === "textbox") {
+          stepRoles.push("textbox");
+        } else if (ariaRole) {
+          stepRoles.push(ariaRole);
+        } else {
+          stepRoles.push("button");
+        }
       }
       break;
+    }
   }
-
-  const targetSource =
-    domStep && "target" in domStep
-      ? (domStep.target as Locator | Locator[] | undefined)
-      : fallbackWaitFor && "target" in fallbackWaitFor
-        ? (fallbackWaitFor.target as Locator | Locator[] | undefined)
-        : undefined;
-  const stepLocators = normalizeTargetLocators(targetSource);
-  const locators = dedupeLocators([...(context?.locators ?? []), ...stepLocators], 6);
 
   const roles = dedupeStrings(
     [
@@ -460,14 +474,21 @@ function collectStepSignals(steps: Step[]): {
   let hasNavigate = false;
   let hasExtractList = false;
   let hasBindingRef = false;
+  let sawDomStep = false;
   let crossedBoundary = false;
 
   const visit = (list: Step[]): void => {
     for (const step of list) {
       if (crossedBoundary) break;
       if (step.action === "switchTab") {
-        crossedBoundary = true;
-        break;
+        if (sawDomStep) {
+          crossedBoundary = true;
+          break;
+        }
+        continue;
+      }
+      if (step.action !== "wait" && step.action !== "navigate" && step.action !== "waitFor") {
+        sawDomStep = true;
       }
       if ("target" in step && step.target) {
         for (const loc of dedupeLocators(toLocatorList(step.target))) {

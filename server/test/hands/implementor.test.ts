@@ -452,4 +452,50 @@ describe("Stage 4: buildStartSignature", () => {
     expect(eyes.targetHints.roles).toEqual([]);
     expect(eyes.targetHints.locators).toEqual([{ kind: "css", value: ".order-id" }]);
   });
+
+  it("collects signals past a leading switchTab and infers textbox role when click targets a textbox aria locator", () => {
+    const script: ActionScript = {
+      name: "Fill Hex Swatch",
+      steps: [
+        { action: "switchTab", host: "localhost" },
+        {
+          action: "click",
+          target: [
+            { kind: "testid", value: "hex-code" },
+            { kind: "aria", value: 'textbox[name="Hex Code"]' },
+          ],
+        },
+        {
+          action: "fill",
+          target: [
+            { kind: "testid", value: "hex-code" },
+            { kind: "aria", value: 'textbox[name="Hex Code"]' },
+          ],
+          value: "{{hexCode}}",
+        },
+        {
+          action: "click",
+          target: [{ kind: "testid", value: "tab-submit-btn" }],
+        },
+      ],
+    };
+
+    const sig = buildStartSignature(script, {
+      app: "localhost",
+      url: "http://localhost:4173/unseen-form.html",
+    });
+    expect(sig.roles).toEqual(["textbox"]);
+
+    const eyes = buildGroundedEyesSpec({
+      script,
+      solution: "Fill Hex Swatch and submit.",
+      context: {
+        app: "localhost",
+        url: "http://localhost:4173/unseen-form.html",
+      },
+    });
+    expect(eyes.targetHints.roles).toContain("textbox");
+    expect(eyes.guards.fieldEmptyOnly).toBe(true);
+    expect(eyes.targetHints.locators.some((l) => l.value === "tab-submit-btn")).toBe(true);
+  });
 });
