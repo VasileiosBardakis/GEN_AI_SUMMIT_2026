@@ -56,6 +56,12 @@ class FakeElement {
     }
   }
 
+  dispatch(type: string): void {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener();
+    }
+  }
+
   findById(targetId: string): FakeElement | null {
     if (this.id === targetId) return this;
     for (const child of this.children) {
@@ -98,6 +104,16 @@ class FakeShadowRoot {
       const success = new FakeElement("div");
       success.hidden = true;
       this.bySelector.set("[data-eyes-success]", [success]);
+    }
+    if (value.includes("<video ")) {
+      const video = new FakeElement("video");
+      this.bySelector.set("video", [video]);
+      if (value.includes("data-eyes-replay")) {
+        const replay = new FakeElement("div");
+        const wrapper = new FakeElement("div");
+        wrapper.appendChild(replay);
+        this.bySelector.set("[data-eyes-replay]", [replay]);
+      }
     }
   }
 
@@ -355,5 +371,40 @@ describe("EYES_SHOW_DECIDER popup replacement", () => {
     expect(sendResponse).toHaveBeenCalledTimes(1);
     expect(sendResponse).toHaveBeenCalledWith({ ok: true, decision: "never" });
     expect(fakeDocument.getElementById("__eyes_suggestion_host__")).toBeNull();
+  });
+
+  it("removes the replay section (falls back to no video) when the server replay video fails to load", () => {
+    (globalThis as Record<string, unknown>).chrome = {
+      runtime: {
+        id: "test-extension",
+        getURL: (path: string) => `chrome-extension://test-extension/${path}`,
+      },
+    };
+
+    try {
+      const onMessage = fakeWindow.__HANDS_ON_MESSAGE__;
+      onMessage?.(
+        {
+          ...makeDeciderPayload("Workflow A", "Run workflow A"),
+          videoUrl: "http://127.0.0.1:4321/replay/abc.webm",
+        },
+        null,
+        vi.fn(),
+      );
+
+      const host = fakeDocument.getElementById("__eyes_suggestion_host__");
+      const replayBox = host?.shadowRoot?.querySelector("[data-eyes-replay]");
+      const video = host?.shadowRoot?.querySelector("video");
+      expect(replayBox).not.toBeNull();
+      expect(replayBox?.parentElement).not.toBeNull();
+      expect(video).not.toBeNull();
+
+      video?.dispatch("error");
+
+      expect(replayBox?.parentElement).toBeNull();
+      expect(video?.getAttribute("src")).toBeNull();
+    } finally {
+      delete (globalThis as Record<string, unknown>).chrome;
+    }
   });
 });
