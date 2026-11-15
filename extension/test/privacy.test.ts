@@ -36,6 +36,37 @@ describe("Eyes Layer-1 privacy & schema validation", () => {
     expect(res.value).not.toContain("sk-live-9876543210abcdef123456");
   });
 
+  it("masks standalone and inline email addresses while preserving valueHash and piiTypes", () => {
+    const standalone = "alice@example.com";
+    const standaloneRes = sanitizeValue(standalone, {
+      isSensitiveField: false,
+      autofillEligible: true,
+      autocompleteAttr: "email",
+    });
+
+    expect(standaloneRes.privacy.redacted).toBe(true);
+    expect(standaloneRes.privacy.reason).toBe("pii_pattern");
+    expect(standaloneRes.privacy.piiTypes).toContain("email");
+    expect(standaloneRes.privacy.valueHash).toBe(hashValue(standalone));
+    expect(standaloneRes.value).toBe(`[REDACTED:EMAIL#${hashValue(standalone)}]`);
+    expect(standaloneRes.value).toMatch(/^\[REDACTED:EMAIL#h_[0-9a-f]+\]$/);
+    expect(standaloneRes.value).not.toContain("alice@example.com");
+
+    const inline = "Contact alice@example.com for invoice";
+    const inlineRes = sanitizeValue(inline, {
+      isSensitiveField: false,
+      autofillEligible: false,
+    });
+
+    expect(inlineRes.privacy.redacted).toBe(true);
+    expect(inlineRes.privacy.reason).toBe("pii_pattern");
+    expect(inlineRes.privacy.piiTypes).toContain("email");
+    expect(inlineRes.privacy.valueHash).toBe(hashValue(inline));
+    expect(inlineRes.value).toBe(`Contact [REDACTED:EMAIL#${hashValue(standalone)}] for invoice`);
+    expect(inlineRes.value).toContain("[REDACTED:EMAIL#h_");
+    expect(inlineRes.value).not.toContain("alice@example.com");
+  });
+
   it("sanitizes sensitive OAuth and token parameters in URLs", () => {
     const { url, hadSensitiveParams } = sanitizeUrl(
       "https://example.com/oauth/callback?code=secret_auth_code&state=xyz&access_token=tok_123"
