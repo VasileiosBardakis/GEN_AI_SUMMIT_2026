@@ -264,6 +264,7 @@ describe("live Playwright replay video for proposed ActionScript", () => {
       },
       { hostUrls },
     );
-    expect(unmappedHostBuf).toBeNull();
+    // Stops at the unmapped host (never fills on the wrong page) but keeps the steps already shown.
+    expect(unmappedHostBuf).not.toBeNull();
   }, 25000);
 });

@@ -522,6 +522,25 @@ export async function recordScriptReplay(
         .catch(() => {});
     };
 
+    let shownSteps = 0;
+    let skippedSteps = 0;
+
+    // Show the step label with no outline (used when the target cannot be resolved).
+    const showLabelOnly = async (stepLabel: string): Promise<void> => {
+      await page
+        .evaluate((lbl: string) => {
+          const w = window as unknown as {
+            __EYES_CLEAR_ANNOTATION__?: () => void;
+            __EYES_ANNOTATE_STEP__?: (l: string) => void;
+          };
+          w.__EYES_CLEAR_ANNOTATION__?.();
+          w.__EYES_ANNOTATE_STEP__?.(lbl);
+        }, stepLabel)
+        .catch(() => {});
+      skippedSteps += 1;
+      await waitForRenderedFrame(page, preStepSettleMs);
+    };
+
     const runStepList = async (
       stepList: Step[],
       scope: Record<string, unknown>,
@@ -622,8 +641,9 @@ export async function recordScriptReplay(
           .catch(() => ({ ok: false as const }));
 
         if (!preRes.ok) {
-          await clearAnnotationOnPage();
-          return false;
+          // Unresolved target: skip this step but keep it visible as a label.
+          await showLabelOnly(label);
+          continue;
         }
 
         await waitForRenderedFrame(page, preStepSettleMs);
@@ -671,9 +691,10 @@ export async function recordScriptReplay(
                 });
 
         if (!res.ok) {
-          await clearAnnotationOnPage();
-          return false;
+          await showLabelOnly(label);
+          continue;
         }
+        shownSteps += 1;
 
         if (navigatedDuringExec) {
           await page.waitForLoadState?.("domcontentloaded", { timeout: 2500 }).catch(() => {});
@@ -698,8 +719,11 @@ export async function recordScriptReplay(
       return true;
     };
 
-    const completed = await runStepList(steps, {});
-    if (!completed) return null;
+    await runStepList(steps, {});
+    if (shownSteps === 0) return null;
+    if (skippedSteps > 0) {
+      console.warn(`[replay-video] ${skippedSteps} step(s) shown label-only, ${shownSteps} outlined (target not found)`);
+    }
     await waitForRenderedFrame(page, endSettleMs);
 
     await context.close();
