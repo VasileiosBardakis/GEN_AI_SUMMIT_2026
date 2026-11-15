@@ -8,11 +8,12 @@ import { STEP_TRIGGER_TYPES } from "./common/target.ts";
 import {
   buildLibraryEntryFromScript,
   buildStartSignature,
+  formatStartSignature,
   implementForLibrary,
   type ImplementContext,
-  type StartSignature,
 } from "./hands/implementor.ts";
 import {
+  dedupeLibraryEntries,
   deleteLibraryEntry,
   readLibrary,
   recordLibraryRun,
@@ -41,6 +42,7 @@ import {
 } from "./propose.ts";
 import { buildCombinedReport, buildReport } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
+import { suggestFlowTip } from "./tips.ts";
 import { appendEvents, listSessions, readEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
 import { compileWorkflow, type IrisWorkflowJudge } from "./v2/index.ts";
@@ -90,6 +92,8 @@ export type CreateServerOptions = {
     opts?: { name?: string; context?: ImplementContext },
   ) => Promise<LibraryEntry>;
   autoPropose?: boolean;
+  flowTips?: boolean;
+  tipGemini?: GeminiClient | GeminiClientOptions;
   proposeDebounceMs?: number;
   siteCooldownMs?: number;
   precheckTimeoutMs?: number;
@@ -105,7 +109,9 @@ type HandsCommand =
       name: string;
       solution: string;
       script: ActionScript;
+      primaryLabel?: string;
       isRecall?: boolean;
+      entryId?: string;
     }
   | {
       id: string;
@@ -121,18 +127,6 @@ function isProposeTriggerEvent(ev: Event): boolean {
     return ev.meta?.key === "Enter";
   }
   return false;
-}
-
-function formatStartSignature(sig: StartSignature): string {
-  const host = sig.host ?? "*";
-  const urlPattern = sig.urlPattern ?? "/*";
-  const firstLoc = sig.locators[0];
-  const targetPart = firstLoc
-    ? `${firstLoc.kind}:${firstLoc.value}`
-    : sig.roles[0]
-      ? `${sig.roles[0]}:${sig.labelContains[0] ?? ""}`
-      : sig.labelContains[0] ?? "";
-  return `${host}|${urlPattern}|${sig.action}${targetPart ? `:${targetPart}` : ""}`;
 }
 
 function countFlatScriptSteps(steps: ActionScript["steps"]): number {
@@ -296,7 +290,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
     name: string;
     solution: string;
     script: ActionScript;
+    primaryLabel?: string;
     isRecall?: boolean;
+    entryId?: string;
     timeoutMs?: number;
   }): Promise<{ id: string; outcome: HandsOutcome }> {
     const id = input.id ?? crypto.randomUUID();
@@ -311,7 +307,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
         name: input.name,
         solution: input.solution,
         script: input.script,
+        ...(input.primaryLabel ? { primaryLabel: input.primaryLabel } : {}),
         ...(input.isRecall ? { isRecall: true } : {}),
+        ...(input.entryId ? { entryId: input.entryId } : {}),
       },
       timeoutMs,
       "Timed out waiting for user decision",
@@ -337,6 +335,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         solution: entry.solution,
         script: recallDecideScript,
         isRecall: true,
+        entryId: entry.id,
       });
       if (
         !outcome.ok &&
@@ -393,6 +392,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
   const proposer = autoPropose
     ? createProposer({
         readSessionEvents: (sessionId) => readEvents(opts.tracesDir, sessionId),
+        readLibrary: () => readLibrary(dataDir),
         judgeIris: (digest) =>
           typeof opts.iris === "function"
             ? opts.iris(digest)
@@ -480,11 +480,27 @@ export function createServer(opts: CreateServerOptions): http.Server {
               script.runMode === "run_remaining" || entry.kind === "snippet",
           };
         },
-        requestDecision: (name, solution, script) =>
+        requestDecision: (name, solution, script, primaryLabel) =>
           awaitHands(
-            { id: crypto.randomUUID(), kind: "decide", name, solution, script },
+            {
+              id: crypto.randomUUID(),
+              kind: "decide",
+              name,
+              solution,
+              script,
+              ...(primaryLabel ? { primaryLabel } : {}),
+            },
             60000,
           ),
+        suggestFlowTip: opts.flowTips
+          ? (events, exclude) =>
+              suggestFlowTip(
+                events,
+                opts.tipGemini && "generateJson" in opts.tipGemini
+                  ? { client: opts.tipGemini, exclude }
+                  : { gemini: opts.tipGemini, exclude },
+              )
+          : undefined,
         runScript: (script, paramValues) =>
           awaitHands(
             {
@@ -823,7 +839,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
       }
 
       if (req.method === "GET" && url.pathname === "/library") {
-        const items = await readLibrary(dataDir);
+        const items = dedupeLibraryEntries(await readLibrary(dataDir));
         sendJson(res, 200, { ok: true, items });
         return;
       }

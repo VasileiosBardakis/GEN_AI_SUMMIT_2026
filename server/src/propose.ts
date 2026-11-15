@@ -1,16 +1,20 @@
 import crypto from "node:crypto";
 import type { Event, Finding, Verdict } from "@gen/shared";
 import { normalizeText } from "./common/target.ts";
-import { toLocatorList, type ActionScript } from "./hands/types.ts";
+import {
+  buildLibraryEntryFromScript,
+  buildStartSignature,
+  formatStartSignature,
+  type ImplementContext,
+} from "./hands/implementor.ts";
+import { canonicalStepCount, findMatchingLibraryEntry } from "./hands/library.ts";
+import { toLocatorList, type ActionScript, type LibraryEntry } from "./hands/types.ts";
 import type { WorkflowIrisJudgment } from "./llm/iris.ts";
 import {
   compiledWorkflowToActionScript,
   compiledWorkflowToFinding,
 } from "./report.ts";
-export type FlowTip = {
-  tip: string;
-  keys?: string[];
-};
+import { hasRepeatedInteraction, type FlowTip } from "./tips.ts";
 import {
   buildMeaningfulWindow,
   eventsToSteps,
@@ -79,12 +83,13 @@ export type ProposerDeps = {
   ) => Promise<HandsOutcome>;
   log?: (line: string) => void;
   readSessionEvents: (sessionId: string) => Promise<Event[]>;
+  readLibrary?: () => Promise<LibraryEntry[]>;
   judgeIris?: (digest: Record<string, unknown>) => Promise<WorkflowIrisJudgment | null>;
   compileV2: (
     input: CompileInput,
     opts?: { irisJudgment?: WorkflowIrisJudgment | null },
   ) => Promise<CompiledWorkflow | null>;
-  suggestFlowTip?: (events: Event[]) => Promise<FlowTip | null>;
+  suggestFlowTip?: (events: Event[], exclude?: string[]) => Promise<FlowTip | null>;
   precheck?: (script: ActionScript, meta: { startUrl?: string }) => Promise<PrecheckOutcome>;
   onCompiled?: (info: {
     sessionId: string;
@@ -237,7 +242,8 @@ export function createProposer(deps: ProposerDeps): Proposer {
   const proposedKeys = new Set<string>();
   const inFlightSessions = new Set<string>();
   const pendingRerunSessions = new Set<string>();
-  const shownFlowTipsBySession = new Map<string, Set<string>>();
+  const shownFlowTips = new Set<string>();
+  const shownFlowTipLabels: string[] = [];
   const flowTipCheckedAt = new Map<string, number>();
   let flowTipPending = false;
   let closed = false;
@@ -326,29 +332,38 @@ export function createProposer(deps: ProposerDeps): Proposer {
     }
   }
 
+  function flowTipDedupeKey(suggestion: FlowTip): string {
+    const keysNorm = suggestion.keys
+      ?.map((k) => k.toLowerCase().replace(/[^a-z0-9]/g, ""))
+      .filter(Boolean)
+      .join("");
+    if (keysNorm) return `keys:${keysNorm}`;
+    return `tip:${(suggestion.tip ?? "").trim().toLowerCase().replace(/\s+/g, " ")}`;
+  }
+
   async function maybeFlowTip(sessionId: string, events: Event[]): Promise<void> {
     if (!deps.suggestFlowTip || flowTipPending) return;
+    if (!hasRepeatedInteraction(events)) return;
     const lastCheck = flowTipCheckedAt.get(sessionId) ?? 0;
     if (now() - lastCheck < 60_000) return;
     flowTipCheckedAt.set(sessionId, now());
 
     let suggestion: FlowTip | null;
     try {
-      suggestion = await deps.suggestFlowTip(events);
+      suggestion = await deps.suggestFlowTip(
+        events,
+        shownFlowTipLabels.length > 0 ? [...shownFlowTipLabels] : undefined,
+      );
     } catch {
       return;
     }
     if (closed || !suggestion?.tip?.trim()) return;
 
+    const key = flowTipDedupeKey(suggestion);
+    if (shownFlowTips.has(key)) return;
     const name = suggestion.keys?.join(" → ") || suggestion.tip.trim();
-    const key = `${name}::${suggestion.tip.trim()}`;
-    let shown = shownFlowTipsBySession.get(sessionId);
-    if (!shown) {
-      shown = new Set<string>();
-      shownFlowTipsBySession.set(sessionId, shown);
-    }
-    if (shown.has(key)) return;
-    shown.add(key);
+    shownFlowTips.add(key);
+    shownFlowTipLabels.push(name);
 
     flowTipPending = true;
     try {
@@ -425,6 +440,53 @@ export function createProposer(deps: ProposerDeps): Proposer {
     const sessionScopedKey = `${sessionId}::${buildFindingKey(finding, script)}`;
     if (proposedKeys.has(sessionScopedKey)) {
       return;
+    }
+
+    if (deps.readLibrary) {
+      const existingEntries = await deps.readLibrary().catch(() => []);
+      if (existingEntries.length > 0) {
+        const context: ImplementContext = {
+          ...(compiled.apps[0] ? { app: compiled.apps[0] } : {}),
+          ...(compiled.startUrl ? { url: compiled.startUrl } : {}),
+        };
+        const candidateEntry = buildLibraryEntryFromScript({
+          name: compiled.name || script.name || finding.title,
+          description: compiled.reason || finding.why,
+          kind: compiled.kind ?? (finding.verdict === "rung1" ? "snippet" : "workflow"),
+          solution: finding.why || script.name || finding.title,
+          script,
+          context,
+          status: "active",
+        });
+        const sigObj = buildStartSignature(script, context);
+        const candidateWithSig: LibraryEntry = {
+          ...candidateEntry,
+          startSignature: formatStartSignature(sigObj),
+        };
+        const matched = findMatchingLibraryEntry(existingEntries, candidateWithSig);
+        if (matched) {
+          proposedKeys.add(sessionScopedKey);
+
+          const isUpgrade =
+            canonicalStepCount(script) > canonicalStepCount(matched.script);
+          if (isUpgrade && deps.onApproved) {
+            safeLog(
+              `[propose:v2] upgrading existing library entry id=${matched.id} name="${matched.name}"`,
+            );
+            await deps.onApproved({
+              sessionId,
+              script,
+              workflow: compiled,
+              finding,
+            }).catch(() => {});
+          } else {
+            safeLog(
+              `[propose:v2] skipping duplicate of existing library entry id=${matched.id} name="${matched.name}"`,
+            );
+          }
+          return;
+        }
+      }
     }
 
     const site = extractSiteHost(compiled, script, events);
