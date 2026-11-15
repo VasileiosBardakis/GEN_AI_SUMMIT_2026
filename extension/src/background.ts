@@ -1506,9 +1506,13 @@ export async function handleHandsCommand(
         status: itemStatus,
       });
       storedItem.script = decideScript as unknown as ActionScript;
-      void loadLibrary()
-        .then((items) => saveLibrary(upsertOptimizationItem(items, storedItem)))
-        .catch(() => {});
+      // Workflows are saved by the server on approval and arrive via /library;
+      // saving them here too would show a second card for the same task.
+      if (suggestion.kind === "text") {
+        void loadLibrary()
+          .then((items) => saveLibrary(upsertOptimizationItem(items, storedItem)))
+          .catch(() => {});
+      }
     }
     void (async () => {
       let payload: {

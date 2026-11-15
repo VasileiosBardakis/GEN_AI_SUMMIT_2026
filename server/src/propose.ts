@@ -478,6 +478,8 @@ function summarizeScriptSteps(steps: readonly ActionScript["steps"][number][]): 
   return out;
 }
 
+const MAX_SAME_TASK_COMPARISONS = 6;
+
 export function createProposer(deps: ProposerDeps): Proposer {
   const now = deps.now ?? (() => Date.now());
 
@@ -511,6 +513,15 @@ export function createProposer(deps: ProposerDeps): Proposer {
   const knownWorkflowHostsByKey = new Map<string, Set<string>>();
   let flowTipPending = false;
   let closed = false;
+  // Compiles from different sessions can finish together. Everything from the
+  // library check to the save runs one at a time, so a later compile always sees
+  // the entry an earlier one just saved.
+  let libraryChain: Promise<void> = Promise.resolve();
+  function withLibraryLock(fn: () => Promise<void>): Promise<void> {
+    const run = libraryChain.then(fn, fn);
+    libraryChain = run.catch(() => {});
+    return run;
+  }
 
   function entryLookupKey(name: string, solution: string): string {
     return `${name.trim().toLowerCase()}::${solution.trim().toLowerCase()}`;
@@ -849,6 +860,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
     const site = extractSiteHost(compiled, script, windowedEvents);
 
+    await withLibraryLock(async () => {
     if (deps.readLibrary) {
       const existingEntries = await deps.readLibrary().catch(() => []);
       if (existingEntries.length > 0) {
@@ -858,11 +870,18 @@ export function createProposer(deps: ProposerDeps): Proposer {
             finding.title.trim() || script.name?.trim() || "Proposed automation";
           const solution = finding.why.trim() || name;
           const candidateHosts = collectWorkflowHosts(site, compiled, script);
-          const sameHostEntries = existingEntries.filter(
-            (entry) =>
-              entry.kind === "workflow" &&
-              hasHostOverlap(candidateHosts, getLibraryEntryHosts(entry)),
+          // Iris decides sameness. Host overlap only orders the entries; a flow
+          // that starts on another site can still be the same task.
+          const workflowEntries = existingEntries.filter(
+            (entry) => entry.kind === "workflow",
           );
+          const overlapping = workflowEntries.filter((entry) =>
+            hasHostOverlap(candidateHosts, getLibraryEntryHosts(entry)),
+          );
+          const sameHostEntries = [
+            ...overlapping,
+            ...workflowEntries.filter((entry) => !overlapping.includes(entry)),
+          ].slice(0, MAX_SAME_TASK_COMPARISONS);
           if (sameHostEntries.length > 0) {
             const candidateSummary = {
               name,
@@ -928,7 +947,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
             }
           }
         }
-        if (!irisAnswered && !(compiled.kind === "workflow" && deps.judgeSameTask)) {
+        if (!irisAnswered) {
           const context: ImplementContext = {
             ...(compiled.apps[0] ? { app: compiled.apps[0] } : {}),
             ...(compiled.startUrl ? { url: compiled.startUrl } : {}),
@@ -1036,6 +1055,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       compiled,
       decisionMeta,
     );
+    });
   }
 
   function runSession(sessionId: string): void {
