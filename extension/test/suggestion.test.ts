@@ -72,4 +72,22 @@ describe("buildDeciderSuggestion", () => {
       { name: "amount", example: "125.00" },
     ]);
   });
+
+  it("renders show-only flow tips as a keycap with Got it and no flow tracks", () => {
+    const tip = buildDeciderSuggestion({
+      name: "Ctrl+C → Ctrl+V",
+      solution: "Use the keyboard shortcuts instead of the right-click menu.",
+      primaryLabel: "Got it",
+      script: {
+        name: "Ctrl+C → Ctrl+V",
+        steps: [{ action: "wait", ms: 0 }],
+      },
+    });
+    expect(tip.primaryLabel).toBe("Got it");
+    expect(tip.kind).toBe("click");
+    expect(tip.preview).toBe("Ctrl+C → Ctrl+V");
+    expect(tip.headline).toBe("Ctrl+C → Ctrl+V");
+    expect(tip.meta).toBe("Flow tip");
+    expect(tip.flows).toEqual({ user: [], proposed: [] });
+  });
 });

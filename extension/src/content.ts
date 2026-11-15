@@ -88,6 +88,7 @@ let lastSuggestionShownAt = 0;
 let activePopupDismiss: (() => void) | null = null;
 
 function renderFlows(suggestion: Suggestion): string {
+  if (suggestion.flows.user.length === 0) return "";
   const hasLoop = suggestion.flows.user.some((node) => node.kind === "loop");
   const loopArc = hasLoop
     ? `
@@ -595,7 +596,12 @@ export function showSuggestion(
   if (typeof document === "undefined" || !document.documentElement) return;
   if (window.top !== window.self) return;
 
+  const isFlowTip = suggestion.primaryLabel === "Got it";
   const existing = document.getElementById(SUGGESTION_HOST_ID);
+  if (existing && isFlowTip) {
+    options.onDecision?.("dismissed");
+    return;
+  }
   if (existing && !options.force && Date.now() - lastSuggestionShownAt < 800) return;
   if (activePopupDismiss) {
     const prevDismiss = activePopupDismiss;
@@ -673,16 +679,20 @@ export function showSuggestion(
   const primaryButtonLabel =
     suggestion.primaryLabel ||
     (isSaveOnly ? "Save skill" : suggestion.kind === "text" ? "Insert" : "Run");
-  const successTitle = isSaveOnly
-    ? "Saved."
-    : suggestion.kind === "text"
-      ? "Inserted."
-      : "Running.";
-  const successSubtitle = isSaveOnly
-    ? "Skill saved to your Eyes library."
-    : suggestion.kind === "text"
-      ? "Text pasted into the active field."
-      : "Eyes is executing this shortcut now.";
+  const successTitle = isFlowTip
+    ? "Got it."
+    : isSaveOnly
+      ? "Saved."
+      : suggestion.kind === "text"
+        ? "Inserted."
+        : "Running.";
+  const successSubtitle = isFlowTip
+    ? "Flow tip dismissed."
+    : isSaveOnly
+      ? "Skill saved to your Eyes library."
+      : suggestion.kind === "text"
+        ? "Text pasted into the active field."
+        : "Eyes is executing this shortcut now.";
 
   shadow.innerHTML = `
     <style>
@@ -1131,14 +1141,16 @@ export function showSuggestion(
           typedVal.length > 0 ? typedVal : def?.example !== undefined ? def.example : "";
       }
     }
-    const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
-    if (options.script) activeItem.script = options.script;
-    sendLibraryMessage({
-      kind: "EYES_ACTIVATE_OPTIMIZATION",
-      id: suggestion.id,
-      item: activeItem,
-      recordRun: !isSaveOnly,
-    });
+    if (!isFlowTip) {
+      const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
+      if (options.script) activeItem.script = options.script;
+      sendLibraryMessage({
+        kind: "EYES_ACTIVATE_OPTIMIZATION",
+        id: suggestion.id,
+        item: activeItem,
+        recordRun: !isSaveOnly,
+      });
+    }
     resolveDecision("approved", collectedParams);
     const content = shadow.querySelector<HTMLElement>("[data-eyes-content]");
     const success = shadow.querySelector<HTMLElement>("[data-eyes-success]");
@@ -1255,6 +1267,8 @@ export function setupEventListeners(): void {
 
   let lastPointerDownTs = Date.now();
   let lastFocusInTs = Date.now();
+  let lastContextMenuTs = 0;
+  let lastShortcutKeyTs = 0;
   let lastHoveredElement: EventTarget | null = null;
   let lastMouseMoveTs = 0;
   let lastScrollTs = 0;
@@ -1310,6 +1324,20 @@ export function setupEventListeners(): void {
 
     const localPii = privacy.redacted ? extractLocalPiiEntries(value) : undefined;
     dispatchEventToBackend(evt, localPii);
+  }
+
+  function clipboardTrigger(type: "copy" | "cut" | "paste"): EventMeta {
+    const now = Date.now();
+    if (now - lastShortcutKeyTs < 1500) return { subType: "keyboard_shortcut" };
+    if (now - lastContextMenuTs < 8000) {
+      return {
+        menu: {
+          trigger: "right_click",
+          menuItemText: type === "copy" ? "Copy" : type === "cut" ? "Cut" : "Paste",
+        },
+      };
+    }
+    return {};
   }
 
   // ---------------------------------------------------------------------------
@@ -1419,6 +1447,7 @@ export function setupEventListeners(): void {
   document.addEventListener(
     "contextmenu",
     (e: MouseEvent) => {
+      lastContextMenuTs = Date.now();
       emit("contextmenu", e.target, undefined, {
         button: e.button,
         clientX: Math.round(e.clientX),
@@ -1501,6 +1530,7 @@ export function setupEventListeners(): void {
         privacyCheck.isSensitiveField && e.key.length === 1 ? "[REDACTED]" : e.code;
 
       const mode = getConfig().mode;
+      if (e.ctrlKey || e.metaKey || e.altKey) lastShortcutKeyTs = Date.now();
       if (mode === "semantic") {
         const isShortcut = e.ctrlKey || e.metaKey || e.altKey || /^F([1-9]|1[0-2])$/.test(e.key);
         const isActionKey = [
@@ -1835,6 +1865,7 @@ export function setupEventListeners(): void {
         cleanText,
         {
           privacy,
+          ...clipboardTrigger("copy"),
           ...(sourceSummary ? { pageSummary: { source: sourceSummary } } : {}),
         },
         {
@@ -1865,7 +1896,7 @@ export function setupEventListeners(): void {
         "cut",
         e.target,
         cleanText,
-        { privacy },
+        { privacy, ...clipboardTrigger("cut") },
         {
           fromApp: location.hostname || "local-page",
           text: cleanText,
@@ -1896,6 +1927,7 @@ export function setupEventListeners(): void {
         cleanText,
         {
           privacy,
+          ...clipboardTrigger("paste"),
           ...(targetSummary ? { pageSummary: { target: targetSummary } } : {}),
         },
         {

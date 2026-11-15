@@ -40,6 +40,7 @@ import {
 } from "./propose.ts";
 import { buildCombinedReport, buildReport } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
+import { suggestFlowTip } from "./tips.ts";
 import { appendEvents, listSessions, readEvents } from "./trace.ts";
 import { parseEvents } from "./validate.ts";
 import { compileWorkflow, type IrisWorkflowJudge } from "./v2/index.ts";
@@ -89,6 +90,8 @@ export type CreateServerOptions = {
     opts?: { name?: string; context?: ImplementContext },
   ) => Promise<LibraryEntry>;
   autoPropose?: boolean;
+  flowTips?: boolean;
+  tipGemini?: GeminiClient | GeminiClientOptions;
   proposeDebounceMs?: number;
   siteCooldownMs?: number;
   precheckTimeoutMs?: number;
@@ -98,7 +101,7 @@ export type CreateServerOptions = {
 
 type HandsCommand =
   | { id: string; kind?: "run"; script: ActionScript; paramValues?: Record<string, string> }
-  | { id: string; kind: "decide"; name: string; solution: string; script: ActionScript }
+  | { id: string; kind: "decide"; name: string; solution: string; script: ActionScript; primaryLabel?: string }
   | {
       id: string;
       kind: "precheck";
@@ -280,6 +283,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
     name: string;
     solution: string;
     script: ActionScript;
+    primaryLabel?: string;
     timeoutMs?: number;
   }): Promise<{ id: string; outcome: HandsOutcome }> {
     const id = input.id ?? crypto.randomUUID();
@@ -288,7 +292,14 @@ export function createServer(opts: CreateServerOptions): http.Server {
       `[server] decide id=${id} name="${input.name}" steps=${input.script.steps.length}`,
     );
     const outcome = await awaitHands(
-      { id, kind: "decide", name: input.name, solution: input.solution, script: input.script },
+      {
+        id,
+        kind: "decide",
+        name: input.name,
+        solution: input.solution,
+        script: input.script,
+        ...(input.primaryLabel ? { primaryLabel: input.primaryLabel } : {}),
+      },
       timeoutMs,
       "Timed out waiting for user decision",
     );
@@ -444,11 +455,27 @@ export function createServer(opts: CreateServerOptions): http.Server {
               script.runMode === "run_remaining" || entry.kind === "snippet",
           };
         },
-        requestDecision: (name, solution, script) =>
+        requestDecision: (name, solution, script, primaryLabel) =>
           awaitHands(
-            { id: crypto.randomUUID(), kind: "decide", name, solution, script },
+            {
+              id: crypto.randomUUID(),
+              kind: "decide",
+              name,
+              solution,
+              script,
+              ...(primaryLabel ? { primaryLabel } : {}),
+            },
             60000,
           ),
+        suggestFlowTip: opts.flowTips
+          ? (events) =>
+              suggestFlowTip(
+                events,
+                opts.tipGemini && "generateJson" in opts.tipGemini
+                  ? { client: opts.tipGemini }
+                  : { gemini: opts.tipGemini },
+              )
+          : undefined,
         runScript: (script, paramValues) =>
           awaitHands(
             {
