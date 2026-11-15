@@ -488,12 +488,12 @@ export function createServer(opts: CreateServerOptions): http.Server {
             60000,
           ),
         suggestFlowTip: opts.flowTips
-          ? (events) =>
+          ? (events, exclude) =>
               suggestFlowTip(
                 events,
                 opts.tipGemini && "generateJson" in opts.tipGemini
-                  ? { client: opts.tipGemini }
-                  : { gemini: opts.tipGemini },
+                  ? { client: opts.tipGemini, exclude }
+                  : { gemini: opts.tipGemini, exclude },
               )
           : undefined,
         runScript: (script, paramValues) =>

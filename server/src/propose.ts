@@ -85,7 +85,7 @@ export type ProposerDeps = {
   log?: (line: string) => void;
   readSessionEvents: (sessionId: string) => Promise<Event[]>;
   compileV2: (input: CompileInput) => Promise<CompiledWorkflow | null>;
-  suggestFlowTip?: (events: Event[]) => Promise<FlowTip | null>;
+  suggestFlowTip?: (events: Event[], exclude?: string[]) => Promise<FlowTip | null>;
   precheck?: (script: ActionScript, meta: { startUrl?: string }) => Promise<PrecheckOutcome>;
   onCompiled?: (info: {
     sessionId: string;
@@ -318,7 +318,8 @@ export function createProposer(deps: ProposerDeps): Proposer {
   const lastSitePopupAt = new Map<string, number>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const queuedSessions = new Set<string>();
-  const shownFlowTipsBySession = new Map<string, Set<string>>();
+  const shownFlowTips = new Set<string>();
+  const shownFlowTipLabels: string[] = [];
   const flowTipCheckedAt = new Map<string, number>();
   let flowTipPending = false;
   let queue: Promise<void> = Promise.resolve();
@@ -408,6 +409,15 @@ export function createProposer(deps: ProposerDeps): Proposer {
     }
   }
 
+  function flowTipDedupeKey(suggestion: FlowTip): string {
+    const keysNorm = suggestion.keys
+      ?.map((k) => k.toLowerCase().replace(/[^a-z0-9]/g, ""))
+      .filter(Boolean)
+      .join("");
+    if (keysNorm) return `keys:${keysNorm}`;
+    return `tip:${(suggestion.tip ?? "").trim().toLowerCase().replace(/\s+/g, " ")}`;
+  }
+
   async function maybeFlowTip(sessionId: string, events: Event[]): Promise<void> {
     if (!deps.suggestFlowTip || flowTipPending) return;
     if (!hasRepeatedInteraction(events)) return;
@@ -417,21 +427,20 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
     let suggestion: FlowTip | null;
     try {
-      suggestion = await deps.suggestFlowTip(events);
+      suggestion = await deps.suggestFlowTip(
+        events,
+        shownFlowTipLabels.length > 0 ? [...shownFlowTipLabels] : undefined,
+      );
     } catch {
       return;
     }
     if (closed || !suggestion?.tip?.trim()) return;
 
+    const key = flowTipDedupeKey(suggestion);
+    if (shownFlowTips.has(key)) return;
     const name = suggestion.keys?.join(" → ") || suggestion.tip.trim();
-    const key = `${name}::${suggestion.tip.trim()}`;
-    let shown = shownFlowTipsBySession.get(sessionId);
-    if (!shown) {
-      shown = new Set<string>();
-      shownFlowTipsBySession.set(sessionId, shown);
-    }
-    if (shown.has(key)) return;
-    shown.add(key);
+    shownFlowTips.add(key);
+    shownFlowTipLabels.push(name);
 
     flowTipPending = true;
     try {

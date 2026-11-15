@@ -16,6 +16,7 @@ export type FlowTipOptions = {
   client?: GeminiClient;
   gemini?: GeminiClientOptions;
   minRepeats?: number;
+  exclude?: string[];
 };
 
 function isNonEmptyString(value: unknown): value is string {
@@ -129,7 +130,7 @@ function summarizeFlowEvents(events: Event[]): Array<Record<string, unknown>> {
   return out.slice(-40);
 }
 
-export function buildFlowTipPrompt(events: Event[]): string {
+export function buildFlowTipPrompt(events: Event[], exclude?: string[]): string {
   return [
     "You are an advisory flow coach. The user is repeating the same manual browser interaction pattern.",
     "Suggest ONE outside way to speed up this exact pattern: a keyboard shortcut (browser or the app), a built-in menu command, or an OS-level flow booster (e.g. clipboard history, window snapping).",
@@ -141,6 +142,9 @@ export function buildFlowTipPrompt(events: Event[]): string {
     'Each "keys" entry must be one complete shortcut (e.g. "Ctrl+C"), never a separate modifier/key token.',
     "Use tip: null and keys: null when the user already uses the faster shortcut or when no meaningful shortcut applies.",
     "Focus on the interaction shape and ignore personal values.",
+    ...(exclude && exclude.length > 0
+      ? [`Already shown (do NOT suggest these again): ${exclude.join(", ")}`]
+      : []),
     "",
     "Interaction sequence (most recent last, personal values omitted):",
     JSON.stringify(summarizeFlowEvents(events), null, 2),
@@ -154,5 +158,5 @@ export async function suggestFlowTip(
   if (!hasRepeatedInteraction(events, opts?.minRepeats)) return null;
   const client =
     opts?.client ?? createGeminiClient({ thinkingBudget: 0, ...opts?.gemini });
-  return client.generateJson(buildFlowTipPrompt(events), FlowTipSchema);
+  return client.generateJson(buildFlowTipPrompt(events, opts?.exclude), FlowTipSchema);
 }
