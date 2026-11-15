@@ -1377,7 +1377,7 @@ export async function handleHandsCommand(
       let payload: {
         id: string;
         ok: boolean;
-        decision?: "approved" | "dismissed";
+        decision?: "approved" | "dismissed" | "never";
         params?: Record<string, string>;
         error?: string;
       };
@@ -1425,7 +1425,7 @@ export async function handleHandsCommand(
         let res:
           | {
               ok?: boolean;
-              decision?: "approved" | "dismissed";
+              decision?: "approved" | "dismissed" | "never";
               params?: Record<string, string>;
               error?: string;
             }
@@ -1434,7 +1434,7 @@ export async function handleHandsCommand(
           res = (await api.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
             | {
                 ok?: boolean;
-                decision?: "approved" | "dismissed";
+                decision?: "approved" | "dismissed" | "never";
                 params?: Record<string, string>;
                 error?: string;
               }
@@ -1449,7 +1449,7 @@ export async function handleHandsCommand(
             res = (await api.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
               | {
                   ok?: boolean;
-                  decision?: "approved" | "dismissed";
+                  decision?: "approved" | "dismissed" | "never";
                   params?: Record<string, string>;
                   error?: string;
                 }
@@ -1459,7 +1459,12 @@ export async function handleHandsCommand(
           }
         }
         console.log("[eyes-bg] decider response from tab:", res);
-        if (!res?.ok || (res.decision !== "approved" && res.decision !== "dismissed")) {
+        if (
+          !res?.ok ||
+          (res.decision !== "approved" &&
+            res.decision !== "dismissed" &&
+            res.decision !== "never")
+        ) {
           throw new Error(res?.error ?? "Decider prompt failed");
         }
         if (res.decision === "approved") {

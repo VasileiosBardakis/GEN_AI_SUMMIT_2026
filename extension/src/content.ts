@@ -605,7 +605,10 @@ export function showWatchOverlay(options: WatchOverlayOptions = {}): void {
 }
 
 export interface ShowSuggestionOptions {
-  onDecision?: (decision: "approved" | "dismissed", paramValues?: Record<string, string>) => void;
+  onDecision?: (
+    decision: "approved" | "dismissed" | "never",
+    paramValues?: Record<string, string>,
+  ) => void;
   script?: ActionScript;
   force?: boolean;
   isRecall?: boolean;
@@ -637,7 +640,7 @@ export function showSuggestion(
 
   let settled = false;
   const resolveDecision = (
-    decision: "approved" | "dismissed",
+    decision: "approved" | "dismissed" | "never",
     paramValues?: Record<string, string>
   ): void => {
     if (settled) return;
@@ -1169,7 +1172,11 @@ export function showSuggestion(
         <div class="footer">
           <div class="meta">${escapeHtml(suggestion.meta)}</div>
           <div class="actions">
-            ${isFlowTip ? "" : '<button class="ghost" type="button" data-eyes-dismiss>Not now</button>'}
+            ${
+              isFlowTip
+                ? '<button class="ghost" type="button" data-eyes-never>Don\'t show again</button>'
+                : '<button class="ghost" type="button" data-eyes-dismiss>Not now</button>'
+            }
             <button class="primary" type="button" data-eyes-primary>${escapeHtml(primaryButtonLabel)}</button>
           </div>
         </div>
@@ -1189,6 +1196,10 @@ export function showSuggestion(
   for (const button of Array.from(shadow.querySelectorAll("[data-eyes-dismiss]"))) {
     button.addEventListener("click", dismiss);
   }
+  shadow.querySelector("[data-eyes-never]")?.addEventListener("click", () => {
+    resolveDecision("never");
+    host.remove();
+  });
   shadow.querySelector("[data-eyes-primary]")?.addEventListener("click", () => {
     let collectedParams: Record<string, string> | undefined;
     if (params.length > 0) {
