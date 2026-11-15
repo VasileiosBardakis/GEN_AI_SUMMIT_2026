@@ -785,6 +785,43 @@ export async function executeStep(
     return element;
   }
 
+  function readNonButtonText(element: Element): string {
+    const tag = element.tagName.toLowerCase();
+    const role = (element.getAttribute("role") || "").toLowerCase();
+    if (tag === "button" || role === "button") {
+      return (element.textContent ?? "").trim();
+    }
+    const childNodes = (element as { childNodes?: ArrayLike<Node> }).childNodes;
+    if (!childNodes || childNodes.length === 0) {
+      return (element.textContent ?? "").trim();
+    }
+    const parts: string[] = [];
+    const walk = (node: Node): void => {
+      if (node.nodeType === 3) {
+        parts.push(node.textContent ?? "");
+        return;
+      }
+      if (node.nodeType === 1) {
+        const el = node as Element;
+        const elTag = el.tagName?.toLowerCase();
+        const elRole = (el.getAttribute?.("role") || "").toLowerCase();
+        if (elTag === "button" || elRole === "button") return;
+        if (isExplicitlyHidden(el)) return;
+        const children = (el as { childNodes?: ArrayLike<Node> }).childNodes;
+        if (children && children.length > 0) {
+          for (const child of Array.from(children)) walk(child);
+        } else if (el.textContent) {
+          parts.push(el.textContent);
+        }
+      }
+    };
+    for (const child of Array.from(childNodes)) {
+      walk(child);
+    }
+    const cleaned = collapseWs(parts.join(""));
+    return cleaned || (element.textContent ?? "").trim();
+  }
+
   function readValue(rawElement: Element): string {
     const element = unwrapControl(rawElement);
     const tag = element.tagName.toLowerCase();
@@ -801,7 +838,7 @@ export async function executeStep(
     if ((element as HTMLElement).isContentEditable) {
       return (element as HTMLElement).innerText ?? element.textContent ?? "";
     }
-    return (element.textContent ?? "").trim();
+    return readNonButtonText(element);
   }
 
   function setNativeValue(element: HTMLInputElement | HTMLTextAreaElement, value: string): void {
