@@ -302,9 +302,7 @@ export function mergeServerAndLocalOptimizations(
   for (const item of localItems) {
     if (serverIds.has(item.id)) continue;
     if (DEFAULT_MOCK_IDS.has(item.id)) continue;
-    if (item.status === "suggested") {
-      merged.push(item);
-    }
+    merged.push(item);
   }
 
   return merged;

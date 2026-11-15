@@ -154,3 +154,63 @@ test("extension panel renders saved workflow with real stats and runs script on 
     await env.cleanup();
   }
 });
+
+test("extension panel preserves locally activated workflow across reload when missing from GET /library", async () => {
+  const env = await launchExtensionContext();
+
+  try {
+    await env.context.route("http://localhost:8787/library", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, items: [] }),
+      });
+    });
+
+    const suggestedWorkflow = {
+      id: "local_suggested_workflow_1",
+      title: "Sync order number to dispatch",
+      description: "Copies order reference into dispatch form.",
+      kind: "workflow",
+      status: "suggested",
+      app: "Dispatch Portal",
+      preview: "Sync order number",
+      timeSavedPerRunSec: 18,
+      runCount: 0,
+      totalTimeSavedSec: 0,
+      detectedCount: 3,
+      createdAt: 1_000,
+    };
+
+    const panel = await env.context.newPage();
+    await panel.goto(`chrome-extension://${env.extensionId}/dist/panel.html`, {
+      waitUntil: "domcontentloaded",
+    });
+
+    await panel.evaluate(async (item) => {
+      const chromeApi = (globalThis as {
+        chrome?: { storage?: { local?: { set: (items: Record<string, unknown>) => Promise<void> } } };
+      }).chrome;
+      await chromeApi?.storage?.local?.set({
+        eyes_optimization_library_v1: [item],
+      });
+    }, suggestedWorkflow);
+
+    const cards = panel.locator(".opt-card");
+    await expect(cards).toHaveCount(1);
+    await expect(panel.locator("#sum-active")).toHaveText("0");
+
+    await cards.first().locator('[data-action="activate"]').click();
+    await expect(panel.locator("#sum-active")).toHaveText("1");
+
+    await panel.reload({ waitUntil: "domcontentloaded" });
+
+    await expect(panel.locator(".opt-card")).toHaveCount(1);
+    await expect(panel.locator(".opt-card").first()).toContainText(
+      "Sync order number to dispatch"
+    );
+    await expect(panel.locator("#sum-active")).toHaveText("1");
+  } finally {
+    await env.cleanup();
+  }
+});
