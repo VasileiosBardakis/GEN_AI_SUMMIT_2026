@@ -137,7 +137,7 @@ export async function executeStep(
     submit: "button",
     reset: "button",
   };
-  const TEXT_NAMED_ROLES = new Set(["button", "link", "menuitem", "tab", "option"]);
+  const TEXT_NAMED_ROLES = new Set(["button", "link", "menuitem", "tab", "option", "gridcell"]);
   const TEXTBOX_EQUIVALENTS = new Set(["textbox", "searchbox"]);
 
   function implicitRole(element: Element): string {
@@ -246,7 +246,7 @@ export async function executeStep(
 
     const candidates = Array.from(
       root.querySelectorAll(
-        'input, textarea, select, button, a, summary, [role], [aria-label], [aria-labelledby], [contenteditable="true"]',
+        'input, textarea, select, button, a, summary, td, th, [role], [aria-label], [aria-labelledby], [contenteditable="true"]',
       ),
     ).filter((el) => !wantedRole || roleMatches(implicitRole(el), wantedRole));
 
@@ -370,10 +370,30 @@ export async function executeStep(
   function resolveAllForLocator(locator: Locator, root: ParentNode = document): Element[] {
     if (locator.kind === "css") {
       try {
-        return Array.from(root.querySelectorAll(locator.value));
+        const direct = Array.from(root.querySelectorAll(locator.value));
+        if (direct.length > 0) return direct;
       } catch {
-        return [];
+        // fall through to structural fallbacks below
       }
+      const trimmed = locator.value.trim();
+      if (/^tr:has\(td\)$/i.test(trimmed)) {
+        return Array.from(root.querySelectorAll("tr")).filter(
+          (tr) => tr.querySelectorAll("td").length > 0,
+        );
+      }
+      const nthTdMatch = /^td:nth-of-type\((\d+)\)$/i.exec(trimmed);
+      if (nthTdMatch) {
+        const idx = Number(nthTdMatch[1]) - 1;
+        if (idx >= 0) {
+          const children = Array.from((root as Element).children ?? []).filter(
+            (el) => el.tagName.toLowerCase() === "td",
+          );
+          if (children[idx]) return [children[idx]];
+          const allTds = Array.from(root.querySelectorAll("td"));
+          if (allTds[idx]) return [allTds[idx]];
+        }
+      }
+      return [];
     }
     if (locator.kind === "xpath") {
       if (typeof document.evaluate !== "function") return [];
@@ -1113,7 +1133,9 @@ export async function executeStep(
       case "extractList": {
         const roots = await resolveExtractRoots();
         if (roots.length === 0) throw new Error("Target not found");
-        const items = roots.map((row) => {
+        const visibleRoots = roots.filter(isVisible);
+        const targetRoots = visibleRoots.length > 0 ? visibleRoots : roots;
+        const items = targetRoots.map((row) => {
           if (!step.fields) return { text: readValue(row) };
           const item: Record<string, string> = {};
           for (const [name, locator] of Object.entries(step.fields)) {

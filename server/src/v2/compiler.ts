@@ -1643,6 +1643,7 @@ function resolveSteps(
   for (const raw of rawSteps) {
     if (raw.action === "forEach") {
       let resolvedItems: string | Record<string, string>[] | undefined;
+      let sourceList: PageSummaryList | undefined;
 
       const explicitItemIds = raw.itemIds && raw.itemIds.length > 0 ? raw.itemIds : [];
 
@@ -1658,32 +1659,54 @@ function resolveSteps(
         if (rows.length > 0) {
           resolvedItems = rows;
         }
+        for (const list of ctx.lists.values()) {
+          if (list.items.some((it) => explicitItemIds.includes(it.id))) {
+            sourceList = list;
+            break;
+          }
+        }
       } else if (raw.items && raw.items.trim()) {
         const key = stripParamBraces(raw.items);
         const list = ctx.lists.get(key);
         if (list && list.items.length > 0) {
           recordLocation(!isPlaceholderHost(list.host) ? list.host : undefined);
           resolvedItems = list.items.map((item) => ({ ...item.fields }));
+          sourceList = list;
         } else if (key) {
           resolvedItems = key;
         }
       }
 
+      const sourceContainerId = sourceList?.containerId;
+      const sourceMeta = sourceContainerId
+        ? ctx.sourceMetaByContainerId.get(sourceContainerId)
+        : undefined;
+      const containerTarget = sourceContainerId
+        ? ctx.targets.get(sourceContainerId)
+        : undefined;
+
       const childRawSteps = raw.steps;
-      if (!resolvedItems || !childRawSteps || childRawSteps.length === 0) {
+      if ((!resolvedItems && !sourceMeta) || !childRawSteps || childRawSteps.length === 0) {
         return null;
       }
 
+      const sampleRows =
+        Array.isArray(resolvedItems) && resolvedItems.length > 0
+          ? resolvedItems
+          : sourceList && sourceList.items.length > 0
+            ? sourceList.items.map((item) => item.fields)
+            : undefined;
+
       let loopItemKeys: ReadonlySet<string> | undefined;
       let fallbackItemKey: string | undefined;
-      if (Array.isArray(resolvedItems) && resolvedItems.length > 0) {
-        const keys = Object.keys(resolvedItems[0]);
+      if (sampleRows && sampleRows.length > 0) {
+        const keys = Object.keys(sampleRows[0]);
         const distinctKeys = keys.filter((k) => {
-          const vals = resolvedItems.map((r) => (r as Record<string, string>)[k]);
+          const vals = sampleRows.map((r) => r[k]);
           return vals.every(Boolean) && new Set(vals).size === vals.length;
         });
         loopItemKeys = new Set(
-          resolvedItems.length > 1 && distinctKeys.length > 0 ? distinctKeys : keys,
+          sampleRows.length > 1 && distinctKeys.length > 0 ? distinctKeys : keys,
         );
         fallbackItemKey = distinctKeys[0] ?? keys[0];
       }
@@ -1709,9 +1732,41 @@ function resolveSteps(
         return null;
       }
 
+      if (sourceMeta) {
+        const rowLocators: Locator[] = [
+          {
+            kind: "css",
+            value: sourceMeta.rowTag === "tr" ? "tr:has(td)" : sourceMeta.rowTag,
+          },
+        ];
+        const containerLocators = containerTarget
+          ? dedupeLocators(containerTarget.locators.map((l) => ({ ...l })))
+          : [];
+        const fields: Record<string, Locator[]> = {};
+        for (let i = 0; i < sourceMeta.columns.length; i += 1) {
+          const col = sourceMeta.columns[i];
+          if (col.invariantLocators.length > 0) {
+            fields[`col${i + 1}`] = [{ ...col.invariantLocators[0] }];
+          }
+        }
+        const hasExtractRows = out.some(
+          (s) => s.action === "extractList" && s.bind === "rows",
+        );
+        if (!hasExtractRows) {
+          out.push({
+            action: "extractList",
+            target: rowLocators,
+            ...(containerLocators.length > 0 ? { within: containerLocators } : {}),
+            bind: "rows",
+            ...(Object.keys(fields).length > 0 ? { fields } : {}),
+          });
+        }
+        resolvedItems = "rows";
+      }
+
       out.push({
         action: "forEach",
-        items: resolvedItems,
+        items: resolvedItems!,
         steps: nestedSteps,
         ...(raw.optional !== undefined ? { optional: raw.optional } : {}),
       });

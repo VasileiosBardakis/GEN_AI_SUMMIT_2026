@@ -18,10 +18,15 @@ import {
   recordLibraryRun,
   upsertLibraryEntry,
 } from "./hands/library.ts";
-import { createLibraryRecallMatcher } from "./hands/recall.ts";
+import {
+  computeMatchedPrefix,
+  createLibraryRecallMatcher,
+  extractMatchedPrefixBindings,
+} from "./hands/recall.ts";
 import {
   LibraryEntrySchema,
   parseActionScript,
+  toLocatorList,
   type ActionScript,
   type LibraryEntry,
   type Locator,
@@ -98,7 +103,13 @@ export type CreateServerOptions = {
 };
 
 type HandsCommand =
-  | { id: string; kind?: "run"; script: ActionScript; paramValues?: Record<string, string> }
+  | {
+      id: string;
+      kind?: "run";
+      script: ActionScript;
+      paramValues?: Record<string, string>;
+      skipRowValues?: string[];
+    }
   | {
       id: string;
       kind: "decide";
@@ -320,6 +331,121 @@ export function createServer(opts: CreateServerOptions): http.Server {
     return { id, outcome };
   }
 
+  function sliceRecallSteps(
+    steps: ActionScript["steps"],
+    startStepIndex: number,
+  ): ActionScript["steps"] {
+    if (startStepIndex <= 0 || startStepIndex >= steps.length) {
+      return steps;
+    }
+    const prefix = steps.slice(0, startStepIndex);
+    const remaining = steps.slice(startStepIndex);
+    const neededLoopBinds = new Set<string>();
+    for (const s of remaining) {
+      if (s.action === "forEach" && typeof s.items === "string" && s.items.trim()) {
+        neededLoopBinds.add(s.items.trim());
+      }
+    }
+    if (neededLoopBinds.size > 0) {
+      const hasExtractInRemaining = new Set(
+        remaining
+          .filter(
+            (s): s is Extract<ActionScript["steps"][number], { action: "extractList" }> =>
+              s.action === "extractList",
+          )
+          .map((s) => s.bind),
+      );
+      const preservedExtracts = prefix.filter(
+        (s): s is Extract<ActionScript["steps"][number], { action: "extractList" }> =>
+          s.action === "extractList" &&
+          neededLoopBinds.has(s.bind) &&
+          !hasExtractInRemaining.has(s.bind),
+      );
+      if (preservedExtracts.length > 0) {
+        return [...preservedExtracts, ...remaining];
+      }
+    }
+    return remaining;
+  }
+
+  function mergeBoundParams(
+    params: ActionScript["params"],
+    boundValues: Record<string, string>,
+  ): ActionScript["params"] {
+    const entries = Object.entries(boundValues).filter(([, v]) => v.length > 0);
+    if (entries.length === 0) return params;
+    const out = params ? params.map((p) => ({ ...p })) : [];
+    for (const [name, value] of entries) {
+      const idx = out.findIndex((p) => p.name === name);
+      if (idx >= 0) {
+        if (!out[idx].example) out[idx].example = value;
+      } else {
+        out.push({ name, example: value });
+      }
+    }
+    return out.length > 0 ? out : undefined;
+  }
+
+  function findTypedFieldEvent(
+    sessionEvents: readonly Event[],
+    typedStep: ActionScript["steps"][number] | undefined,
+    stepLocators: readonly Locator[],
+  ): Event | undefined {
+    const candidates = sessionEvents.filter(
+      (ev) =>
+        (ev.type === "input" ||
+          ev.type === "change" ||
+          ev.type === "paste" ||
+          ev.type === "focus") &&
+        Boolean(ev.target?.locators?.length),
+    );
+    if (candidates.length === 0) return undefined;
+
+    if (stepLocators.length > 0) {
+      for (let i = candidates.length - 1; i >= 0; i -= 1) {
+        const ev = candidates[i];
+        const hit = ev.target?.locators?.some((el) =>
+          stepLocators.some(
+            (sl) =>
+              sl.kind === el.kind &&
+              sl.value.trim().toLowerCase() === el.value.trim().toLowerCase(),
+          ),
+        );
+        if (hit) return ev;
+      }
+    }
+
+    if (
+      typedStep &&
+      "value" in typedStep &&
+      typeof typedStep.value === "string" &&
+      typedStep.value.trim().length > 0
+    ) {
+      const needle = typedStep.value.trim().toLowerCase();
+      for (let i = candidates.length - 1; i >= 0; i -= 1) {
+        const ev = candidates[i];
+        const val = (ev.value ?? ev.clipboard?.text ?? "").trim().toLowerCase();
+        if (val && (val === needle || val.includes(needle))) {
+          return ev;
+        }
+      }
+    }
+
+    for (let i = candidates.length - 1; i >= 0; i -= 1) {
+      if (candidates[i].type !== "focus") return candidates[i];
+    }
+    return candidates[candidates.length - 1];
+  }
+
+  function inferRoleFromTag(tag?: string): string | undefined {
+    const clean = tag?.trim().toLowerCase();
+    if (!clean) return undefined;
+    if (clean === "input" || clean === "textarea") return "textbox";
+    if (clean === "select") return "combobox";
+    if (clean === "button") return "button";
+    return undefined;
+  }
+
   async function triggerLibraryRecall(entry: LibraryEntry, matchedEvent?: Event): Promise<void> {
     if (activeLibraryDecide) return;
     const commandId = crypto.randomUUID();
@@ -327,10 +453,22 @@ export function createServer(opts: CreateServerOptions): http.Server {
     const targetKey = targetLocator ? `${targetLocator.kind}:${targetLocator.value}` : null;
     activeLibraryDecide = { entryId: entry.id, commandId, targetKey };
     try {
-      const recallDecideScript: ActionScript =
-        entry.script.runMode === "save_only"
-          ? { ...entry.script, runMode: "run_remaining" }
-          : entry.script;
+      const sessionEvents = matchedEvent?.session
+        ? await readEvents(opts.tracesDir, matchedEvent.session).catch(() => [])
+        : [];
+      const { startStepIndex, completedValues } = computeMatchedPrefix(
+        sessionEvents,
+        entry,
+      );
+      const boundValues =
+        startStepIndex > 0 ? extractMatchedPrefixBindings(sessionEvents, entry) : {};
+      const adjustedSteps = sliceRecallSteps(entry.script.steps, startStepIndex);
+
+      const recallDecideScript: ActionScript = {
+        ...entry.script,
+        steps: adjustedSteps,
+        ...(entry.script.runMode === "save_only" ? { runMode: "run_remaining" as const } : {}),
+      };
       const { outcome } = await requestDecision({
         id: commandId,
         name: entry.name,
@@ -351,26 +489,30 @@ export function createServer(opts: CreateServerOptions): http.Server {
         }
         await recordLibraryRun(dataDir, entry.id).catch(() => {});
         const runId = crypto.randomUUID();
-        const firstStep = entry.script.steps[0];
-        const scriptToRun: ActionScript =
+        const firstAdjusted = adjustedSteps[0];
+        const runSteps: ActionScript["steps"] =
           entry.kind === "snippet" &&
-          entry.script.steps.length === 1 &&
-          firstStep?.action === "insertText" &&
-          !firstStep.target &&
+          adjustedSteps.length === 1 &&
+          firstAdjusted?.action === "insertText" &&
+          !firstAdjusted.target &&
           targetLocator
-            ? {
-                ...entry.script,
-                steps: [{ ...firstStep, target: targetLocator }],
-              }
-            : entry.script;
+            ? [{ ...firstAdjusted, target: targetLocator }]
+            : adjustedSteps;
+        const mergedParams = mergeBoundParams(entry.script.params, boundValues);
+        const scriptToRun: ActionScript = {
+          ...entry.script,
+          steps: runSteps,
+          ...(mergedParams ? { params: mergedParams } : {}),
+        };
         console.log(
-          `[server] library recall approved id=${entry.id} -> running script runId=${runId} target=${targetLocator?.value ?? "focused"}`,
+          `[server] library recall approved id=${entry.id} -> running script runId=${runId} startStepIndex=${startStepIndex} target=${targetLocator?.value ?? "focused"}`,
         );
         void awaitHands(
           {
             id: runId,
             script: scriptToRun,
             ...(outcome.params ? { paramValues: outcome.params } : {}),
+            ...(completedValues.length > 0 ? { skipRowValues: completedValues } : {}),
           },
           30000,
           "Timed out waiting for extension to execute script",
@@ -423,9 +565,48 @@ export function createServer(opts: CreateServerOptions): http.Server {
           latestScript = script;
         },
         onApproved: async ({ sessionId, script, workflow, finding }) => {
+          const flatSteps = collectFlatSteps(script.steps);
+          const typedStep =
+            flatSteps.find(
+              (s) => s.action === "insertText" || s.action === "fill",
+            ) ?? flatSteps.find((s) => "target" in s && Boolean(s.target));
+          const stepLocators =
+            typedStep && "target" in typedStep
+              ? toLocatorList(typedStep.target)
+              : [];
+          const sessionEvents = await readEvents(opts.tracesDir, sessionId).catch(
+            () => [],
+          );
+          const typedEvent = findTypedFieldEvent(
+            sessionEvents,
+            typedStep,
+            stepLocators,
+          );
+          const eventLocators = typedEvent?.target?.locators
+            ? typedEvent.target.locators
+                .map(toHandsLocator)
+                .filter((l): l is Locator => Boolean(l))
+            : [];
+          const mergedLocators: Locator[] = [];
+          const seenLocKeys = new Set<string>();
+          for (const loc of [...stepLocators, ...eventLocators]) {
+            const key = `${loc.kind}:${loc.value}`;
+            if (!seenLocKeys.has(key)) {
+              seenLocKeys.add(key);
+              mergedLocators.push(loc);
+            }
+          }
+          const targetLabel = typedEvent?.target?.label?.trim() || undefined;
+          const targetRole =
+            typedEvent?.target?.role?.trim() ||
+            inferRoleFromTag(typedEvent?.target?.tag);
+
           const context: ImplementContext = {
             ...(workflow?.apps[0] ? { app: workflow.apps[0] } : {}),
             ...(workflow?.startUrl ? { url: workflow.startUrl } : {}),
+            ...(mergedLocators.length > 0 ? { locators: mergedLocators } : {}),
+            ...(targetLabel ? { targetLabel } : {}),
+            ...(targetRole ? { targetRole } : {}),
           };
           const built = buildLibraryEntryFromScript({
             name: workflow?.name ?? script.name ?? finding.title,

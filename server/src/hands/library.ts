@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { LibraryEntrySchema, type LibraryEntry } from "./types.ts";
+import { LibraryEntrySchema, type LibraryEntry, type Locator } from "./types.ts";
 
 const LIBRARY_FILENAME = "library.json";
 
@@ -51,13 +51,63 @@ export async function writeLibrary(
   );
 }
 
+function normalizeSnippetText(raw: string): string {
+  return raw.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function getSnippetInsertText(entry: LibraryEntry): string | null {
+  if (entry.kind !== "snippet") return null;
+  const insertStep = entry.script.steps.find(
+    (s): s is Extract<LibraryEntry["script"]["steps"][number], { action: "insertText" }> =>
+      s.action === "insertText",
+  );
+  if (!insertStep || typeof insertStep.value !== "string") return null;
+  const normalized = normalizeSnippetText(insertStep.value);
+  return normalized.length > 0 ? normalized : null;
+}
+
+function dedupeStrings(values: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const val of values) {
+    const clean = val.trim();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    out.push(clean);
+  }
+  return out;
+}
+
+function dedupeLocators(locators: readonly Locator[]): Locator[] {
+  const out: Locator[] = [];
+  const seen = new Set<string>();
+  for (const loc of locators) {
+    const value = loc.value.trim();
+    if (!value) continue;
+    const key = `${loc.kind}:${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ kind: loc.kind, value });
+  }
+  return out;
+}
+
 export async function upsertLibraryEntry(
   dataDir: string,
   incoming: LibraryEntry,
 ): Promise<{ entry: LibraryEntry; items: LibraryEntry[] }> {
   const validIncoming = LibraryEntrySchema.parse(incoming);
   const existingItems = await readLibrary(dataDir);
-  const idx = existingItems.findIndex((item) => item.id === validIncoming.id);
+  let idx = existingItems.findIndex((item) => item.id === validIncoming.id);
+
+  if (idx === -1 && validIncoming.kind === "snippet") {
+    const incomingText = getSnippetInsertText(validIncoming);
+    if (incomingText !== null) {
+      idx = existingItems.findIndex(
+        (item) => getSnippetInsertText(item) === incomingText,
+      );
+    }
+  }
 
   if (idx === -1) {
     const next = [validIncoming, ...existingItems];
@@ -68,7 +118,49 @@ export async function upsertLibraryEntry(
   const existing = existingItems[idx];
   const merged: LibraryEntry = {
     ...validIncoming,
-    status: existing.status,
+    id: existing.id,
+    status:
+      existing.status === "suggested" && validIncoming.status === "active"
+        ? "active"
+        : existing.status,
+    eyes: {
+      ...validIncoming.eyes,
+      scope: {
+        apps: dedupeStrings([
+          ...existing.eyes.scope.apps,
+          ...validIncoming.eyes.scope.apps,
+        ]),
+        urlPatterns: dedupeStrings([
+          ...existing.eyes.scope.urlPatterns,
+          ...validIncoming.eyes.scope.urlPatterns,
+        ]),
+        pageHints: dedupeStrings([
+          ...existing.eyes.scope.pageHints,
+          ...validIncoming.eyes.scope.pageHints,
+        ]),
+      },
+      targetHints: {
+        roles: dedupeStrings([
+          ...existing.eyes.targetHints.roles,
+          ...validIncoming.eyes.targetHints.roles,
+        ]),
+        labelContains: dedupeStrings([
+          ...existing.eyes.targetHints.labelContains,
+          ...validIncoming.eyes.targetHints.labelContains,
+        ]),
+        locators: dedupeLocators([
+          ...existing.eyes.targetHints.locators,
+          ...validIncoming.eyes.targetHints.locators,
+        ]),
+      },
+      textHints: {
+        ...validIncoming.eyes.textHints,
+        prefixHints: dedupeStrings([
+          ...existing.eyes.textHints.prefixHints,
+          ...validIncoming.eyes.textHints.prefixHints,
+        ]),
+      },
+    },
     createdAt: existing.createdAt,
     updatedAt: validIncoming.updatedAt,
     runCount: existing.runCount,

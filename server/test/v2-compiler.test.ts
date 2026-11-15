@@ -1175,14 +1175,26 @@ describe("Brain v2 compiler and validator", () => {
 
     expect(wf).not.toBeNull();
     expect(wf!.runMode).toBe("run_remaining");
-    const loop = wf!.steps[1];
+    const extract = wf!.steps[1];
+    expect(extract.action).toBe("extractList");
+    if (extract.action === "extractList") {
+      expect(extract.target).toEqual([{ kind: "css", value: "tr:has(td)" }]);
+      expect(extract.within).toEqual([
+        { kind: "testid", value: "sheet-table" },
+        { kind: "css", value: "#sheet-panel > section > table" },
+      ]);
+      expect(extract.bind).toBe("rows");
+      expect(extract.fields).toEqual({
+        col1: [{ kind: "css", value: "td:nth-of-type(1)" }],
+        col2: [{ kind: "css", value: "td:nth-of-type(2)" }],
+        col3: [{ kind: "aria", value: 'gridcell[name="Copy"]' }],
+      });
+    }
+
+    const loop = wf!.steps[2];
     expect(loop.action).toBe("forEach");
-    if (loop.action === "forEach" && Array.isArray(loop.items)) {
-      expect(loop.items).toHaveLength(2);
-      expect(loop.items[0].col1).toBe("boreal@example.com");
-      expect(loop.items[0].col2).toBe("RATE-3190");
-      expect(loop.items[1].col1).toBe("Vanguard Marine Inc");
-      expect(loop.items[1].col2).toBe("RATE-4418");
+    if (loop.action === "forEach") {
+      expect(loop.items).toBe("rows");
 
       const openStep = loop.steps[0];
       expect(openStep.action).toBe("click");
