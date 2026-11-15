@@ -80,6 +80,8 @@ const INCLUDED_EVENT_TYPES = new Set<Event["type"]>([
   "copy",
   "nav",
   "submit",
+  "key",
+  "keydown",
 ]);
 
 const SHORTCUT_RE =
@@ -214,9 +216,40 @@ function mapEventsToSteps(steps: Step[], events?: Event[]): EventStepMapping {
       });
       stepIndexByEvent.set(evIdx, collapsed.length - 1);
       lastKey = "";
+    } else if (ev.type === "key" || ev.type === "keydown") {
+      if (ev.meta?.key !== "Enter") continue;
+      collapsed.push({
+        action: "submit",
+        startTs: ev.ts,
+        endTs: ev.ts,
+        app: ev.app,
+        label: ev.target?.label,
+        lastValue: "Enter",
+      });
+      stepIndexByEvent.set(evIdx, collapsed.length - 1);
+      lastKey = eventTargetKey(ev.target);
+    } else if (ev.type === "submit") {
+      const prev = collapsed[collapsed.length - 1];
+      if (prev && prev.action === "submit" && prev.lastValue === "Enter") {
+        prev.endTs = ev.ts;
+        prev.lastValue = undefined;
+        if (!prev.label && ev.target?.label) {
+          prev.label = ev.target.label;
+        }
+        stepIndexByEvent.set(evIdx, collapsed.length - 1);
+      } else {
+        collapsed.push({
+          action: "submit",
+          startTs: ev.ts,
+          endTs: ev.ts,
+          app: ev.app,
+          label: ev.target?.label,
+        });
+        stepIndexByEvent.set(evIdx, collapsed.length - 1);
+      }
+      lastKey = eventTargetKey(ev.target);
     } else if (
       ev.type === "click" ||
-      ev.type === "submit" ||
       ev.type === "paste" ||
       ev.type === "copy"
     ) {
@@ -294,7 +327,7 @@ function splitIntoSequences(
       continue;
     }
 
-    if (item.step.action === "submit") {
+    if (item.step.action === "submit" && item.step.value !== "Enter") {
       current.push(item);
       flush();
       continue;
@@ -307,7 +340,9 @@ function splitIntoSequences(
   const afterLoopSplit: IndexedStep[][] = [];
   for (const seq of initialSeqs) {
     if (seq.length === 0) continue;
-    const hasSubmit = seq.some((s) => s.step.action === "submit");
+    const hasSubmit = seq.some(
+      (s) => s.step.action === "submit" && s.step.value !== "Enter",
+    );
     if (!hasSubmit) {
       const firstKey = seq[0].key;
       const splitIndices: number[] = [0];
@@ -833,6 +868,11 @@ export function buildSolutionText(
           rawLines.push(`readText from ${targetDesc} into "{{${param}}}"`);
           continue;
         }
+      }
+
+      if (step.action === "submit") {
+        rawLines.push(`pressKey "Enter" on ${targetDesc}`);
+        continue;
       }
 
       const isSelect = step.action === "fill" && isSelectStep(step, events);

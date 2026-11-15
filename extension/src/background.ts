@@ -1,9 +1,9 @@
 import { executeStep } from "./hands/execute.js";
 import type { V2DomStep } from "./hands/execute.js";
-import type { ActionScript, BindingValue, Locator, StepResult } from "./types.js";
+import type { ActionScript, BindingValue, Locator, ScriptParam, StepResult } from "./types.js";
 import type { Event } from "@gen/shared";
 import type { LibraryEntry } from "@gen/shared/schema.ts";
-import { sanitizeUrl } from "./privacy.ts";
+import { rememberLocalPii, restoreLocalPiiText, sanitizeUrl } from "./privacy.ts";
 import { createSuggestionEngine, type SuggestionEngine, type TextCluster } from "./suggestion.ts";
 import {
   createDefaultOptimizations,
@@ -53,12 +53,15 @@ type V2ActionScript = {
   name?: string;
   steps: V2Step[];
   pauseBeforeSubmit?: boolean;
+  runMode?: "run_remaining" | "save_only";
+  params?: ScriptParam[];
   pageSummary?: unknown;
 };
 
 interface ChromeRuntimeMessage {
   kind?: string;
   event?: Event;
+  localPii?: Record<string, string>;
   script?: V2ActionScript;
   id?: string;
   item?: OptimizationItem;
@@ -231,7 +234,53 @@ function getChromeApi(): ChromeApi | undefined {
 const chromeApi = getChromeApi();
 
 const TEXT_CLUSTERS_STORAGE_KEY = "eyes_text_clusters_v1";
+const LOCAL_PII_STORAGE_KEY = "eyes_local_pii_v1";
 export const BROWSER_SESSION_ID = "sess_browser_" + Math.random().toString(36).slice(2, 10);
+
+const bgLocalPiiByHash = new Map<string, string>();
+let localPiiLoaded = false;
+
+async function ensureLocalPiiLoaded(): Promise<void> {
+  if (localPiiLoaded) return;
+  localPiiLoaded = true;
+  try {
+    const stored = await getChromeApi()?.storage?.local?.get(LOCAL_PII_STORAGE_KEY);
+    const raw = stored?.[LOCAL_PII_STORAGE_KEY];
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [h, v] of Object.entries(raw as Record<string, unknown>)) {
+        if (typeof v === "string" && h) {
+          bgLocalPiiByHash.set(h, v);
+          rememberLocalPii(h, v);
+        }
+      }
+    }
+  } catch {
+    // ignore storage read error
+  }
+}
+
+function recordLocalPiiEntries(entries?: Record<string, string>): void {
+  if (!entries || typeof entries !== "object" || Array.isArray(entries)) return;
+  let changed = false;
+  for (const [hash, rawVal] of Object.entries(entries)) {
+    if (typeof rawVal === "string" && hash && bgLocalPiiByHash.get(hash) !== rawVal) {
+      bgLocalPiiByHash.set(hash, rawVal);
+      rememberLocalPii(hash, rawVal);
+      changed = true;
+    }
+  }
+  if (changed) {
+    const obj = Object.fromEntries(bgLocalPiiByHash.entries());
+    void getChromeApi()?.storage?.local?.set({ [LOCAL_PII_STORAGE_KEY]: obj }).catch(() => {});
+  }
+}
+
+async function resolveLocalPiiByHash(hash: string): Promise<string | undefined> {
+  const cached = bgLocalPiiByHash.get(hash);
+  if (cached !== undefined) return cached;
+  await ensureLocalPiiLoaded();
+  return bgLocalPiiByHash.get(hash);
+}
 
 type RunControl = {
   aborted: boolean;
@@ -418,6 +467,9 @@ export function handleRuntimeMessage(
     void pollHandsBridge();
   }
   if (msg?.kind === "EYES_EVENT" && msg.event) {
+    if (msg.localPii) {
+      recordLocalPiiEntries(msg.localPii);
+    }
     const tabId = sender.tab?.id;
     if (tabId !== undefined) {
       lastActiveTab = {
@@ -827,6 +879,14 @@ function normalizeUrlPath(pathname: string): string {
   return pathname;
 }
 
+export function normalizeLoopbackHost(host: string): string {
+  const lower = host.trim().toLowerCase();
+  if (lower === "127.0.0.1" || lower === "::1" || lower === "[::1]") return "localhost";
+  if (lower.startsWith("127.0.0.1:")) return `localhost${lower.slice("127.0.0.1".length)}`;
+  if (lower.startsWith("[::1]:")) return `localhost${lower.slice("[::1]".length)}`;
+  return lower;
+}
+
 function urlsMatchForPrecheck(stepUrl: string, openTabUrl: string): boolean {
   if (stepUrl === openTabUrl) return true;
   try {
@@ -952,6 +1012,11 @@ export interface HandsCommand {
   steps?: PrecheckStepInput[];
   url?: string;
   pauseBeforeSubmit?: boolean;
+  runMode?: "run" | "run_remaining" | "save_only";
+  params?: ScriptParam[] | Record<string, string>;
+  paramValues?: Record<string, string>;
+  primaryLabel?: string;
+  pauseNotice?: string;
 }
 
 export async function handleHandsCommand(
@@ -969,12 +1034,25 @@ export async function handleHandsCommand(
       typeof cmd.pauseBeforeSubmit === "boolean"
         ? cmd.pauseBeforeSubmit
         : decideScript.pauseBeforeSubmit;
+    const rawRunMode = cmd.runMode ?? decideScript.runMode;
+    const runMode =
+      rawRunMode === "save_only"
+        ? "save_only"
+        : rawRunMode === "run" || rawRunMode === "run_remaining"
+          ? "run"
+          : undefined;
+    const rawParams = Array.isArray(cmd.params)
+      ? cmd.params
+      : Array.isArray(decideScript.params)
+        ? decideScript.params
+        : undefined;
     console.log("[eyes-bg] received decide command", decideId, decideName);
     void (async () => {
       let payload: {
         id: string;
         ok: boolean;
         decision?: "approved" | "dismissed";
+        params?: Record<string, string>;
         error?: string;
       };
       try {
@@ -984,17 +1062,47 @@ export async function handleHandsCommand(
         if (!api?.tabs?.sendMessage) {
           throw new Error("chrome.tabs.sendMessage unavailable");
         }
+        let resolvedParams: ScriptParam[] | undefined;
+        if (rawParams && rawParams.length > 0) {
+          resolvedParams = await Promise.all(
+            rawParams.map(async (p) => {
+              if (p.piiHash) {
+                const localVal = await resolveLocalPiiByHash(p.piiHash);
+                if (localVal !== undefined) {
+                  return { ...p, example: localVal };
+                }
+              }
+              return p;
+            }),
+          );
+        }
         const msgPayload = {
           kind: "EYES_SHOW_DECIDER",
           name: decideName,
           solution: decideSolution,
           script: decideScript,
           ...(pauseBeforeSubmit !== undefined ? { pauseBeforeSubmit } : {}),
+          ...(runMode !== undefined ? { runMode } : {}),
+          ...(resolvedParams ? { params: resolvedParams } : {}),
+          ...(cmd.primaryLabel ? { primaryLabel: cmd.primaryLabel } : {}),
+          ...(cmd.pauseNotice ? { pauseNotice: cmd.pauseNotice } : {}),
         };
-        let res: { ok?: boolean; decision?: "approved" | "dismissed"; error?: string } | undefined;
+        let res:
+          | {
+              ok?: boolean;
+              decision?: "approved" | "dismissed";
+              params?: Record<string, string>;
+              error?: string;
+            }
+          | undefined;
         try {
           res = (await api.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
-            | { ok?: boolean; decision?: "approved" | "dismissed"; error?: string }
+            | {
+                ok?: boolean;
+                decision?: "approved" | "dismissed";
+                params?: Record<string, string>;
+                error?: string;
+              }
             | undefined;
         } catch (sendErr) {
           console.warn("[eyes-bg] sendMessage failed, injecting content.js and retrying:", sendErr);
@@ -1004,7 +1112,12 @@ export async function handleHandsCommand(
               files: ["dist/content.js"],
             } as unknown as Parameters<NonNullable<NonNullable<ChromeApi["scripting"]>["executeScript"]>>[0]);
             res = (await api.tabs.sendMessage(tabId, msgPayload, { frameId: 0 })) as
-              | { ok?: boolean; decision?: "approved" | "dismissed"; error?: string }
+              | {
+                  ok?: boolean;
+                  decision?: "approved" | "dismissed";
+                  params?: Record<string, string>;
+                  error?: string;
+                }
               | undefined;
           } else {
             throw sendErr;
@@ -1017,7 +1130,12 @@ export async function handleHandsCommand(
         if (res.decision === "approved") {
           lastApprovedDecideTabId = tabId;
         }
-        payload = { id: decideId, ok: true, decision: res.decision };
+        payload = {
+          id: decideId,
+          ok: true,
+          decision: res.decision,
+          ...(res.params ? { params: res.params } : {}),
+        };
       } catch (err) {
         console.error("[eyes-bg] decide error:", err);
         payload = {
@@ -1128,7 +1246,10 @@ export async function handleHandsCommand(
       const tabId = await resolveActiveTabId(preferredTabId);
       console.log("[eyes-bg] run target tabId =", tabId);
       if (tabId === undefined) throw new Error("No active web tab open");
-      const results = await runActionScript(tabId, cmd.script);
+      const initialParams =
+        cmd.paramValues ??
+        (cmd.params && !Array.isArray(cmd.params) ? cmd.params : undefined);
+      const results = await runActionScript(tabId, cmd.script, initialParams);
       console.log("[eyes-bg] runActionScript results:", results);
       payload = { id: cmd.id, ok: true, results };
     } catch (err) {
@@ -1207,9 +1328,33 @@ async function fetchAndRunLatestScript(
 export async function runActionScript(
   tabId: number,
   script: V2ActionScript | ActionScript,
+  initialParams?: Record<string, string>,
 ): Promise<StepResult[]> {
   const v2Script = script as V2ActionScript;
   const bindings: Record<string, BindingValue> = {};
+  if (Array.isArray(v2Script.params)) {
+    for (const p of v2Script.params) {
+      if (!p || typeof p.name !== "string") continue;
+      if (p.piiHash) {
+        const localVal = await resolveLocalPiiByHash(p.piiHash);
+        if (localVal !== undefined) {
+          bindings[p.name] = localVal;
+          continue;
+        }
+      }
+      if (typeof p.example === "string") {
+        bindings[p.name] = p.example;
+      }
+    }
+  }
+  if (initialParams) {
+    for (const [k, v] of Object.entries(initialParams)) {
+      if (typeof v === "string" && (v.length > 0 || !(k in bindings))) {
+        bindings[k] = v;
+      }
+    }
+  }
+  await ensureLocalPiiLoaded();
   const runControl: RunControl = { aborted: false, waiters: new Set() };
   activeRunControl = runControl;
   let currentTabId = tabId;
@@ -1233,15 +1378,6 @@ export async function runActionScript(
       await sendWatchMessage(currentTabId, { kind: "EYES_WATCH_STOP" });
     }
   }
-}
-
-export function normalizeLoopbackHost(host: string): string {
-  const trimmed = host.trim().toLowerCase();
-  if (trimmed === "127.0.0.1") return "localhost";
-  if (trimmed.startsWith("127.0.0.1:")) {
-    return `localhost${trimmed.slice("127.0.0.1".length)}`;
-  }
-  return trimmed;
 }
 
 function isExactHostMatch(url: string | undefined, targetHost: string): boolean {
@@ -1282,7 +1418,9 @@ export function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string):
     }
     const targetParsed = new URL(targetUrl);
     if (tabParsed.href.replace(/#.*$/, "") === targetParsed.href.replace(/#.*$/, "")) return 4;
-    if (normalizeLoopbackHost(tabParsed.host) !== normalizeLoopbackHost(targetParsed.host)) return 0;
+    if (normalizeLoopbackHost(tabParsed.host) !== normalizeLoopbackHost(targetParsed.host)) {
+      return 0;
+    }
     if (
       normalizeUrlPath(tabParsed.pathname) === normalizeUrlPath(targetParsed.pathname) &&
       tabParsed.search === targetParsed.search
@@ -1418,6 +1556,15 @@ async function runStepsInternal(
         break;
       }
     }
+    if (lastClickIndex === -1) {
+      for (let i = steps.length - 1; i >= 0; i -= 1) {
+        const s = steps[i];
+        if (s?.action === "pressKey" && (s.key === "Enter" || s.value === "Enter")) {
+          lastClickIndex = i;
+          break;
+        }
+      }
+    }
   }
 
   for (let stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
@@ -1433,8 +1580,16 @@ async function runStepsInternal(
       if (rawStep.optional) continue;
       throw error;
     }
+    if ("value" in step && typeof step.value === "string") {
+      step = { ...step, value: restoreLocalPiiText(step.value, bgLocalPiiByHash) };
+    }
 
-    if (ctx.pauseBeforeSubmit && ctx.isTopLevel && stepIndex === lastClickIndex && step.action === "click") {
+    if (
+      ctx.pauseBeforeSubmit &&
+      ctx.isTopLevel &&
+      stepIndex === lastClickIndex &&
+      (step.action === "click" || step.action === "pressKey")
+    ) {
       const locators = stepLocatorsForWatch(step);
       await sendWatchMessage(currentTabId, {
         kind: "EYES_WATCH_STEP",
@@ -1459,7 +1614,11 @@ async function runStepsInternal(
         const currentTab = tabsApi?.get
           ? await tabsApi.get(currentTabId).catch(() => undefined)
           : undefined;
-        if (currentTab?.url && scoreTabUrlMatch(currentTab.url, step.url) >= 3) {
+        if (
+          currentTab?.url &&
+          (scoreTabUrlMatch(currentTab.url, step.url) >= 3 ||
+            urlsMatchForPrecheck(step.url, currentTab.url))
+        ) {
           results.push({ ok: true, url: currentTab.url });
           continue;
         }

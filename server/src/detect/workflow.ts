@@ -32,6 +32,8 @@ const INCLUDED_EVENT_TYPES = new Set<Event["type"]>([
   "copy",
   "nav",
   "submit",
+  "key",
+  "keydown",
 ]);
 
 const SHORTCUT_RE =
@@ -164,9 +166,32 @@ function mapEventsToStepMeta(
         app: resolveEventHost(ev) ?? ev.app,
       });
       lastKey = "";
+    } else if (ev.type === "key" || ev.type === "keydown") {
+      if (ev.meta?.key !== "Enter") continue;
+      collapsed.push({
+        action: "submit",
+        startTs: ev.ts,
+        endTs: ev.ts,
+        app: ev.app,
+        lastValue: "Enter",
+      });
+      lastKey = eventTargetKey(ev.target);
+    } else if (ev.type === "submit") {
+      const prev = collapsed[collapsed.length - 1];
+      if (prev && prev.action === "submit" && prev.lastValue === "Enter") {
+        prev.endTs = ev.ts;
+        prev.lastValue = undefined;
+      } else {
+        collapsed.push({
+          action: "submit",
+          startTs: ev.ts,
+          endTs: ev.ts,
+          app: ev.app,
+        });
+      }
+      lastKey = eventTargetKey(ev.target);
     } else if (
       ev.type === "click" ||
-      ev.type === "submit" ||
       ev.type === "paste" ||
       ev.type === "copy"
     ) {
@@ -246,7 +271,7 @@ function splitSequences(
       continue;
     }
 
-    if (item.step.action === "submit") {
+    if (item.step.action === "submit" && item.step.value !== "Enter") {
       current.push(item);
       flush();
       continue;
@@ -259,7 +284,9 @@ function splitSequences(
   const afterLoopSplit: EnrichedStep[][] = [];
   for (const seq of initialSeqs) {
     if (seq.length === 0) continue;
-    const hasSubmit = seq.some((s) => s.step.action === "submit");
+    const hasSubmit = seq.some(
+      (s) => s.step.action === "submit" && s.step.value !== "Enter",
+    );
     if (!hasSubmit) {
       const firstKey = exactStepKey(seq[0].step);
       const splitIndices: number[] = [0];

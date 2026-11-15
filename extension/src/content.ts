@@ -2,7 +2,12 @@ import type { Event, EventMeta, EventType } from "@gen/shared";
 import { executeStep } from "./hands/execute.ts";
 import { extractGridContext, extractMenuContext, extractTarget } from "./locators.ts";
 import { captureSourceSummary, captureTargetSummary } from "./page-summary.ts";
-import { inspectElementPrivacy, sanitizeUrl, sanitizeValue } from "./privacy.ts";
+import {
+  extractLocalPiiEntries,
+  inspectElementPrivacy,
+  sanitizeUrl,
+  sanitizeValue,
+} from "./privacy.ts";
 import { buildDeciderSuggestion, createSuggestionEngine } from "./suggestion.ts";
 import type { FlowNode, Suggestion, SuggestionParam } from "./suggestion.ts";
 import { suggestionToOptimization } from "./library.ts";
@@ -1107,7 +1112,10 @@ export function showSuggestion(
       for (const inputEl of Array.from(shadow.querySelectorAll("[data-eyes-param]"))) {
         const paramName = inputEl.getAttribute("data-eyes-param");
         if (!paramName) continue;
-        collectedParams[paramName] = (inputEl as unknown as { value?: string }).value ?? "";
+        const typedVal = (inputEl as unknown as { value?: string }).value ?? "";
+        const def = params.find((p) => p.name === paramName);
+        collectedParams[paramName] =
+          typedVal.length > 0 ? typedVal : def?.example !== undefined ? def.example : "";
       }
     }
     const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
@@ -1298,7 +1306,10 @@ async function flushFallbackQueue(): Promise<void> {
   }
 }
 
-function dispatchEventToBackend(evt: Event): void {
+function dispatchEventToBackend(
+  evt: Event,
+  localPii?: Record<string, string>
+): void {
   const win = (typeof window !== "undefined" ? window : {}) as unknown as GlobalEyesWindow;
   if (typeof win.__EYES_COLLECT__ === "function") {
     win.__EYES_COLLECT__(evt);
@@ -1311,7 +1322,11 @@ function dispatchEventToBackend(evt: Event): void {
 
   if (chromeGlobal?.runtime?.id && typeof chromeGlobal.runtime.sendMessage === "function") {
     try {
-      chromeGlobal.runtime.sendMessage({ kind: "EYES_EVENT", event: evt });
+      chromeGlobal.runtime.sendMessage({
+        kind: "EYES_EVENT",
+        event: evt,
+        ...(localPii ? { localPii } : {}),
+      });
       return;
     } catch {
       // fall through to direct HTTP batching
@@ -1391,7 +1406,8 @@ export function setupEventListeners(): void {
       meta: Object.keys(meta).length > 0 ? meta : undefined,
     };
 
-    dispatchEventToBackend(evt);
+    const localPii = privacy.redacted ? extractLocalPiiEntries(value) : undefined;
+    dispatchEventToBackend(evt, localPii);
   }
 
   // ---------------------------------------------------------------------------
@@ -1656,6 +1672,12 @@ export function setupEventListeners(): void {
     (e: globalThis.Event) => {
       const targetEl = e.target instanceof HTMLElement ? e.target : null;
       if (!targetEl) return;
+      const inputTag = targetEl.tagName.toLowerCase();
+      const inputTypeLower =
+        inputTag === "input"
+          ? ((targetEl as HTMLInputElement).type || targetEl.getAttribute("type") || "").toLowerCase()
+          : "";
+      if (inputTypeLower === "checkbox" || inputTypeLower === "radio") return;
       const ie = e as InputEvent;
       const sess = typingSessions.get(targetEl);
       if (sess && ie.inputType) {
@@ -2334,7 +2356,7 @@ function setupHandsTracker(): void {
       solution?: string;
       script?: ActionScript;
       pauseBeforeSubmit?: boolean;
-      runMode?: "run" | "save_only";
+      runMode?: "run" | "run_remaining" | "save_only";
       params?: SuggestionParam[];
       primaryLabel?: string;
       pauseNotice?: string;
@@ -2358,14 +2380,23 @@ function setupHandsTracker(): void {
         sendResponse({ ok: false, error: "Invalid decider payload" });
         return false;
       }
+      const normalizedRunMode =
+        msg.runMode === "save_only"
+          ? "save_only"
+          : msg.runMode === "run" || msg.runMode === "run_remaining"
+            ? "run"
+            : undefined;
+      const scriptParams = Array.isArray((msg.script as { params?: unknown })?.params)
+        ? ((msg.script as { params?: SuggestionParam[] }).params ?? undefined)
+        : undefined;
       const suggestion = buildDeciderSuggestion({
         name: typeof msg.name === "string" ? msg.name : "",
         solution: msg.solution,
         script: msg.script,
         pauseBeforeSubmit:
           typeof msg.pauseBeforeSubmit === "boolean" ? msg.pauseBeforeSubmit : undefined,
-        runMode: msg.runMode === "run" || msg.runMode === "save_only" ? msg.runMode : undefined,
-        params: Array.isArray(msg.params) ? msg.params : undefined,
+        runMode: normalizedRunMode,
+        params: Array.isArray(msg.params) ? msg.params : scriptParams,
         primaryLabel: typeof msg.primaryLabel === "string" ? msg.primaryLabel : undefined,
         pauseNotice: typeof msg.pauseNotice === "string" ? msg.pauseNotice : undefined,
       });

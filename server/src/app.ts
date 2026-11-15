@@ -100,7 +100,7 @@ export type CreateServerOptions = {
 };
 
 type HandsCommand =
-  | { id: string; kind?: "run"; script: ActionScript }
+  | { id: string; kind?: "run"; script: ActionScript; paramValues?: Record<string, string> }
   | { id: string; kind: "decide"; name: string; solution: string; script: ActionScript }
   | {
       id: string;
@@ -318,11 +318,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
     const targetKey = targetLocator ? `${targetLocator.kind}:${targetLocator.value}` : null;
     activeLibraryDecide = { entryId: entry.id, commandId, targetKey };
     try {
+      const recallDecideScript: ActionScript =
+        entry.script.runMode === "save_only"
+          ? { ...entry.script, runMode: "run_remaining" }
+          : entry.script;
       const { outcome } = await requestDecision({
         id: commandId,
         name: entry.name,
         solution: entry.solution,
-        script: entry.script,
+        script: recallDecideScript,
       });
       if (
         !outcome.ok &&
@@ -353,7 +357,11 @@ export function createServer(opts: CreateServerOptions): http.Server {
           `[server] library recall approved id=${entry.id} -> running script runId=${runId} target=${targetLocator?.value ?? "focused"}`,
         );
         void awaitHands(
-          { id: runId, script: scriptToRun },
+          {
+            id: runId,
+            script: scriptToRun,
+            ...(outcome.params ? { paramValues: outcome.params } : {}),
+          },
           30000,
           "Timed out waiting for extension to execute script",
         ).then((runRes) => {
@@ -517,7 +525,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
             { id: crypto.randomUUID(), kind: "decide", name, solution, script },
             60000,
           ),
-        runScript: (script) => awaitHands({ id: crypto.randomUUID(), script }, 30000),
+        runScript: (script, paramValues) =>
+          awaitHands(
+            {
+              id: crypto.randomUUID(),
+              script,
+              ...(paramValues ? { paramValues } : {}),
+            },
+            30000,
+          ),
         debounceMs: opts.proposeDebounceMs,
         siteCooldownMs: opts.siteCooldownMs,
         now: opts.now,
@@ -1096,6 +1112,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
           ok?: unknown;
           results?: unknown;
           decision?: unknown;
+          params?: unknown;
           error?: unknown;
         };
         if (typeof body.id !== "string" || typeof body.ok !== "boolean") {
@@ -1106,6 +1123,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
           body.decision === "approved" || body.decision === "dismissed"
             ? body.decision
             : undefined;
+        let params: Record<string, string> | undefined;
+        if (body.params && typeof body.params === "object" && !Array.isArray(body.params)) {
+          const entries = Object.entries(body.params as Record<string, unknown>).filter(
+            (pair): pair is [string, string] => typeof pair[1] === "string",
+          );
+          if (entries.length > 0) {
+            params = Object.fromEntries(entries);
+          }
+        }
         const resolve = waiters.get(body.id);
         if (!resolve) {
           sendJson(res, 404, { ok: false, error: "No pending run for id" });
@@ -1118,6 +1144,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
           ok: body.ok,
           ...(body.results !== undefined ? { results: body.results } : {}),
           ...(decision ? { decision } : {}),
+          ...(params ? { params } : {}),
           ...(typeof body.error === "string" ? { error: body.error } : {}),
         });
         sendJson(res, 200, { ok: true });

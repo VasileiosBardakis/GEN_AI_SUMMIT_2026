@@ -199,6 +199,7 @@ export function compiledWorkflowToActionScript(workflow: CompiledWorkflow): Acti
     steps: convertCompiledSteps(workflow.steps),
     pauseBeforeSubmit: workflow.pauseBeforeSubmit,
     runMode: workflow.runMode,
+    ...(workflow.params.length > 0 ? { params: workflow.params } : {}),
   });
 }
 
