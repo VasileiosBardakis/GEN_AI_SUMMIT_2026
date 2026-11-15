@@ -10,6 +10,7 @@ type V2StepExtras = {
   role?: string;
   label?: string;
   text?: string;
+  resolveOnly?: boolean;
 };
 
 export type V2DomStep =
@@ -759,7 +760,11 @@ export async function executeStep(
       if (attempt.element) return attempt.element;
 
       if (Date.now() >= deadline) {
-        if (step.action !== "waitFor" && attempt.hiddenCandidate) {
+        const requireVisible = Boolean(
+          (window as unknown as { __EYES_REPLAY_REQUIRE_VISIBLE__?: boolean })
+            .__EYES_REPLAY_REQUIRE_VISIBLE__,
+        );
+        if (step.action !== "waitFor" && !requireVisible && attempt.hiddenCandidate) {
           return attempt.hiddenCandidate;
         }
         return null;
@@ -805,6 +810,12 @@ export async function executeStep(
       typeof document.getElementById === "function" &&
       Boolean(document.getElementById("__eyes_watch_bar__"));
     if (!winWatch && !stepWatch && !hasWatchBar) return;
+    if (
+      typeof document !== "undefined" &&
+      (element === document.body || element === document.documentElement)
+    ) {
+      return;
+    }
 
     if (typeof document.querySelectorAll === "function") {
       for (const prev of Array.from(document.querySelectorAll('[data-eyes-highlighted="true"]'))) {
@@ -1179,6 +1190,7 @@ export async function executeStep(
         const element = await resolveStepTarget();
         if (!element) throw new Error("Target not found");
         highlightTarget(element);
+        if (step.resolveOnly) return { ok: true, url: location.href };
         click(element);
         return { ok: true, url: location.href };
       }
@@ -1186,6 +1198,7 @@ export async function executeStep(
         const rawElement = await resolveStepTarget();
         if (!rawElement) throw new Error("Target not found");
         highlightTarget(rawElement);
+        if (step.resolveOnly) return { ok: true, url: location.href };
         const element = unwrapControl(rawElement);
         const tag = element.tagName.toLowerCase();
         const inputType = (element.getAttribute("type") || "text").toLowerCase();
@@ -1228,12 +1241,21 @@ export async function executeStep(
         const remembered = (window as unknown as { __HANDS_LAST_EDITABLE__?: Element | null })
           .__HANDS_LAST_EDITABLE__;
         const lastEditable = remembered && remembered.isConnected ? remembered : null;
-        const resolved =
-          toLocatorList(step.target, step.targets).length > 0 || step.within
-            ? await resolveStepTarget()
-            : null;
-        const element = targetOverride ?? resolved ?? lastEditable ?? active;
+        const hasTarget =
+          toLocatorList(step.target, step.targets).length > 0 || Boolean(step.within);
+        const resolved = hasTarget ? await resolveStepTarget() : null;
+        if (hasTarget && !targetOverride && !resolved) {
+          throw new Error("Target not found");
+        }
+        const element = targetOverride ?? (hasTarget ? resolved : (lastEditable ?? active));
         if (!element) throw new Error("No target and nothing focused");
+        if (step.resolveOnly) {
+          if (element === document.body || element === document.documentElement) {
+            throw new Error("Target is not editable");
+          }
+          highlightTarget(element);
+          return { ok: true, url: location.href };
+        }
         highlightTarget(element);
         insertText(element, step.value);
         return { ok: true, url: location.href, value: readValue(element) };
@@ -1242,6 +1264,7 @@ export async function executeStep(
         const element = await resolveStepTarget();
         if (!element) throw new Error("Target not found");
         highlightTarget(element);
+        if (step.resolveOnly) return { ok: true, url: location.href };
         selectOption(element, step.value);
         return { ok: true, url: location.href, value: readValue(element) };
       }
@@ -1256,6 +1279,7 @@ export async function executeStep(
         const element = await resolveStepTarget();
         if (!element) throw new Error("Target not found");
         highlightTarget(element);
+        if (step.resolveOnly) return { ok: true, url: location.href };
         return { ok: true, url: location.href, value: readValue(element) };
       }
       case "extractList": {
@@ -1263,6 +1287,8 @@ export async function executeStep(
         if (roots.length === 0) throw new Error("Target not found");
         const visibleRoots = roots.filter(isVisible);
         const targetRoots = visibleRoots.length > 0 ? visibleRoots : roots;
+        if (targetRoots[0]) highlightTarget(targetRoots[0]);
+        if (step.resolveOnly) return { ok: true, url: location.href };
         const items = targetRoots.map((row) => {
           if (!step.fields) return { text: readValue(row) };
           const item: Record<string, string> = {};
@@ -1287,6 +1313,7 @@ export async function executeStep(
           : (targetOverride ?? active ?? document.body ?? document.documentElement);
         if (!target) throw new Error("Target not found");
         highlightTarget(target);
+        if (step.resolveOnly) return { ok: true, url: location.href };
         dispatchPressKey(target, keyToPress);
         return { ok: true, url: location.href, value: keyToPress };
       }

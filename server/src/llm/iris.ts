@@ -191,9 +191,9 @@ const SAME_TASK_JUDGE_QUESTIONS: IrisQuestions = {
   sameTask: {
     type: "noul",
     instructions:
-      "Do the candidate workflow and the existing library workflow automate the same user task on this site (even if one is a rotated or partial cycle, starts or ends at a different step, or has slightly different naming)?",
+      "Do the candidate workflow and the existing library workflow automate the same user task (even if one starts on an earlier or portal site and continues onto a shared site, is a rotated or partial cycle, starts or ends at a different step, or has slightly different naming)?",
     criteria: {
-      true: "Both workflows automate the same user task, including rotated or partial variants of the same cycle.",
+      true: "Both workflows automate the same user task, including partial, rotated, or multi-site variants of the same workflow.",
       false: "They automate genuinely different tasks.",
     },
   },

@@ -5,7 +5,6 @@ import type { Event, Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import {
-  readFallbackDemoVideo,
   recordScriptReplay,
   warmReplayBrowser,
 } from "./replay-video.ts";
@@ -191,20 +190,27 @@ export function createServer(opts: CreateServerOptions): http.Server {
     }
   >();
 
-  function scriptCacheKey(script: ActionScript): string {
-    return JSON.stringify(script.steps ?? []);
+  function scriptCacheKey(script: ActionScript, fallbackUrl?: string): string {
+    const first = script.steps?.[0];
+    const needsFallback =
+      Boolean(first) && first.action !== "navigate" && first.action !== "switchTab";
+    return JSON.stringify({
+      steps: script.steps ?? [],
+      ...(needsFallback && fallbackUrl ? { fallbackUrl } : {}),
+    });
   }
 
   function startOrGetScriptReplay(
     script: ActionScript,
     fallbackUrl?: string,
   ): Promise<Buffer | null> {
-    const key = scriptCacheKey(script);
+    const resolvedFallback = fallbackUrl ?? lastActiveUrl;
+    const key = scriptCacheKey(script, resolvedFallback);
     const existing = replayVideosByScriptKey.get(key);
     if (existing) return existing;
     const promise = recordScriptReplay(script, {
       hostUrls: lastUrlByHost,
-      fallbackUrl: fallbackUrl ?? lastActiveUrl,
+      fallbackUrl: resolvedFallback,
     });
     replayVideosByScriptKey.set(key, promise);
     return promise;
@@ -348,7 +354,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         decideMetaById.set(cmd.id, {
           script: cmd.script,
           entryId: cmd.entryId,
-          fallbackUrl: lastActiveUrl,
+          fallbackUrl: cmd.url ?? lastActiveUrl,
         });
         if (!process.env.VITEST) {
           void getOrStartReplayVideo(cmd.id);
@@ -414,6 +420,182 @@ export function createServer(opts: CreateServerOptions): http.Server {
     );
     console.log(`[server] decide id=${id} resolved:`, outcome.decision ?? outcome.error);
     return { id, outcome };
+  }
+
+  function normalizeStepHost(raw: string): string {
+    const trimmed = raw.trim().toLowerCase();
+    const withoutScheme = trimmed.replace(/^https?:\/\//, "").split(/[/?#]/)[0] ?? "";
+    return withoutScheme.replace(/^(127\.0\.0\.1|\[::1\]|::1)(?=:\d+|$)/, "localhost");
+  }
+
+  function stripWwwHost(host: string): string {
+    return host.startsWith("www.") && host.length > 4 ? host.slice(4) : host;
+  }
+
+  function normalizeStepPath(pathname: string): string {
+    const clean = pathname.trim() || "/";
+    return clean.length > 1 && clean.endsWith("/") ? clean.slice(0, -1) : clean;
+  }
+
+  function urlsMatchHostAndPath(candidateUrl: string, currentParsed: URL): boolean {
+    try {
+      const cand = new URL(candidateUrl);
+      if (cand.port !== currentParsed.port) return false;
+      const candHost = normalizeStepHost(cand.hostname);
+      const currHost = normalizeStepHost(currentParsed.hostname);
+      if (candHost !== currHost && stripWwwHost(candHost) !== stripWwwHost(currHost)) {
+        return false;
+      }
+      return normalizeStepPath(cand.pathname) === normalizeStepPath(currentParsed.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  function extractClickHrefUrl(
+    step: ActionScript["steps"][number],
+    baseUrl?: string,
+  ): string | undefined {
+    if (step.action !== "click" || !("target" in step) || !step.target) return undefined;
+    for (const loc of toLocatorList(step.target)) {
+      if (loc.kind !== "css" && loc.kind !== "xpath") continue;
+      const match = /href\s*=\s*["']([^"']+)["']/i.exec(loc.value);
+      const rawHref = match?.[1]?.trim();
+      if (!rawHref || rawHref.startsWith("#") || /^javascript:/i.test(rawHref)) continue;
+      try {
+        const resolved = baseUrl ? new URL(rawHref, baseUrl) : new URL(rawHref);
+        if (resolved.protocol === "http:" || resolved.protocol === "https:") {
+          return resolved.href;
+        }
+      } catch {
+        // ignore unresolvable href
+      }
+    }
+    return undefined;
+  }
+
+  function collectTemplateRefs(val: unknown, out: Set<string>): void {
+    if (typeof val === "string") {
+      for (const m of val.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)) {
+        const name = m[1]?.trim();
+        if (name) out.add(name);
+      }
+      return;
+    }
+    if (Array.isArray(val)) {
+      for (const item of val) collectTemplateRefs(item, out);
+      return;
+    }
+    if (val && typeof val === "object") {
+      for (const child of Object.values(val)) collectTemplateRefs(child, out);
+    }
+  }
+
+  function canSliceStepsAt(
+    steps: ActionScript["steps"],
+    startIdx: number,
+    providedBindings: Readonly<Record<string, string>>,
+  ): boolean {
+    if (startIdx <= 0) return true;
+    const skippedBinds = new Set<string>();
+    for (let i = 0; i < startIdx; i += 1) {
+      const s = steps[i];
+      if (s && (s.action === "readText" || s.action === "readValue" || s.action === "extractList")) {
+        skippedBinds.add(s.bind);
+      }
+    }
+    if (skippedBinds.size === 0) return true;
+    const refs = new Set<string>();
+    for (let i = startIdx; i < steps.length; i += 1) {
+      const s = steps[i];
+      if (!s) continue;
+      if (s.action === "forEach" && typeof s.items === "string" && s.items.trim()) {
+        refs.add(s.items.trim());
+      }
+      collectTemplateRefs(s, refs);
+    }
+    for (const ref of refs) {
+      if (skippedBinds.has(ref) && !(ref in providedBindings)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function findStartStepIndexForUrl(
+    steps: ActionScript["steps"],
+    currentTabUrl: string,
+    providedBindings: Readonly<Record<string, string>> = {},
+  ): number {
+    let parsedTab: URL;
+    try {
+      parsedTab = new URL(currentTabUrl);
+      if (parsedTab.protocol !== "http:" && parsedTab.protocol !== "https:") return 0;
+    } catch {
+      return 0;
+    }
+
+    let pageUrl: string | undefined;
+    let sawNonSetupStep = false;
+    for (let i = 0; i < steps.length; i += 1) {
+      const step = steps[i]!;
+      if (step.action === "switchTab") {
+        if (step.url) pageUrl = step.url;
+        else pageUrl = undefined;
+        const matches = step.url
+          ? urlsMatchHostAndPath(step.url, parsedTab)
+          : Boolean(
+              step.host &&
+                (normalizeStepHost(step.host) === normalizeStepHost(parsedTab.hostname) ||
+                  stripWwwHost(normalizeStepHost(step.host)) ===
+                    stripWwwHost(normalizeStepHost(parsedTab.hostname))),
+            );
+        if (matches) {
+          if (!sawNonSetupStep) return 0;
+          let targetIdx = i;
+          while (
+            targetIdx + 1 < steps.length &&
+            (steps[targetIdx]!.action === "switchTab" || steps[targetIdx]!.action === "navigate")
+          ) {
+            targetIdx += 1;
+          }
+          if (canSliceStepsAt(steps, targetIdx, providedBindings)) return targetIdx;
+        }
+        continue;
+      }
+      if (step.action === "navigate") {
+        pageUrl = step.url;
+        if (urlsMatchHostAndPath(step.url, parsedTab)) {
+          if (!sawNonSetupStep) return 0;
+          let targetIdx = i;
+          while (
+            targetIdx + 1 < steps.length &&
+            (steps[targetIdx]!.action === "switchTab" || steps[targetIdx]!.action === "navigate")
+          ) {
+            targetIdx += 1;
+          }
+          if (canSliceStepsAt(steps, targetIdx, providedBindings)) return targetIdx;
+        }
+        continue;
+      }
+
+      const recordedUrl = (step as { url?: unknown }).url;
+      if (typeof recordedUrl === "string" && /^https?:\/\//i.test(recordedUrl)) {
+        pageUrl = recordedUrl;
+      }
+
+      if (pageUrl && urlsMatchHostAndPath(pageUrl, parsedTab)) {
+        if (!sawNonSetupStep) return 0;
+        if (canSliceStepsAt(steps, i, providedBindings)) return i;
+      }
+
+      sawNonSetupStep = true;
+      const nextUrl = extractClickHrefUrl(step, pageUrl);
+      if (nextUrl) {
+        pageUrl = nextUrl;
+      }
+    }
+    return 0;
   }
 
   function sliceRecallSteps(
@@ -547,7 +729,21 @@ export function createServer(opts: CreateServerOptions): http.Server {
       );
       const boundValues =
         startStepIndex > 0 ? extractMatchedPrefixBindings(sessionEvents, entry) : {};
-      const adjustedSteps = sliceRecallSteps(entry.script.steps, startStepIndex);
+      const matchedUrl = typeof matchedEvent?.url === "string" ? matchedEvent.url : undefined;
+      const providedParams: Record<string, string> = {
+        ...boundValues,
+        ...Object.fromEntries(
+          (entry.script.params ?? [])
+            .filter((p) => p.example !== undefined || p.piiHash !== undefined)
+            .map((p) => [p.name, p.example ?? p.piiHash ?? ""]),
+        ),
+      };
+      const urlStartIndex =
+        matchedUrl && entry.kind !== "snippet"
+          ? findStartStepIndexForUrl(entry.script.steps, matchedUrl, providedParams)
+          : 0;
+      const effectiveStartIndex = Math.max(startStepIndex, urlStartIndex);
+      const adjustedSteps = sliceRecallSteps(entry.script.steps, effectiveStartIndex);
 
       const recallDecideScript: ActionScript = {
         ...entry.script,
@@ -556,7 +752,6 @@ export function createServer(opts: CreateServerOptions): http.Server {
       };
       const matchedTabId =
         typeof matchedEvent?.meta?.tabId === "number" ? matchedEvent.meta.tabId : undefined;
-      const matchedUrl = typeof matchedEvent?.url === "string" ? matchedEvent.url : undefined;
       const { outcome } = await requestDecision({
         id: commandId,
         name: entry.name,
@@ -670,7 +865,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
             void startOrGetScriptReplay(script, workflow?.startUrl ?? lastActiveUrl);
           }
         },
-        onApproved: async ({ sessionId, script, workflow, finding }) => {
+        onApproved: async ({ sessionId, script, workflow, finding, replaceEntryId }) => {
           const flatSteps = collectFlatSteps(script.steps);
           const typedStep =
             flatSteps.find(
@@ -725,6 +920,14 @@ export function createServer(opts: CreateServerOptions): http.Server {
             context,
             status: "active",
           });
+          const mergedApps = [...built.eyes.scope.apps];
+          if (workflow?.kind === "workflow") {
+            for (const app of workflow.apps) {
+              if (app && !mergedApps.includes(app)) {
+                mergedApps.push(app);
+              }
+            }
+          }
           const sigObj = buildStartSignature(script, context);
           const startSignature = formatStartSignature(sigObj);
           const stats = workflow
@@ -745,6 +948,15 @@ export function createServer(opts: CreateServerOptions): http.Server {
             : undefined;
           const entryWithMeta: LibraryEntry = {
             ...built,
+            ...(replaceEntryId ? { id: replaceEntryId } : {}),
+            ...(mergedApps.length !== built.eyes.scope.apps.length
+              ? {
+                  eyes: {
+                    ...built.eyes,
+                    scope: { ...built.eyes.scope, apps: mergedApps },
+                  },
+                }
+              : {}),
             startSignature,
             ...(stats ? { stats } : {}),
           };
@@ -839,7 +1051,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         }
         const id = rawName.replace(/\.webm$/i, "");
         const videoPromise = getOrStartReplayVideo(id);
-        const buf = (await videoPromise) ?? (await readFallbackDemoVideo());
+        const buf = videoPromise ? await videoPromise : null;
         if (!buf) {
           res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
           res.end("Not found");
@@ -966,7 +1178,11 @@ export function createServer(opts: CreateServerOptions): http.Server {
               lastUrlByHost.set(evt.app.trim().toLowerCase(), evt.url);
             }
             try {
-              lastUrlByHost.set(new URL(evt.url).hostname.toLowerCase(), evt.url);
+              const parsed = new URL(evt.url);
+              lastUrlByHost.set(parsed.hostname.toLowerCase(), evt.url);
+              if (parsed.port) {
+                lastUrlByHost.set(parsed.host.toLowerCase(), evt.url);
+              }
             } catch {
               // ignore malformed URL
             }

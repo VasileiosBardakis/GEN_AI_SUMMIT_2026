@@ -21,16 +21,44 @@ function getExecuteStepBundle(): string {
     .replace(/export\s+/g, "");
   cachedExecuteJs = `${stripped}
 window.__EYES_WATCH_MODE__ = true;
+window.__EYES_REPLAY_REQUIRE_VISIBLE__ = true;
 window.__EYES_EXECUTE_STEP__ = executeStep;
+window.__EYES_CLEAR_ANNOTATION__ = function() {
+  try {
+    var prev = document.querySelectorAll('[data-eyes-highlighted="true"]');
+    for (var i = 0; i < prev.length; i++) {
+      prev[i].removeAttribute("data-eyes-highlighted");
+    }
+    var box = document.getElementById("__eyes_watch_highlight__");
+    if (box && box.parentNode) {
+      box.parentNode.removeChild(box);
+    }
+  } catch (e) {}
+};
 window.__EYES_ANNOTATE_STEP__ = function(label) {
   try {
     var highlighted = document.querySelector('[data-eyes-highlighted="true"]');
-    if (highlighted && typeof highlighted.scrollIntoView === "function") {
+    var box = document.getElementById("__eyes_watch_highlight__");
+    var isValidTarget = Boolean(
+      highlighted &&
+      highlighted !== document.body &&
+      highlighted !== document.documentElement &&
+      highlighted.isConnected !== false
+    );
+    if (isValidTarget && typeof highlighted.scrollIntoView === "function") {
       highlighted.scrollIntoView({ block: "center", inline: "nearest" });
     }
-    var box = document.getElementById("__eyes_watch_highlight__");
-    if (highlighted && box && typeof highlighted.getBoundingClientRect === "function") {
-      var rect = highlighted.getBoundingClientRect();
+    var rect =
+      isValidTarget && typeof highlighted.getBoundingClientRect === "function"
+        ? highlighted.getBoundingClientRect()
+        : null;
+    var hasVisibleRect = Boolean(
+      rect &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      (typeof highlighted.getClientRects !== "function" || highlighted.getClientRects().length > 0)
+    );
+    if (isValidTarget && hasVisibleRect && box && rect) {
       box.style.top = Math.max(0, rect.top - 4) + "px";
       box.style.left = Math.max(0, rect.left - 4) + "px";
       box.style.width = Math.max(0, rect.width + 8) + "px";
@@ -39,6 +67,9 @@ window.__EYES_ANNOTATE_STEP__ = function(label) {
       box.style.background = "rgba(138, 90, 43, 0.14)";
       box.style.boxShadow = "0 0 0 3px rgba(138, 90, 43, 0.18)";
       box.style.transition = "none";
+    } else {
+      if (highlighted) highlighted.removeAttribute("data-eyes-highlighted");
+      if (box && box.parentNode) box.parentNode.removeChild(box);
     }
     if (label && document.documentElement) {
       var banner = document.getElementById("__eyes_sandbox_banner__");
@@ -141,28 +172,98 @@ function describeStepLabel(step: Step): string {
   }
 }
 
+function normalizeHostKey(raw: string): string {
+  return raw.trim().toLowerCase().replace(/:\d+$/, "");
+}
+
+function stripWwwPrefix(host: string): string {
+  return host.startsWith("www.") ? host.slice(4) : host;
+}
+
+function hostsMatch(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  const la = a.trim().toLowerCase();
+  const lb = b.trim().toLowerCase();
+  if (la === lb) return true;
+  const na = normalizeHostKey(la);
+  const nb = normalizeHostKey(lb);
+  if (na === nb) return true;
+  return stripWwwPrefix(na) === stripWwwPrefix(nb);
+}
+
+function extractUrlHost(rawUrl?: string): string | undefined {
+  if (!isHttpUrl(rawUrl)) return undefined;
+  try {
+    return new URL(rawUrl).host.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function synthesizeHostOriginUrl(host: string): string | undefined {
+  const trimmed = host.trim();
+  if (!trimmed) return undefined;
+  const bare = normalizeHostKey(trimmed);
+  if (!bare.includes(".") || /^\d+\.\d+\.\d+\.\d+$/.test(bare)) {
+    return undefined;
+  }
+  const candidate = `https://${trimmed}/`;
+  return isReachableReplayUrl(candidate) ? candidate : undefined;
+}
+
+function findUrlForHost(
+  host: string,
+  hostUrls?: ReadonlyMap<string, string>,
+  fallbackUrl?: string,
+): string | undefined {
+  const targetLower = host.trim().toLowerCase();
+  if (!targetLower) return undefined;
+  if (hostUrls) {
+    const exact = hostUrls.get(targetLower);
+    if (isHttpUrl(exact) && isReachableReplayUrl(exact)) return exact;
+    const noPort = normalizeHostKey(targetLower);
+    const exactNoPort = hostUrls.get(noPort);
+    if (isHttpUrl(exactNoPort) && isReachableReplayUrl(exactNoPort)) return exactNoPort;
+    for (const [key, value] of hostUrls.entries()) {
+      if (hostsMatch(key, targetLower) && isHttpUrl(value) && isReachableReplayUrl(value)) {
+        return value;
+      }
+    }
+  }
+  if (
+    isHttpUrl(fallbackUrl) &&
+    isReachableReplayUrl(fallbackUrl) &&
+    hostsMatch(extractUrlHost(fallbackUrl), targetLower)
+  ) {
+    return fallbackUrl;
+  }
+  return undefined;
+}
+
 function findInitialUrl(
   steps: Step[],
   hostUrls?: ReadonlyMap<string, string>,
   fallbackUrl?: string,
 ): string | undefined {
-  for (const step of steps) {
-    if (step.action === "navigate" && isHttpUrl(step.url) && isReachableReplayUrl(step.url)) {
-      return step.url;
+  const first = steps[0];
+  if (!first) return undefined;
+  if (first.action === "navigate") {
+    return isHttpUrl(first.url) && isReachableReplayUrl(first.url) ? first.url : undefined;
+  }
+  if (first.action === "switchTab") {
+    if (isHttpUrl(first.url) && isReachableReplayUrl(first.url)) {
+      return first.url;
     }
-    if (step.action === "switchTab") {
-      if (isHttpUrl(step.url) && isReachableReplayUrl(step.url)) {
-        return step.url;
-      }
-      const mapped = step.host ? hostUrls?.get(step.host.toLowerCase()) : undefined;
-      if (isHttpUrl(mapped) && isReachableReplayUrl(mapped)) {
-        return mapped;
-      }
+    if (first.host) {
+      return (
+        findUrlForHost(first.host, hostUrls, fallbackUrl) ??
+        synthesizeHostOriginUrl(first.host)
+      );
     }
-    if (step.action === "forEach") {
-      const nested = findInitialUrl(step.steps, hostUrls);
-      if (nested) return nested;
-    }
+    return undefined;
+  }
+  if (first.action === "forEach") {
+    return findInitialUrl(first.steps, hostUrls, fallbackUrl);
   }
   if (isHttpUrl(fallbackUrl) && isReachableReplayUrl(fallbackUrl)) {
     return fallbackUrl;
@@ -174,6 +275,10 @@ type ReplayPage = {
   url: () => string;
   goto: (url: string, opts?: Record<string, unknown>) => Promise<unknown>;
   evaluate: <R, A = unknown>(fn: string | ((arg: A) => R | Promise<R>), arg?: A) => Promise<R>;
+  waitForLoadState?: (
+    state?: "load" | "domcontentloaded" | "networkidle",
+    opts?: { timeout?: number },
+  ) => Promise<void>;
   video: () => { path: () => Promise<string> } | null;
 };
 
@@ -408,25 +513,45 @@ export async function recordScriptReplay(
       if (!ok) return null;
     }
 
+    const clearAnnotationOnPage = async (): Promise<void> => {
+      await page
+        .evaluate(() => {
+          const w = window as unknown as { __EYES_CLEAR_ANNOTATION__?: () => void };
+          w.__EYES_CLEAR_ANNOTATION__?.();
+        })
+        .catch(() => {});
+    };
+
     const runStepList = async (
       stepList: Step[],
       scope: Record<string, unknown>,
-    ): Promise<void> => {
+    ): Promise<boolean> => {
       for (const rawStep of stepList) {
         const step = substituteVars(rawStep, { ...bindings, ...scope });
 
         if (step.action === "navigate") {
-          await navigateTo(step.url);
+          const ok = await navigateTo(step.url);
+          if (!ok) return false;
           continue;
         }
 
         if (step.action === "switchTab") {
-          const candidateUrl =
-            (isHttpUrl(step.url) ? step.url : undefined) ??
-            (step.host ? options.hostUrls?.get(step.host.toLowerCase()) : undefined) ??
-            initialUrl;
-          if (candidateUrl) {
-            await navigateTo(candidateUrl);
+          if (isHttpUrl(step.url)) {
+            if (!isReachableReplayUrl(step.url)) return false;
+            const ok = await navigateTo(step.url);
+            if (!ok) return false;
+          } else if (
+            isHttpUrl(page.url()) &&
+            hostsMatch(extractUrlHost(page.url()), step.host)
+          ) {
+            // Already on the target host (e.g., previous link click navigated here)
+          } else {
+            const candidateUrl =
+              findUrlForHost(step.host, options.hostUrls, options.fallbackUrl) ??
+              synthesizeHostOriginUrl(step.host);
+            if (!candidateUrl) return false;
+            const ok = await navigateTo(candidateUrl);
+            if (!ok) return false;
           }
           continue;
         }
@@ -445,60 +570,114 @@ export async function recordScriptReplay(
           }
           const previewItems = items.slice(0, 1);
           if (previewItems.length === 0) {
-            await runStepList(step.steps, scope);
+            if (!(await runStepList(step.steps, scope))) return false;
           } else {
             for (const item of previewItems) {
-              await runStepList(step.steps, { ...scope, ...item, item });
+              if (!(await runStepList(step.steps, { ...scope, ...item, item }))) {
+                return false;
+              }
             }
           }
           continue;
         }
 
         if (!isHttpUrl(page.url())) {
-          const ok = await navigateTo(initialUrl);
-          if (!ok) return;
+          return false;
         }
 
-        const label = describeStepLabel(step);
+        await page.waitForLoadState?.("domcontentloaded", { timeout: 2000 }).catch(() => {});
 
-        // 1. Highlight target and show step label before executing the change
-        await page
+        const label = describeStepLabel(step);
+        const resolveTimeoutMs =
+          "timeoutMs" in step && typeof step.timeoutMs === "number"
+            ? step.timeoutMs
+            : step.optional
+              ? 600
+              : 1500;
+
+        // 1. Resolve target with the exact same resolver as the step and outline only that element
+        const preRes = await page
           .evaluate(
             async ({ s, stepLabel }: { s: unknown; stepLabel: string }) => {
               const w = window as unknown as {
-                __EYES_EXECUTE_STEP__?: (arg: unknown) => Promise<unknown>;
+                __EYES_CLEAR_ANNOTATION__?: () => void;
+                __EYES_EXECUTE_STEP__?: (arg: unknown) => Promise<{ ok?: boolean }>;
                 __EYES_ANNOTATE_STEP__?: (lbl: string) => void;
               };
-              if (w.__EYES_EXECUTE_STEP__) {
-                await w.__EYES_EXECUTE_STEP__({ ...(s as object), action: "waitFor", timeoutMs: 800 });
+              w.__EYES_CLEAR_ANNOTATION__?.();
+              if (!w.__EYES_EXECUTE_STEP__) return { ok: false };
+              const resolved = await w.__EYES_EXECUTE_STEP__(s);
+              if (!resolved?.ok) {
+                w.__EYES_CLEAR_ANNOTATION__?.();
+                return { ok: false };
               }
               w.__EYES_ANNOTATE_STEP__?.(stepLabel);
+              return resolved;
             },
-            { s: step, stepLabel: label },
+            {
+              s: { ...(step as object), resolveOnly: true, timeoutMs: resolveTimeoutMs },
+              stepLabel: label,
+            },
           )
-          .catch(() => {});
+          .catch(() => ({ ok: false as const }));
+
+        if (!preRes.ok) {
+          await clearAnnotationOnPage();
+          return false;
+        }
 
         await waitForRenderedFrame(page, preStepSettleMs);
 
-        // 2. Execute the actual step on the page
-        const res = await page
-          .evaluate(
-            async ({ s, stepLabel }: { s: unknown; stepLabel: string }) => {
-              const w = window as unknown as {
-                __EYES_EXECUTE_STEP__?: (arg: unknown) => Promise<{
-                  ok?: boolean;
-                  value?: string;
-                  items?: Record<string, string>[];
-                }>;
-                __EYES_ANNOTATE_STEP__?: (lbl: string) => void;
-              };
-              const out = w.__EYES_EXECUTE_STEP__ ? await w.__EYES_EXECUTE_STEP__(s) : { ok: false };
-              w.__EYES_ANNOTATE_STEP__?.(stepLabel);
-              return out;
-            },
-            { s: step, stepLabel: label },
-          )
-          .catch(() => ({ ok: false as const }));
+        // 2. Execute the actual step on the page (waitFor already verified above)
+        let navigatedDuringExec = false;
+        const res =
+          step.action === "waitFor"
+            ? preRes
+            : await page
+                .evaluate(
+                  async ({ s, stepLabel }: { s: unknown; stepLabel: string }) => {
+                    const w = window as unknown as {
+                      __EYES_CLEAR_ANNOTATION__?: () => void;
+                      __EYES_EXECUTE_STEP__?: (arg: unknown) => Promise<{
+                        ok?: boolean;
+                        value?: string;
+                        items?: Record<string, string>[];
+                      }>;
+                      __EYES_ANNOTATE_STEP__?: (lbl: string) => void;
+                    };
+                    const out = w.__EYES_EXECUTE_STEP__
+                      ? await w.__EYES_EXECUTE_STEP__(s)
+                      : { ok: false };
+                    if (!out?.ok) {
+                      w.__EYES_CLEAR_ANNOTATION__?.();
+                      return out;
+                    }
+                    w.__EYES_ANNOTATE_STEP__?.(stepLabel);
+                    return out;
+                  },
+                  { s: step, stepLabel: label },
+                )
+                .catch((err: unknown) => {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  if (
+                    (step.action === "click" || step.action === "pressKey") &&
+                    (msg.includes("Execution context was destroyed") ||
+                      msg.includes("Cannot find context"))
+                  ) {
+                    navigatedDuringExec = true;
+                    return { ok: true as const };
+                  }
+                  return { ok: false as const };
+                });
+
+        if (!res.ok) {
+          await clearAnnotationOnPage();
+          return false;
+        }
+
+        if (navigatedDuringExec) {
+          await page.waitForLoadState?.("domcontentloaded", { timeout: 2500 }).catch(() => {});
+        }
 
         if (
           (step.action === "readText" || step.action === "readValue") &&
@@ -516,9 +695,11 @@ export async function recordScriptReplay(
             : postActionSettleMs;
         await waitForRenderedFrame(page, postSettleMs);
       }
+      return true;
     };
 
-    await runStepList(steps, {});
+    const completed = await runStepList(steps, {});
+    if (!completed) return null;
     await waitForRenderedFrame(page, endSettleMs);
 
     await context.close();

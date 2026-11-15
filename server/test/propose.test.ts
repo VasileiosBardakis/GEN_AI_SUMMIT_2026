@@ -591,4 +591,217 @@ describe("proposer Iris-gated pipeline (GEN-114)", () => {
     });
     pUnlock.close();
   });
+
+  it("GEN-131: compares against any library entry sharing ANY step/switchTab/navigate host (not just start host), lets Iris decide, and never saves a second entry", async () => {
+    const govToDypaEntry = {
+      ...buildLibraryEntryFromScript({
+        name: "Apply for DYPA certificate via gov.gr",
+        kind: "workflow",
+        solution: "Start on gov.gr and submit DYPA certificate form",
+        script: {
+          name: "Apply for DYPA certificate via gov.gr",
+          steps: [
+            { action: "switchTab", host: "www.gov.gr", url: "https://www.gov.gr/arxes/dypa" },
+            { action: "click", target: { kind: "testid", value: "gov-start" } },
+            { action: "navigate", url: "https://www.dypa.gov.gr/services/form" },
+            { action: "fill", target: { kind: "testid", value: "tax-id" }, value: "{{afm}}" },
+            { action: "click", target: { kind: "testid", value: "dypa-submit" } },
+          ],
+        },
+        context: { app: "www.gov.gr", url: "https://www.gov.gr/arxes/dypa" },
+      }),
+      id: "lib_06293cc3f3",
+    };
+
+    const partialDypaEvents: Event[] = [
+      makeTestEvent("dypa-1", "input", 1_000, {
+        app: "www.dypa.gov.gr",
+        url: "https://www.dypa.gov.gr/services/form",
+        target: { label: "Tax ID", locators: [{ kind: "testid", value: "tax-id" }] },
+        value: "123456789",
+      }),
+      makeTestEvent("dypa-2", "click", 2_000, {
+        app: "www.dypa.gov.gr",
+        url: "https://www.dypa.gov.gr/services/form",
+        target: { label: "Submit", locators: [{ kind: "testid", value: "dypa-submit" }] },
+      }),
+    ];
+
+    const partialDypaCompiled: CompiledWorkflow = {
+      kind: "workflow",
+      name: "Submit DYPA form",
+      reason: "Submits the DYPA certificate form",
+      risk: "low",
+      offerAt2: false,
+      runMode: "save_only",
+      pauseBeforeSubmit: false,
+      startUrl: "https://www.dypa.gov.gr/services/form",
+      apps: ["www.dypa.gov.gr"],
+      params: [{ name: "afm", example: "123456789" }],
+      steps: [
+        { action: "switchTab", host: "www.dypa.gov.gr", url: "https://www.dypa.gov.gr/services/form" },
+        { action: "fill", target: [{ kind: "testid", value: "tax-id" }], value: "{{afm}}" },
+        { action: "click", target: [{ kind: "testid", value: "dypa-submit" }] },
+      ],
+      stats: { repetitions: 2, minutesPerWeek: 1, manualSeconds: 20, replaySeconds: 4 },
+    };
+
+    // 1. Existing entry starts on www.gov.gr and navigates to www.dypa.gov.gr; candidate starts on www.dypa.gov.gr -> Iris compares and skips
+    const comparisons: Array<Record<string, unknown>> = [];
+    const logs: string[] = [];
+    const decideMock = vi.fn(async () => ({ ok: true, decision: "approved" as const }));
+    const onApprovedMock = vi.fn(async () => ({ shouldRun: false }));
+    const precheckMock = vi.fn(async () => ({ ok: true, results: [] }));
+
+    const pSame = createProposer({
+      readSessionEvents: async () => partialDypaEvents,
+      readLibrary: async () => [govToDypaEntry],
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      judgeSameTask: async (comp) => {
+        comparisons.push(comp);
+        return { sameTask: true };
+      },
+      compileV2: async () => partialDypaCompiled,
+      precheck: precheckMock,
+      requestDecision: decideMock,
+      onApproved: onApprovedMock,
+      runScript: async () => ({ ok: true }),
+      log: (line) => logs.push(line),
+    });
+
+    pSame.onEvents("sess_gen131_dypa");
+    await vi.waitFor(() => {
+      expect(logs.some((l) => l.includes("same as lib_06293cc3f3, skipped"))).toBe(true);
+    });
+    expect(comparisons).toHaveLength(1);
+    expect(comparisons[0]).toMatchObject({
+      sharedHosts: ["www.dypa.gov.gr"],
+      existing: {
+        id: "lib_06293cc3f3",
+        hosts: expect.arrayContaining(["www.gov.gr", "www.dypa.gov.gr"]),
+      },
+      candidate: {
+        hosts: ["www.dypa.gov.gr"],
+      },
+    });
+    expect(precheckMock).not.toHaveBeenCalled();
+    expect(decideMock).not.toHaveBeenCalled();
+    expect(onApprovedMock).not.toHaveBeenCalled();
+    pSame.close();
+
+    // 2. Different start host + www. difference + Iris says sameTask: false -> offers even if steps overlap (no step-matching rules override Iris)
+    const entryWithoutWww = {
+      ...buildLibraryEntryFromScript({
+        name: "Check DYPA status",
+        kind: "workflow",
+        solution: "Check DYPA application status",
+        script: {
+          name: "Check DYPA status",
+          steps: [
+            { action: "switchTab", host: "dypa.gov.gr", url: "https://dypa.gov.gr/status" },
+            { action: "fill", target: { kind: "testid", value: "tax-id" }, value: "{{afm}}" },
+            { action: "click", target: { kind: "testid", value: "dypa-submit" } },
+          ],
+        },
+        context: { app: "dypa.gov.gr", url: "https://dypa.gov.gr/status" },
+      }),
+      id: "lib_dypa_status",
+    };
+
+    const decideDifferent = vi.fn(async () => ({ ok: true, decision: "dismissed" as const }));
+    const judgeDifferent = vi.fn(async () => ({ sameTask: false }));
+    const pDiff = createProposer({
+      readSessionEvents: async () => partialDypaEvents,
+      readLibrary: async () => [entryWithoutWww],
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      judgeSameTask: judgeDifferent,
+      compileV2: async () => partialDypaCompiled,
+      requestDecision: decideDifferent,
+      runScript: async () => ({ ok: true }),
+    });
+
+    pDiff.onEvents("sess_gen131_diff");
+    await vi.waitFor(() => {
+      expect(decideDifferent).toHaveBeenCalledTimes(1);
+    });
+    expect(judgeDifferent).toHaveBeenCalledTimes(1);
+    pDiff.close();
+
+    // 3. UPDATE (15:52): Shorter DYPA entry saved first, longer gov.gr->DYPA flow contains it -> replaces saved entry with same id
+    const shortDypaSaved = {
+      ...buildLibraryEntryFromScript({
+        name: "Search Job Vacancies on DYPA",
+        kind: "workflow",
+        solution: "Search DYPA jobs",
+        script: {
+          name: "Search Job Vacancies on DYPA",
+          steps: [
+            { action: "switchTab", host: "www.dypa.gov.gr", url: "https://www.dypa.gov.gr/anazitisi-thesis-ergasias" },
+            { action: "navigate", url: "https://www.dypa.gov.gr/anazitisi-thesis-ergasias" },
+            { action: "click", target: { kind: "css", value: "div.jobsearchAccord > div.jobsearchAccord-toggle:nth-of-type(1)" } },
+            { action: "click", target: { kind: "testid", value: "dypa-region-axaias" } },
+            { action: "click", target: { kind: "testid", value: "dypa-submit" } },
+          ],
+        },
+        context: { app: "www.dypa.gov.gr", url: "https://www.dypa.gov.gr/anazitisi-thesis-ergasias" },
+      }),
+      id: "lib_bcbc8ba6a5",
+    };
+
+    const fullGovToDypaCompiled: CompiledWorkflow = {
+      kind: "workflow",
+      name: "Search Job Openings on DYPA",
+      reason: "Navigates from gov.gr to DYPA and submits search",
+      risk: "low",
+      offerAt2: false,
+      runMode: "save_only",
+      pauseBeforeSubmit: false,
+      startUrl: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia",
+      apps: ["www.gov.gr", "www.dypa.gov.gr"],
+      params: [],
+      steps: [
+        { action: "switchTab", host: "www.gov.gr", url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia" },
+        { action: "navigate", url: "https://www.gov.gr/el/categories/ergasia-kai-asphalise/anergia" },
+        { action: "click", target: [{ kind: "css", value: "a[href=\"https://www.dypa.gov.gr/anazitisi-thesis-ergasias\"]" }] },
+        { action: "click", target: [{ kind: "css", value: "div.jobsearchAccord > div.jobsearchAccord-toggle:nth-of-type(1)" }] },
+        { action: "click", target: [{ kind: "testid", value: "dypa-extra-specialty" }] },
+        { action: "click", target: [{ kind: "testid", value: "dypa-region-axaias" }] },
+        { action: "click", target: [{ kind: "testid", value: "dypa-submit" }] },
+      ],
+      stats: { repetitions: 1, minutesPerWeek: 1, manualSeconds: 58, replaySeconds: 0 },
+    };
+
+    const replaceApprovedCalls: Array<{ replaceEntryId?: string; stepCount: number }> = [];
+    const replaceLogs: string[] = [];
+    const decideReplaceMock = vi.fn(async () => ({ ok: true, decision: "approved" as const }));
+    const pReplace = createProposer({
+      readSessionEvents: async () => partialDypaEvents,
+      readLibrary: async () => [shortDypaSaved],
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      judgeSameTask: async () => ({ sameTask: true }),
+      compileV2: async () => fullGovToDypaCompiled,
+      requestDecision: decideReplaceMock,
+      onApproved: async (info) => {
+        replaceApprovedCalls.push({
+          replaceEntryId: info.replaceEntryId,
+          stepCount: info.script.steps.length,
+        });
+        return { shouldRun: false };
+      },
+      runScript: async () => ({ ok: true }),
+      log: (line) => replaceLogs.push(line),
+    });
+
+    pReplace.onEvents("sess_gen131_replace");
+    await vi.waitFor(() => {
+      expect(replaceApprovedCalls).toHaveLength(1);
+    });
+    expect(replaceApprovedCalls[0]).toEqual({
+      replaceEntryId: "lib_bcbc8ba6a5",
+      stepCount: 7,
+    });
+    expect(decideReplaceMock).not.toHaveBeenCalled();
+    expect(replaceLogs.some((l) => l.includes("replaces lib_bcbc8ba6a5 (more complete)"))).toBe(true);
+    pReplace.close();
+  });
 });

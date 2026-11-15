@@ -16,6 +16,7 @@ import {
   isExactHostMatch,
   renderFlowNodes,
   scoreTabUrlMatch,
+  sliceScriptForTabUrl,
   substituteBindings,
   tabMatchesHost,
 } from "./utils.ts";
@@ -196,6 +197,70 @@ function filteredItems(): OptimizationItem[] {
   });
 }
 
+export function renderOptimizationCard(
+  item: OptimizationItem,
+  opts: { isFlowOpen?: boolean; feedback?: { text: string; tone: "ok" | "err" } } = {},
+): string {
+  const isWorkflow = item.kind === "workflow";
+  const isSuggested = !isWorkflow && item.status === "suggested";
+  const isPaused = item.status === "paused";
+  const isFlowOpen = Boolean(opts.isFlowOpen);
+  const feedback = opts.feedback;
+  const metaText = feedback
+    ? feedback.text
+    : isSuggested
+      ? `${item.app ?? "Browser"} · Seen ${item.detectedCount ?? 3} times`
+      : `${item.app ?? "Browser"} · ${formatRelativeTime(item.lastRunAt)}`;
+  const metaClass = feedback ? ` ${feedback.tone}` : "";
+  const primaryLabel = item.kind === "snippet" ? "Insert" : "Run";
+  const switchChecked = isWorkflow && item.status === "suggested" ? "true" : item.status === "active" ? "true" : "false";
+
+  return `
+        <article class="opt-card${isPaused ? " paused" : ""}" data-opt-id="${escapeHtml(item.id)}">
+          <div class="opt-head">
+            <div>
+              <div class="opt-eyebrow">${item.kind === "snippet" ? "Snippet" : "Workflow"} · ${escapeHtml(item.app ?? "Browser")}</div>
+              <h2 class="opt-title">${escapeHtml(item.title)}</h2>
+              <p class="opt-desc">${escapeHtml(item.description)}</p>
+            </div>
+            ${
+              isSuggested
+                ? '<span class="suggested-tag">Ready</span>'
+                : `<button class="switch" type="button" role="switch" aria-checked="${switchChecked}" aria-label="Toggle ${escapeHtml(item.title)}" data-action="toggle" data-id="${escapeHtml(item.id)}"></button>`
+            }
+          </div>
+
+          ${renderPreview(item)}
+
+          <div class="opt-stats-line">
+            <span>~${escapeHtml(formatDuration(item.timeSavedPerRunSec))}/run · <strong>${item.runCount}</strong> ${item.runCount === 1 ? "run" : "runs"}</span>
+            <span class="${item.totalTimeSavedSec > 0 ? "saved" : ""}">${escapeHtml(formatDuration(item.totalTimeSavedSec))} saved</span>
+          </div>
+
+          ${renderDag(item, isFlowOpen)}
+
+          <div class="opt-foot">
+            <span class="opt-meta${metaClass}">${escapeHtml(metaText)}</span>
+            <div class="opt-actions">
+              ${
+                item.flows
+                  ? `<button class="btn ghost" type="button" data-action="flow" data-id="${escapeHtml(item.id)}">${
+                      isFlowOpen ? "Hide flow" : "Flow"
+                    }</button>`
+                  : ""
+              }
+              ${
+                isSuggested
+                  ? `<button class="btn ghost" type="button" data-action="dismiss" data-id="${escapeHtml(item.id)}">Dismiss</button>
+                     <button class="btn primary" type="button" data-action="activate" data-id="${escapeHtml(item.id)}">Add</button>`
+                  : `<button class="btn primary" type="button" data-action="run" data-id="${escapeHtml(item.id)}">${primaryLabel}</button>`
+              }
+            </div>
+          </div>
+        </article>
+      `;
+}
+
 function render(): void {
   const summary = computeLibrarySummary(allItems);
   const sumSaved = document.getElementById("sum-saved");
@@ -274,66 +339,12 @@ function render(): void {
   }
 
   list.innerHTML = visible
-    .map((item) => {
-      const isSuggested = item.status === "suggested";
-      const isPaused = item.status === "paused";
-      const isFlowOpen = expandedFlows.has(item.id);
-      const feedback = feedbackById.get(item.id);
-      const metaText = feedback
-        ? feedback.text
-        : isSuggested
-          ? `${item.app ?? "Browser"} · Seen ${item.detectedCount ?? 3} times`
-          : `${item.app ?? "Browser"} · ${formatRelativeTime(item.lastRunAt)}`;
-      const metaClass = feedback ? ` ${feedback.tone}` : "";
-      const primaryLabel = item.kind === "snippet" ? "Insert" : "Run";
-
-      return `
-        <article class="opt-card${isPaused ? " paused" : ""}" data-opt-id="${escapeHtml(item.id)}">
-          <div class="opt-head">
-            <div>
-              <div class="opt-eyebrow">${item.kind === "snippet" ? "Snippet" : "Workflow"} · ${escapeHtml(item.app ?? "Browser")}</div>
-              <h2 class="opt-title">${escapeHtml(item.title)}</h2>
-              <p class="opt-desc">${escapeHtml(item.description)}</p>
-            </div>
-            ${
-              isSuggested
-                ? '<span class="suggested-tag">Ready</span>'
-                : `<button class="switch" type="button" role="switch" aria-checked="${
-                    item.status === "active" ? "true" : "false"
-                  }" aria-label="Toggle ${escapeHtml(item.title)}" data-action="toggle" data-id="${escapeHtml(item.id)}"></button>`
-            }
-          </div>
-
-          ${renderPreview(item)}
-
-          <div class="opt-stats-line">
-            <span>~${escapeHtml(formatDuration(item.timeSavedPerRunSec))}/run · <strong>${item.runCount}</strong> ${item.runCount === 1 ? "run" : "runs"}</span>
-            <span class="${item.totalTimeSavedSec > 0 ? "saved" : ""}">${escapeHtml(formatDuration(item.totalTimeSavedSec))} saved</span>
-          </div>
-
-          ${renderDag(item, isFlowOpen)}
-
-          <div class="opt-foot">
-            <span class="opt-meta${metaClass}">${escapeHtml(metaText)}</span>
-            <div class="opt-actions">
-              ${
-                item.flows
-                  ? `<button class="btn ghost" type="button" data-action="flow" data-id="${escapeHtml(item.id)}">${
-                      isFlowOpen ? "Hide flow" : "Flow"
-                    }</button>`
-                  : ""
-              }
-              ${
-                isSuggested
-                  ? `<button class="btn ghost" type="button" data-action="dismiss" data-id="${escapeHtml(item.id)}">Dismiss</button>
-                     <button class="btn primary" type="button" data-action="activate" data-id="${escapeHtml(item.id)}">Add</button>`
-                  : `<button class="btn primary" type="button" data-action="run" data-id="${escapeHtml(item.id)}">${primaryLabel}</button>`
-              }
-            </div>
-          </div>
-        </article>
-      `;
-    })
+    .map((item) =>
+      renderOptimizationCard(item, {
+        isFlowOpen: expandedFlows.has(item.id),
+        feedback: feedbackById.get(item.id),
+      }),
+    )
     .join("");
 }
 
@@ -410,6 +421,13 @@ async function runStepsInTab(
 
     try {
       if (step.action === "navigate") {
+        const currentTab = chromeApi.tabs?.get
+          ? await chromeApi.tabs.get(currentTabId).catch(() => undefined)
+          : undefined;
+        if (currentTab?.url && scoreTabUrlMatch(currentTab.url, step.url) >= 2) {
+          results.push({ ok: true, url: currentTab.url });
+          continue;
+        }
         await chromeApi.tabs?.update?.(currentTabId, { url: step.url });
         await waitForTabLoad(chromeApi, currentTabId);
         results.push({ ok: true, url: step.url });
@@ -613,7 +631,8 @@ async function handleAction(action: string, id: string): Promise<void> {
           return;
         }
         try {
-          await runActionScriptInTab(chromeApi!, activeHttpTab.id, target.script);
+          const sliced = sliceScriptForTabUrl(target.script, activeHttpTab.url);
+          await runActionScriptInTab(chromeApi!, activeHttpTab.id, sliced.script);
           allItems = recordOptimizationRun(allItems, id);
           await saveLocalLibrary(allItems);
           setFeedback(id, `+${formatDuration(target.timeSavedPerRunSec)} saved`, "ok");
@@ -768,35 +787,37 @@ async function init(): Promise<void> {
   }, 2000);
 }
 
-document.querySelectorAll<HTMLButtonElement>(".filter-tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    const filter = tab.dataset.filter as FilterMode | undefined;
-    if (!filter) return;
-    currentFilter = filter;
-    document.querySelectorAll<HTMLButtonElement>(".filter-tab").forEach((btn) => {
-      const active = btn.dataset.filter === filter;
-      btn.classList.toggle("active", active);
-      btn.setAttribute("aria-selected", active ? "true" : "false");
+if (typeof document !== "undefined") {
+  document.querySelectorAll<HTMLButtonElement>(".filter-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const filter = tab.dataset.filter as FilterMode | undefined;
+      if (!filter) return;
+      currentFilter = filter;
+      document.querySelectorAll<HTMLButtonElement>(".filter-tab").forEach((btn) => {
+        const active = btn.dataset.filter === filter;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      render();
     });
+  });
+
+  document.getElementById("library-search")?.addEventListener("input", (event) => {
+    const input = event.target as HTMLInputElement;
+    searchQuery = input.value;
     render();
   });
-});
 
-document.getElementById("library-search")?.addEventListener("input", (event) => {
-  const input = event.target as HTMLInputElement;
-  searchQuery = input.value;
-  render();
-});
+  document.getElementById("library-list")?.addEventListener("click", (event) => {
+    const target = event.target as Element | null;
+    const button = target?.closest<HTMLElement>("[data-action][data-id]");
+    if (!button) return;
+    const action = button.dataset.action;
+    const id = button.dataset.id;
+    if (action && id) {
+      void handleAction(action, id);
+    }
+  });
 
-document.getElementById("library-list")?.addEventListener("click", (event) => {
-  const target = event.target as Element | null;
-  const button = target?.closest<HTMLElement>("[data-action][data-id]");
-  if (!button) return;
-  const action = button.dataset.action;
-  const id = button.dataset.id;
-  if (action && id) {
-    void handleAction(action, id);
-  }
-});
-
-void init();
+  void init();
+}
