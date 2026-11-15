@@ -4,6 +4,7 @@ import {
   EventSchema,
   LibraryEntrySchema,
   ReportSchema,
+  toLocatorList,
 } from "../schema.ts";
 
 describe("EventSchema", () => {
@@ -40,6 +41,30 @@ describe("EventSchema", () => {
     delete withoutSession.session;
     const parsed = EventSchema.safeParse(withoutSession);
     expect(parsed.success).toBe(false);
+  });
+
+  it("validates meta.pageSummary and catchall meta fields", () => {
+    const withPageSummary = EventSchema.parse({
+      ...validEvent,
+      meta: {
+        subType: "commit",
+        pageSummary: {
+          title: "Order Queue",
+          items: [{ id: "row-1", status: "open" }],
+        },
+      },
+    });
+    expect(withPageSummary.meta?.pageSummary).toEqual({
+      title: "Order Queue",
+      items: [{ id: "row-1", status: "open" }],
+    });
+
+    expect(
+      EventSchema.safeParse({
+        ...validEvent,
+        meta: { pageSummary: 123 },
+      }).success,
+    ).toBe(false);
   });
 });
 
@@ -162,11 +187,128 @@ describe("ActionScriptSchema", () => {
       ActionScriptSchema.safeParse({ steps: [{ action: "switchTab", host: "   " }] }).success,
     ).toBe(false);
   });
+
+  it("accepts single Locator and Locator[] targets, within, switchTab.url, pressKey, pauseBeforeSubmit, runMode, and forEach over pageSummary items", () => {
+    const script = ActionScriptSchema.parse({
+      name: "Batch order entry",
+      pauseBeforeSubmit: true,
+      runMode: "run_remaining",
+      steps: [
+        {
+          action: "switchTab",
+          host: "erp.local",
+          url: "https://erp.local/orders/new",
+        },
+        {
+          action: "forEach",
+          items: [
+            { orderId: "ORD-101", amount: 420 },
+            { orderId: "ORD-102", amount: 850 },
+          ],
+          steps: [
+            {
+              action: "fill",
+              target: [
+                { kind: "testid", value: "order-id-input" },
+                { kind: "css", value: 'input[name="orderId"]' },
+              ],
+              within: { kind: "css", value: "#order-form" },
+              value: "{{orderId}}",
+            },
+            {
+              action: "pressKey",
+              key: "Enter",
+              target: { kind: "css", value: 'input[name="orderId"]' },
+              within: [{ kind: "testid", value: "order-panel" }, { kind: "css", value: "#order-form" }],
+            },
+          ],
+        },
+        {
+          action: "click",
+          target: { kind: "aria", value: "Submit all" },
+        },
+      ],
+    });
+
+    expect(script.pauseBeforeSubmit).toBe(true);
+    expect(script.runMode).toBe("run_remaining");
+    expect(script.steps[0]).toEqual({
+      action: "switchTab",
+      host: "erp.local",
+      url: "https://erp.local/orders/new",
+    });
+    expect(script.steps[1]).toEqual({
+      action: "forEach",
+      items: [
+        { orderId: "ORD-101", amount: "420" },
+        { orderId: "ORD-102", amount: "850" },
+      ],
+      steps: [
+        {
+          action: "fill",
+          target: [
+            { kind: "testid", value: "order-id-input" },
+            { kind: "css", value: 'input[name="orderId"]' },
+          ],
+          within: { kind: "css", value: "#order-form" },
+          value: "{{orderId}}",
+        },
+        {
+          action: "pressKey",
+          key: "Enter",
+          target: { kind: "css", value: 'input[name="orderId"]' },
+          within: [{ kind: "testid", value: "order-panel" }, { kind: "css", value: "#order-form" }],
+        },
+      ],
+    });
+
+    const saveOnly = ActionScriptSchema.parse({
+      runMode: "save_only",
+      steps: [{ action: "pressKey", key: "Tab" }],
+    });
+    expect(saveOnly.runMode).toBe("save_only");
+
+    expect(toLocatorList(undefined)).toEqual([]);
+    expect(toLocatorList({ kind: "css", value: "#a" })).toEqual([{ kind: "css", value: "#a" }]);
+    expect(
+      toLocatorList([
+        { kind: "testid", value: "a" },
+        { kind: "css", value: "#a" },
+      ]),
+    ).toEqual([
+      { kind: "testid", value: "a" },
+      { kind: "css", value: "#a" },
+    ]);
+
+    expect(
+      ActionScriptSchema.safeParse({
+        steps: [{ action: "click", target: [] }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects braces in bind names", () => {
+    expect(
+      ActionScriptSchema.safeParse({
+        steps: [{ action: "readText", target: { kind: "css", value: ".id" }, bind: "{{orderId}}" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ActionScriptSchema.safeParse({
+        steps: [{ action: "readValue", target: { kind: "css", value: ".id" }, bind: "{orderId}" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ActionScriptSchema.safeParse({
+        steps: [{ action: "extractList", target: { kind: "css", value: "tr" }, bind: "{}" }],
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("LibraryEntrySchema", () => {
-  it("validates a compiled library entry with Eyes detection metadata", () => {
-    const parsed = LibraryEntrySchema.safeParse({
+  it("validates a compiled library entry with Eyes detection metadata, stats, and startSignature", () => {
+    const parsed = LibraryEntrySchema.parse({
       id: "lib_12345abc",
       name: "Shipping reply",
       description: "Insert shipping update into customer reply box.",
@@ -175,6 +317,8 @@ describe("LibraryEntrySchema", () => {
       solution: "Insert 'Thanks, your order ships Friday.' into the reply box.",
       script: {
         name: "Shipping reply",
+        pauseBeforeSubmit: false,
+        runMode: "save_only",
         steps: [{ action: "insertText", value: "Thanks, your order ships Friday." }],
       },
       eyes: {
@@ -200,10 +344,34 @@ describe("LibraryEntrySchema", () => {
           minSignals: 2,
         },
       },
+      stats: {
+        repetitions: 3,
+        stepCount: 4,
+        manualSeconds: 18,
+        replaySeconds: 2,
+        timeSavedSeconds: 16,
+      },
+      startSignature: "mail.example.com|/tickets/*|focus:textbox:customer_reply",
       createdAt: 1700000000000,
       updatedAt: 1700000000000,
       runCount: 0,
     });
-    expect(parsed.success).toBe(true);
+    expect(parsed.stats).toEqual({
+      repetitions: 3,
+      stepCount: 4,
+      manualSeconds: 18,
+      replaySeconds: 2,
+      timeSavedSeconds: 16,
+    });
+    expect(parsed.startSignature).toBe(
+      "mail.example.com|/tickets/*|focus:textbox:customer_reply",
+    );
+
+    expect(
+      LibraryEntrySchema.safeParse({
+        ...parsed,
+        startSignature: "",
+      }).success,
+    ).toBe(false);
   });
 });

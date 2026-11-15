@@ -367,7 +367,7 @@ export async function executeStep(
     return combined;
   }
 
-  function resolveAll(locator: Locator, root: ParentNode = document): Element[] {
+  function resolveAllForLocator(locator: Locator, root: ParentNode = document): Element[] {
     if (locator.kind === "css") {
       try {
         return Array.from(root.querySelectorAll(locator.value));
@@ -564,7 +564,7 @@ export async function executeStep(
   ): { element: Element | null; hiddenCandidate: Element | null } {
     let firstHidden: Element | null = null;
     for (const locator of locators) {
-      const found = resolveAll(locator, root);
+      const found = resolveAllForLocator(locator, root);
       const visible = found.filter(isVisible);
       if (visible.length > 1) {
         throw new Error("Ambiguous target");
@@ -593,9 +593,25 @@ export async function executeStep(
     return { element: null, hiddenCandidate: firstHidden };
   }
 
-  function resolveSingleInRoot(locator: Locator, root: ParentNode): Element | null {
-    const found = resolveAll(locator, root);
-    return found.find(isVisible) ?? found[0] ?? null;
+  function resolveAll(target: Locator | Locator[], root: ParentNode = document): Element[] {
+    for (const locator of toLocatorList(target)) {
+      const found = resolveAllForLocator(locator, root);
+      if (found.length > 0) return found;
+    }
+    return [];
+  }
+
+  function resolve(target: Locator | Locator[], root: ParentNode = document): Element | null {
+    for (const locator of toLocatorList(target)) {
+      const found = resolveAllForLocator(locator, root);
+      const match = found.find(isVisible) ?? found[0] ?? null;
+      if (match) return match;
+    }
+    return null;
+  }
+
+  function resolveSingleInRoot(target: Locator | Locator[], root: ParentNode): Element | null {
+    return resolve(target, root);
   }
 
   async function resolveStepTarget(): Promise<Element | null> {

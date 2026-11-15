@@ -546,7 +546,11 @@ async function executeDomStepInPage(step: DomStep): Promise<StepResult> {
     return [...submitInputs, ...textMatched];
   }
 
-  function resolveAll(locator: Locator, root: ParentNode = document): Element[] {
+  function toLocatorList(target: Locator | Locator[]): Locator[] {
+    return Array.isArray(target) ? target : [target];
+  }
+
+  function resolveAllForLocator(locator: Locator, root: ParentNode = document): Element[] {
     if (locator.kind === "css") return Array.from(root.querySelectorAll(locator.value));
     if (locator.kind === "xpath") {
       const snapshot = document.evaluate(
@@ -572,9 +576,21 @@ async function executeDomStepInPage(step: DomStep): Promise<StepResult> {
     return resolveText(locator.value, root);
   }
 
-  function resolve(locator: Locator, root: ParentNode = document): Element | null {
-    const found = resolveAll(locator, root);
-    return found.find(isVisible) ?? found[0] ?? null;
+  function resolveAll(target: Locator | Locator[], root: ParentNode = document): Element[] {
+    for (const locator of toLocatorList(target)) {
+      const found = resolveAllForLocator(locator, root);
+      if (found.length > 0) return found;
+    }
+    return [];
+  }
+
+  function resolve(target: Locator | Locator[], root: ParentNode = document): Element | null {
+    for (const locator of toLocatorList(target)) {
+      const found = resolveAllForLocator(locator, root);
+      const match = found.find(isVisible) ?? found[0] ?? null;
+      if (match) return match;
+    }
+    return null;
   }
 
   function unwrapControl(element: Element): Element {

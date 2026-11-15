@@ -3,6 +3,8 @@ import {
   EyesDetectionSpecSchema,
   ImplementedLibraryDraftSchema,
   LibraryEntrySchema,
+  ScriptTargetSchema,
+  toLocatorList,
   type ActionScript,
   type EyesDetectionSpec,
   type ImplementedLibraryDraft,
@@ -13,6 +15,7 @@ import {
   type ScriptLocator as Locator,
   type ScriptLocatorKind as LocatorKind,
   type ScriptStep as Step,
+  type ScriptTarget as Target,
 } from "@gen/shared/schema.ts";
 
 export type {
@@ -26,12 +29,15 @@ export type {
   Locator,
   LocatorKind,
   Step,
+  Target,
 };
 export {
   ActionScriptSchema,
   EyesDetectionSpecSchema,
   ImplementedLibraryDraftSchema,
   LibraryEntrySchema,
+  ScriptTargetSchema,
+  toLocatorList,
 };
 
 const LOCATOR_SCHEMA = {
@@ -43,6 +49,10 @@ const LOCATOR_SCHEMA = {
   required: ["kind", "value"],
 } as const;
 
+const TARGET_SCHEMA = {
+  anyOf: [LOCATOR_SCHEMA, { type: "array", items: LOCATOR_SCHEMA }],
+} as const;
+
 const LEAF_STEP_PROPERTIES = {
   action: {
     type: "string",
@@ -51,6 +61,7 @@ const LEAF_STEP_PROPERTIES = {
       "fill",
       "insertText",
       "select",
+      "pressKey",
       "waitFor",
       "readText",
       "readValue",
@@ -60,7 +71,9 @@ const LEAF_STEP_PROPERTIES = {
       "switchTab",
     ],
   },
-  target: LOCATOR_SCHEMA,
+  target: TARGET_SCHEMA,
+  within: TARGET_SCHEMA,
+  key: { type: "string", enum: ["Enter", "Tab", "Escape"] },
   value: { type: "string" },
   url: { type: "string" },
   host: { type: "string" },
@@ -86,6 +99,8 @@ export const ACTION_SCRIPT_RESPONSE_SCHEMA = {
   type: "object",
   properties: {
     name: { type: "string" },
+    pauseBeforeSubmit: { type: "boolean" },
+    runMode: { type: "string", enum: ["run_remaining", "save_only"] },
     steps: {
       type: "array",
       items: {

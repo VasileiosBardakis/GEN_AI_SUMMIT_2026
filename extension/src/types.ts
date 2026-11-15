@@ -4,16 +4,65 @@ export type Locator = {
 };
 
 export type DomStep =
-  | { action: "click"; target: Locator; optional?: boolean }
-  | { action: "fill"; target: Locator; value: string; optional?: boolean }
-  | { action: "insertText"; target?: Locator; value: string; optional?: boolean }
-  | { action: "select"; target: Locator; value: string; optional?: boolean }
-  | { action: "waitFor"; target: Locator; timeoutMs?: number; optional?: boolean }
-  | { action: "readText"; target: Locator; bind: string; optional?: boolean }
-  | { action: "readValue"; target: Locator; bind: string; optional?: boolean }
+  | {
+      action: "click";
+      target: Locator | Locator[];
+      within?: Locator | Locator[];
+      optional?: boolean;
+    }
+  | {
+      action: "fill";
+      target: Locator | Locator[];
+      within?: Locator | Locator[];
+      value: string;
+      optional?: boolean;
+    }
+  | {
+      action: "insertText";
+      target?: Locator | Locator[];
+      within?: Locator | Locator[];
+      value: string;
+      optional?: boolean;
+    }
+  | {
+      action: "select";
+      target: Locator | Locator[];
+      within?: Locator | Locator[];
+      value: string;
+      optional?: boolean;
+    }
+  | {
+      action: "pressKey";
+      key: "Enter" | "Tab" | "Escape";
+      target?: Locator | Locator[];
+      within?: Locator | Locator[];
+      optional?: boolean;
+    }
+  | {
+      action: "waitFor";
+      target: Locator | Locator[];
+      within?: Locator | Locator[];
+      timeoutMs?: number;
+      optional?: boolean;
+    }
+  | {
+      action: "readText";
+      target: Locator | Locator[];
+      within?: Locator | Locator[];
+      bind: string;
+      optional?: boolean;
+    }
+  | {
+      action: "readValue";
+      target: Locator | Locator[];
+      within?: Locator | Locator[];
+      bind: string;
+      optional?: boolean;
+    }
   | {
       action: "extractList";
-      target: Locator;
+      target: Locator | Locator[];
+      within?: Locator | Locator[];
       bind: string;
       fields?: Record<string, Locator>;
       optional?: boolean;
@@ -23,7 +72,7 @@ export type Step =
   | DomStep
   | { action: "navigate"; url: string; optional?: boolean }
   | { action: "wait"; ms: number; optional?: boolean }
-  | { action: "switchTab"; host: string; optional?: boolean }
+  | { action: "switchTab"; host: string; url?: string; optional?: boolean }
   | {
       action: "forEach";
       items: Record<string, string>[] | string;
@@ -34,6 +83,8 @@ export type Step =
 export type ActionScript = {
   name?: string;
   steps: Step[];
+  pauseBeforeSubmit?: boolean;
+  runMode?: "run_remaining" | "save_only";
 };
 
 export type BindingValue = string | Record<string, string>[];

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Event, Report } from "../contract.ts";
+import { EventSchema } from "../schema.ts";
 
 describe("shared contract", () => {
   it("validates Event and Report types", () => {
@@ -15,6 +16,13 @@ describe("shared contract", () => {
         locators: [{ kind: "testid", value: "submit-btn" }],
         tag: "button",
         label: "Submit",
+      },
+      meta: {
+        pageSummary: {
+          title: "Orders",
+          headings: ["Pending Orders"],
+          lists: [{ id: "orders-table", rowCount: 3 }],
+        },
       },
     };
 
@@ -39,6 +47,7 @@ describe("shared contract", () => {
     };
 
     expect(event.v).toBe(1);
+    expect(EventSchema.parse(event)).toEqual(event);
     expect(report.findings.length).toBe(1);
   });
 });
