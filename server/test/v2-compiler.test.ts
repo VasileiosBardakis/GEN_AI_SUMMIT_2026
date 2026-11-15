@@ -6,7 +6,7 @@ import type { Event } from "@gen/shared";
 import { EventsSchema } from "@gen/shared/schema.ts";
 import type { GeminiClient, GeminiSdk } from "../src/llm/gemini.ts";
 import { createProposer } from "../src/propose.ts";
-import { compiledWorkflowToActionScript } from "../src/report.ts";
+import { compiledWorkflowToActionScript, pickPrimaryCandidate } from "../src/report.ts";
 import {
   COMPILER_RESPONSE_SCHEMA,
   compileWorkflow,
@@ -802,6 +802,35 @@ describe("Brain v2 compiler and validator", () => {
       }).ok,
     ).toBe(false);
 
+    // Placeholder hosts rejected
+    for (const badHost of ["browser", "unknown", "local-page"]) {
+      expect(
+        validateCompiledWorkflow({
+          ...base,
+          steps: [{ action: "switchTab", host: badHost }],
+        }).ok,
+      ).toBe(false);
+    }
+
+    // switchTab with optional url accepted when normalized
+    expect(
+      validateCompiledWorkflow({
+        ...base,
+        steps: [
+          {
+            action: "switchTab",
+            host: "localhost",
+            url: "http://localhost:4173/erp.html",
+          },
+          {
+            action: "fill",
+            target: [{ kind: "testid", value: "q" }],
+            value: "{{query}}",
+          },
+        ],
+      }).ok,
+    ).toBe(true);
+
     // Step cap
     expect(validateCompiledWorkflow(base, { maxSteps: 1 }).ok).toBe(false);
 
@@ -837,6 +866,160 @@ describe("Brain v2 compiler and validator", () => {
         }).ok,
       ).toBe(false);
     }
+  });
+
+  it("resolves real host + url for switchTab when events use localhost/127.0.0.1 or 'browser' app fallback, and omits switchTab when only placeholder exists", async () => {
+    const events: Event[] = [1, 2].flatMap((row) => [
+      {
+        v: 1 as const,
+        id: `c-${row}`,
+        ts: row * 10_000 + 100,
+        session: "s_loopback_browser",
+        source: "browser" as const,
+        app: "browser",
+        url: "http://localhost:4173/portal.html",
+        type: "copy" as const,
+        target: {
+          tag: "span",
+          locators: [{ kind: "testid" as const, value: `portal-id-${row}` }],
+        },
+        value: `INV-${row}`,
+      },
+      {
+        v: 1 as const,
+        id: `ts-${row}`,
+        ts: row * 10_000 + 200,
+        session: "s_loopback_browser",
+        source: "browser" as const,
+        app: "browser",
+        url: "http://127.0.0.1:4173/erp.html",
+        type: "tab_switch" as const,
+      },
+      {
+        v: 1 as const,
+        id: `p-${row}`,
+        ts: row * 10_000 + 300,
+        session: "s_loopback_browser",
+        source: "browser" as const,
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/erp.html",
+        type: "paste" as const,
+        target: {
+          tag: "input",
+          locators: [{ kind: "testid" as const, value: "erp-id" }],
+        },
+        value: `INV-${row}`,
+      },
+      {
+        v: 1 as const,
+        id: `s-${row}`,
+        ts: row * 10_000 + 400,
+        session: "s_loopback_browser",
+        source: "browser" as const,
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:4173/erp.html",
+        type: "click" as const,
+        target: {
+          tag: "button",
+          locators: [{ kind: "testid" as const, value: "save-btn" }],
+        },
+      },
+    ]);
+
+    const { client } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Copy invoice to ERP",
+      reason: "Copies invoice ID from portal to ERP",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "readText", stepIndex: 0, bind: "invoiceId" },
+        { action: "switchTab", host: "browser", stepIndex: 1 },
+        { action: "fill", stepIndex: 2, value: "{{invoiceId}}" },
+        { action: "click", stepIndex: 3 },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events, repeatCount: 2 },
+      {
+        gemini: client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(wf).not.toBeNull();
+    expect(wf!.apps).toEqual(["localhost"]);
+    expect(wf!.startUrl).toBe("http://localhost:4173/portal.html");
+    expect(wf!.steps[0]).toEqual({ action: "switchTab", host: "localhost" });
+    expect(wf!.steps[2]).toEqual({
+      action: "switchTab",
+      host: "localhost",
+      url: "http://localhost:4173/erp.html",
+    });
+
+    // When events only have placeholder app ("browser") and no URL, omit prepending switchTab and drop placeholder switchTab
+    const placeholderOnlyEvents: Event[] = [1, 2].flatMap((row) => [
+      {
+        v: 1 as const,
+        id: `ph-fill-${row}`,
+        ts: row * 10_000 + 100,
+        session: "s_placeholder_only",
+        source: "browser" as const,
+        app: "browser",
+        type: "input" as const,
+        target: {
+          tag: "input",
+          locators: [{ kind: "testid" as const, value: "field-a" }],
+        },
+        value: `val-${row}`,
+      },
+      {
+        v: 1 as const,
+        id: `ph-click-${row}`,
+        ts: row * 10_000 + 200,
+        session: "s_placeholder_only",
+        source: "browser" as const,
+        app: "local-page",
+        type: "click" as const,
+        target: {
+          tag: "button",
+          locators: [{ kind: "testid" as const, value: "btn-ok" }],
+        },
+      },
+    ]);
+
+    const { client: phClient } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Fill and confirm",
+      reason: "Fills field and clicks OK",
+      risk: "low",
+      runMode: "save_only",
+      params: [{ name: "val", example: "val-1" }],
+      steps: [
+        { action: "switchTab", host: "browser" },
+        { action: "fill", stepIndex: 0, value: "{{val}}" },
+        { action: "click", stepIndex: 1 },
+      ],
+    });
+
+    const phWf = await compileWorkflow(
+      { events: placeholderOnlyEvents, repeatCount: 2 },
+      {
+        gemini: phClient,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(phWf).not.toBeNull();
+    expect(phWf!.apps).toEqual([]);
+    expect(phWf!.steps.some((s) => s.action === "switchTab")).toBe(false);
+    expect(phWf!.steps.map((s) => s.action)).toEqual(["fill", "click"]);
   });
 
   it("compiles a 3-repeat form trace with repeated Help click + excursion without navigate or extra click", async () => {
@@ -1106,6 +1289,132 @@ describe("Brain v2 compiler and validator", () => {
     } finally {
       proposer.close();
     }
+  });
+
+  it("parses real-sheet-capture.jsonl {source, target} pageSummary objects (masked) into containers/targets/lists and resolves readText column", async () => {
+    const events = await loadFixture("real-sheet-capture.jsonl");
+    // Inject an email into a copy of the fixture's {source, target} summaries to verify PII scrubbing
+    const lastCopyIdx = events.map((e) => e.type).lastIndexOf("copy");
+    const eventsWithPii = events.map((ev, idx) => {
+      if (idx === lastCopyIdx && ev.meta?.pageSummary && typeof ev.meta.pageSummary === "object") {
+        const cloned = JSON.parse(JSON.stringify(ev)) as Event;
+        const ps = cloned.meta!.pageSummary as {
+          source: { rows: Array<{ cells: Array<{ text: string }> }> };
+        };
+        ps.source.rows[2].cells[0].text = "boreal@example.com";
+        return cloned;
+      }
+      return ev;
+    });
+
+    const { client, prompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Sync real sheet rates",
+      reason: "Copies lookup values from sheet-table to client-detail",
+      risk: "low",
+      runMode: "run_remaining",
+      params: [{ name: "clientName" }, { name: "lookupValue" }],
+      steps: [
+        {
+          action: "forEach",
+          itemIds: ["item_2_3", "item_2_4"],
+          steps: [
+            {
+              action: "click",
+              withinId: "ps_1",
+              withinTextParam: "clientName",
+              stepIndex: 2,
+            },
+            { action: "click", stepIndex: 3 },
+            {
+              action: "readText",
+              withinId: "ps_2",
+              withinTextParam: "clientName",
+              stepIndex: 5,
+              bind: "lookupValue",
+            },
+            { action: "click", stepIndex: 6 },
+            { action: "fill", stepIndex: 8, value: "{{lookupValue}}" },
+            { action: "click", stepIndex: 9 },
+            { action: "click", stepIndex: 10 },
+          ],
+        },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events: eventsWithPii },
+      {
+        gemini: client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(prompts[0]).toContain("PageSummary Containers");
+    expect(prompts[0]).toContain("PageSummary Targets:");
+    expect(prompts[0]).toContain("PageSummary Lists:");
+    expect(prompts[0]).toContain("client-list");
+    expect(prompts[0]).toContain("sheet-table");
+    expect(prompts[0]).toContain("submit form");
+    expect(prompts[0]).not.toContain("boreal@example.com");
+    expect(prompts[0]).toContain("__PII_EMAIL_");
+
+    expect(wf).not.toBeNull();
+    expect(wf!.runMode).toBe("run_remaining");
+    const loop = wf!.steps[1];
+    expect(loop.action).toBe("forEach");
+    if (loop.action === "forEach" && Array.isArray(loop.items)) {
+      expect(loop.items).toHaveLength(2);
+      // Restored locally from piiMap
+      expect(loop.items[0].col1).toBe("boreal@example.com");
+      expect(loop.items[0].col2).toBe("RATE-3190");
+      expect(loop.items[1].col1).toBe("Vanguard Marine Inc");
+      expect(loop.items[1].col2).toBe("RATE-4418");
+
+      const openStep = loop.steps[0];
+      expect(openStep.action).toBe("click");
+      if (openStep.action === "click") {
+        expect(openStep.within).toEqual([
+          { kind: "testid", value: "client-list" },
+          { kind: "css", value: "#client-list-section" },
+          { kind: "text", value: "{{col1}}" },
+        ]);
+      }
+
+      const readStep = loop.steps[2];
+      expect(readStep.action).toBe("readText");
+      if (readStep.action === "readText") {
+        expect(readStep.target).toEqual([{ kind: "css", value: "td:nth-of-type(2)" }]);
+        expect(readStep.within).toEqual([
+          { kind: "testid", value: "sheet-table" },
+          { kind: "css", value: "#sheet-panel > section > table" },
+          { kind: "text", value: "{{col1}}" },
+        ]);
+        expect(readStep.bind).toBe("lookupValue");
+      }
+    }
+  });
+
+  it("pickPrimaryCandidate prefers substantive workflow over trivial 2-click boundary pair", () => {
+    const picked = pickPrimaryCandidate([
+      {
+        signature: "click->click",
+        actions: ["click", "click"],
+        count: 3,
+        apps: ["localhost"],
+        instances: [],
+      },
+      {
+        signature: "click->click->copy->click->paste->fill->click",
+        actions: ["click", "click", "copy", "click", "paste", "fill", "click"],
+        count: 2,
+        apps: ["localhost"],
+        instances: [],
+      },
+    ]);
+    expect(picked?.signature).toBe("click->click->copy->click->paste->fill->click");
   });
 
   it("binds unmapped [REDACTED:EMAIL#h_...] tokens to {{param}} with piiHash and backfills missing param examples without leaking PII", async () => {

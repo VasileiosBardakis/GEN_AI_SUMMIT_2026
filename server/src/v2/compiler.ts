@@ -13,6 +13,7 @@ import {
 import { eventsToSteps, type PiiMap, type V2Step } from "./steps.ts";
 import { countRepeatedPatterns, resolveRepeatCount, splitEpisodes } from "./tries.ts";
 import {
+  isPlaceholderHost,
   normalizeHost,
   validateCompiledWorkflow,
   type CompiledLeafStep,
@@ -21,6 +22,8 @@ import {
   type CompiledWorkflow,
   type CompiledWorkflowStats,
 } from "./validate.ts";
+
+export { isPlaceholderHost };
 
 export type {
   CompiledLeafStep,
@@ -249,7 +252,7 @@ type EnrichedStep = V2Step & {
   label?: string;
   role?: string;
   tag?: string;
-  container?: { testid?: string; itemKey?: string };
+  container?: { testid?: string; css?: string; itemKey?: string };
   rawPageSummary?: unknown;
 };
 
@@ -258,6 +261,7 @@ type PageSummaryTarget = {
   host: string;
   description: string;
   locators: Locator[];
+  withinOnly?: boolean;
 };
 
 type PageSummaryListItem = {
@@ -275,11 +279,21 @@ type PageSummaryList = {
   items: PageSummaryListItem[];
 };
 
+type SourceColumnMeta = {
+  rowTag: string;
+  columns: Array<{
+    texts: string[];
+    locators: Locator[];
+    invariantLocators: Locator[];
+  }>;
+};
+
 type PromptContext = {
   indexedSteps: EnrichedStep[];
   targets: Map<string, PageSummaryTarget>;
   lists: Map<string, PageSummaryList>;
   items: Map<string, PageSummaryListItem>;
+  sourceMetaByContainerId: Map<string, SourceColumnMeta>;
   summaryViews: Array<{ host: string; viewKey: string; content: string }>;
   repeatCount: number;
 };
@@ -303,6 +317,30 @@ function normalizeUrlHost(rawUrl: string): string {
   } catch {
     return rawUrl;
   }
+}
+
+function hostnameFromUrl(rawUrl?: string): string | undefined {
+  if (!rawUrl || !rawUrl.trim()) return undefined;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return undefined;
+    }
+    const host = normalizeHost(parsed.hostname);
+    return isPlaceholderHost(host) ? undefined : host;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveStepRealHost(step: { app?: string; url?: string }): string | undefined {
+  const fromUrl = hostnameFromUrl(step.url);
+  if (fromUrl) return fromUrl;
+  if (step.app) {
+    const normalized = normalizeHost(step.app);
+    if (!isPlaceholderHost(normalized)) return normalized;
+  }
+  return undefined;
 }
 
 function mergeCapturedNavigateUrl(
@@ -511,24 +549,39 @@ function enrichSteps(steps: V2Step[], events?: Event[]): EnrichedStep[] {
     const containerMeta = matched?.meta?.container as
       | { testid?: unknown; itemKey?: unknown }
       | undefined;
+    const rawPs = matched?.meta?.pageSummary as
+      | { source?: { containerLocators?: Array<{ kind?: unknown; value?: unknown }> } }
+      | undefined;
+    const sourceLoc0 =
+      !containerMeta && Array.isArray(rawPs?.source?.containerLocators)
+        ? rawPs!.source!.containerLocators![0]
+        : undefined;
+    const derivedContainer =
+      containerMeta && typeof containerMeta === "object"
+        ? {
+            ...(typeof containerMeta.testid === "string"
+              ? { testid: containerMeta.testid }
+              : {}),
+            ...(typeof containerMeta.itemKey === "string"
+              ? { itemKey: containerMeta.itemKey }
+              : {}),
+          }
+        : sourceLoc0 &&
+            typeof sourceLoc0.value === "string" &&
+            sourceLoc0.value.trim()
+          ? {
+              ...(sourceLoc0.kind === "testid"
+                ? { testid: sourceLoc0.value.trim() }
+                : { css: sourceLoc0.value.trim() }),
+            }
+          : undefined;
 
     return {
       ...step,
       label: matched?.target?.label,
       role: matched?.target?.role,
       tag: matched?.target?.tag,
-      ...(containerMeta && typeof containerMeta === "object"
-        ? {
-            container: {
-              ...(typeof containerMeta.testid === "string"
-                ? { testid: containerMeta.testid }
-                : {}),
-              ...(typeof containerMeta.itemKey === "string"
-                ? { itemKey: containerMeta.itemKey }
-                : {}),
-            },
-          }
-        : {}),
+      ...(derivedContainer ? { container: derivedContainer } : {}),
       rawPageSummary: matched?.meta?.pageSummary ?? step.pageSummary,
     };
   });
@@ -543,6 +596,32 @@ function inferLabelFromTarget(target?: Locator[]): string | undefined {
   return undefined;
 }
 
+const VALID_SUMMARY_LOCATOR_KINDS = new Set<Locator["kind"]>([
+  "testid",
+  "aria",
+  "css",
+  "text",
+  "uia",
+]);
+
+function parseSummaryLocators(raw: unknown): Locator[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Locator[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as { kind?: unknown; value?: unknown };
+    if (
+      typeof rec.kind === "string" &&
+      VALID_SUMMARY_LOCATOR_KINDS.has(rec.kind as Locator["kind"]) &&
+      typeof rec.value === "string" &&
+      rec.value.trim().length > 0
+    ) {
+      out.push({ kind: rec.kind as Locator["kind"], value: rec.value.trim() });
+    }
+  }
+  return out;
+}
+
 function extractPageSummaryData(
   steps: EnrichedStep[],
   scrubText: (s: string) => string,
@@ -550,6 +629,7 @@ function extractPageSummaryData(
   targets: Map<string, PageSummaryTarget>;
   lists: Map<string, PageSummaryList>;
   items: Map<string, PageSummaryListItem>;
+  sourceMetaByContainerId: Map<string, SourceColumnMeta>;
   summaryViews: Array<{ host: string; viewKey: string; content: string }>;
 } {
   const latestByView = new Map<
@@ -559,15 +639,70 @@ function extractPageSummaryData(
 
   for (const step of steps) {
     if (step.rawPageSummary === undefined) continue;
-    const host = normalizeHost(step.app);
+    const host = resolveStepRealHost(step) ?? normalizeHost(step.app);
     const scrubbed = scrubUnknown(step.rawPageSummary, scrubText);
 
-    let viewKey = host;
     if (typeof scrubbed === "string") {
       const firstLine = scrubbed.split(/\r?\n/)[0]?.trim() ?? "";
-      viewKey = firstLine || host;
-    } else if (scrubbed && typeof scrubbed === "object") {
+      const viewKey = firstLine || host;
+      latestByView.set(`${host}::${viewKey}`, {
+        host,
+        viewKey,
+        summary: scrubbed,
+      });
+      continue;
+    }
+
+    if (scrubbed && typeof scrubbed === "object") {
       const rec = scrubbed as Record<string, unknown>;
+      const hasSource = Boolean(
+        rec.source && typeof rec.source === "object" && !Array.isArray(rec.source),
+      );
+      const hasTarget = Boolean(
+        rec.target && typeof rec.target === "object" && !Array.isArray(rec.target),
+      );
+
+      if (hasSource) {
+        const src = rec.source as Record<string, unknown>;
+        const containerLocs = parseSummaryLocators(src.containerLocators);
+        const rowTag =
+          typeof src.rowTag === "string" && src.rowTag.trim()
+            ? src.rowTag.trim().toLowerCase()
+            : "tr";
+        const sourceKey = containerLocs[0]
+          ? `source:${containerLocs[0].kind}:${containerLocs[0].value}`
+          : `source:${rowTag}`;
+        latestByView.set(`${host}::${sourceKey}`, {
+          host,
+          viewKey: sourceKey,
+          summary: { source: rec.source },
+        });
+      }
+
+      if (hasTarget) {
+        const tgt = rec.target as Record<string, unknown>;
+        const containerLocs = parseSummaryLocators(tgt.containerLocators);
+        const containerTag =
+          typeof tgt.containerTag === "string" && tgt.containerTag.trim()
+            ? tgt.containerTag.trim().toLowerCase()
+            : "form";
+        const targetKey = containerLocs[0]
+          ? `target:${containerLocs[0].kind}:${containerLocs[0].value}`
+          : `target:${containerTag}`;
+        latestByView.set(`${host}::${targetKey}`, {
+          host,
+          viewKey: targetKey,
+          summary: { target: rec.target },
+        });
+      }
+
+      if (hasSource || hasTarget) {
+        if (typeof rec.view !== "string" && !Array.isArray(rec.containers)) {
+          continue;
+        }
+      }
+
+      let viewKey = host;
       if (typeof rec.view === "string" && rec.view.trim()) {
         viewKey = rec.view.trim();
       } else {
@@ -580,18 +715,19 @@ function extractPageSummaryData(
             : "";
         viewKey = firstId || host;
       }
-    }
 
-    latestByView.set(`${host}::${viewKey}`, {
-      host,
-      viewKey,
-      summary: scrubbed,
-    });
+      latestByView.set(`${host}::${viewKey}`, {
+        host,
+        viewKey,
+        summary: scrubbed,
+      });
+    }
   }
 
   const targets = new Map<string, PageSummaryTarget>();
   const lists = new Map<string, PageSummaryList>();
   const items = new Map<string, PageSummaryListItem>();
+  const sourceMetaByContainerId = new Map<string, SourceColumnMeta>();
   const summaryViews: Array<{ host: string; viewKey: string; content: string }> = [];
 
   let targetSeq = 0;
@@ -601,10 +737,17 @@ function extractPageSummaryData(
     host: string,
     description: string,
     locators: Locator[],
+    withinOnly = false,
   ): string {
     targetSeq += 1;
     const id = `ps_${targetSeq}`;
-    targets.set(id, { id, host, description, locators });
+    targets.set(id, {
+      id,
+      host,
+      description,
+      locators,
+      ...(withinOnly ? { withinOnly: true } : {}),
+    });
     return id;
   }
 
@@ -754,7 +897,7 @@ function extractPageSummaryData(
             typeof container.testid === "string"
               ? `container ${container.testid}`
               : `container ${viewKey}`;
-          containerId = addTarget(host, desc, locators);
+          containerId = addTarget(host, desc, locators, true);
         }
 
         if (Array.isArray(container.fields)) {
@@ -812,6 +955,153 @@ function extractPageSummaryData(
         }
       }
 
+      if (rec.source && typeof rec.source === "object" && !Array.isArray(rec.source)) {
+        const src = rec.source as Record<string, unknown>;
+        const containerLocs = parseSummaryLocators(src.containerLocators);
+        const rowTag =
+          typeof src.rowTag === "string" && src.rowTag.trim()
+            ? src.rowTag.trim().toLowerCase()
+            : "tr";
+        let containerId: string | undefined;
+        if (containerLocs.length > 0) {
+          containerId = addTarget(
+            host,
+            `container ${containerLocs[0].value}`,
+            containerLocs,
+            true,
+          );
+        }
+
+        const rawRows = Array.isArray(src.rows) ? src.rows : [];
+        const parsedRows: Array<{ fields: Record<string, string> }> = [];
+        const columnAccum: Array<{
+          texts: string[];
+          locators: Locator[];
+          locatorRowCounts: Map<string, { loc: Locator; rows: number }>;
+        }> = [];
+
+        for (const rawRow of rawRows) {
+          if (!rawRow || typeof rawRow !== "object") continue;
+          const rowRec = rawRow as Record<string, unknown>;
+          const rawCells = Array.isArray(rowRec.cells) ? rowRec.cells : [];
+          const fields: Record<string, string> = {};
+          for (let c = 0; c < rawCells.length; c++) {
+            const cell = rawCells[c];
+            if (!cell || typeof cell !== "object") continue;
+            const cellRec = cell as Record<string, unknown>;
+            const text =
+              typeof cellRec.text === "string" ? cellRec.text.trim() : "";
+            fields[`col${c + 1}`] = text;
+
+            while (columnAccum.length <= c) {
+              columnAccum.push({
+                texts: [],
+                locators: [],
+                locatorRowCounts: new Map(),
+              });
+            }
+            const colEntry = columnAccum[c];
+            if (text) colEntry.texts.push(text);
+            const cellLocs = parseSummaryLocators(cellRec.locators);
+            const seenInCell = new Set<string>();
+            for (const loc of cellLocs) {
+              colEntry.locators.push(loc);
+              const k = `${loc.kind}::${loc.value}`;
+              if (!seenInCell.has(k)) {
+                seenInCell.add(k);
+                const prev = colEntry.locatorRowCounts.get(k);
+                if (prev) {
+                  prev.rows += 1;
+                } else {
+                  colEntry.locatorRowCounts.set(k, { loc, rows: 1 });
+                }
+              }
+            }
+          }
+          if (Object.keys(fields).length > 0) {
+            parsedRows.push({ fields });
+          }
+        }
+
+        if (parsedRows.length > 0) {
+          addList(
+            host,
+            containerId ? `${viewKey} (${containerId})` : viewKey,
+            parsedRows,
+            containerId,
+          );
+        }
+
+        if (containerId && columnAccum.length > 0) {
+          const allLocatorCols = new Map<string, Set<number>>();
+          for (let c = 0; c < columnAccum.length; c++) {
+            for (const k of columnAccum[c].locatorRowCounts.keys()) {
+              let set = allLocatorCols.get(k);
+              if (!set) {
+                set = new Set<number>();
+                allLocatorCols.set(k, set);
+              }
+              set.add(c);
+            }
+          }
+
+          const columns: SourceColumnMeta["columns"] = columnAccum.map(
+            (colEntry, c) => {
+              const invariantLocators: Locator[] = [];
+              for (const [k, info] of colEntry.locatorRowCounts.entries()) {
+                const colSpread = allLocatorCols.get(k)?.size ?? 0;
+                if (info.rows >= 2 && colSpread === 1) {
+                  invariantLocators.push(info.loc);
+                }
+              }
+              if (invariantLocators.length === 0 && rowTag === "tr") {
+                invariantLocators.push({
+                  kind: "css",
+                  value: `td:nth-of-type(${c + 1})`,
+                });
+              }
+              return {
+                texts: colEntry.texts,
+                locators: colEntry.locators,
+                invariantLocators,
+              };
+            },
+          );
+          sourceMetaByContainerId.set(containerId, { rowTag, columns });
+        }
+      }
+
+      if (rec.target && typeof rec.target === "object" && !Array.isArray(rec.target)) {
+        const tgt = rec.target as Record<string, unknown>;
+        const containerTag =
+          typeof tgt.containerTag === "string" && tgt.containerTag.trim()
+            ? tgt.containerTag.trim()
+            : "form";
+        const emptyControls = Array.isArray(tgt.emptyControls)
+          ? tgt.emptyControls
+          : [];
+        for (const rawCtrl of emptyControls) {
+          if (!rawCtrl || typeof rawCtrl !== "object") continue;
+          const ctrl = rawCtrl as Record<string, unknown>;
+          const ctrlLocs = parseSummaryLocators(ctrl.locators);
+          if (ctrlLocs.length > 0) {
+            const label =
+              typeof ctrl.label === "string" && ctrl.label.trim()
+                ? ctrl.label.trim()
+                : typeof ctrl.name === "string" && ctrl.name.trim()
+                  ? ctrl.name.trim()
+                  : typeof ctrl.tag === "string" && ctrl.tag.trim()
+                    ? ctrl.tag.trim()
+                    : "control";
+            addTarget(host, `field ${label}`, ctrlLocs);
+          }
+        }
+        const submitLocs = parseSummaryLocators(tgt.submitLocators);
+        if (submitLocs.length > 0) {
+          addTarget(host, `submit ${containerTag}`, submitLocs);
+        }
+      }
+
       summaryViews.push({
         host,
         viewKey,
@@ -820,7 +1110,7 @@ function extractPageSummaryData(
     }
   }
 
-  return { targets, lists, items, summaryViews };
+  return { targets, lists, items, sourceMetaByContainerId, summaryViews };
 }
 
 const COMPACT_LEAF_ACTIONS = [
@@ -842,6 +1132,9 @@ const COMPACT_LEAF_ACTIONS = [
 function buildCompilerResponseSchema(ctx: PromptContext): Record<string, unknown> {
   const hasTargets = ctx.targets.size > 0;
   const hasLists = ctx.lists.size > 0;
+  if (hasTargets && hasLists) {
+    return COMPILER_RESPONSE_SCHEMA;
+  }
 
   const leafProps: Record<string, unknown> = {
     action: { type: "string", enum: [...COMPACT_LEAF_ACTIONS] },
@@ -933,7 +1226,7 @@ function buildCompilePrompt(
 ): string {
   const seenUrlForApp = new Set<string>();
   const stepLines = ctx.indexedSteps.map((step, idx) => {
-    const app = normalizeHost(step.app);
+    const app = resolveStepRealHost(step) ?? normalizeHost(step.app);
     const entry: Record<string, unknown> = {
       stepIndex: idx,
       action: step.action,
@@ -961,19 +1254,31 @@ function buildCompilePrompt(
     return JSON.stringify(entry);
   });
 
-  const targetLines = Array.from(ctx.targets.values()).map((t) =>
-    JSON.stringify({
-      targetId: t.id,
-      host: t.host,
-      description: t.description,
-    }),
-  );
+  const containerLines = Array.from(ctx.targets.values())
+    .filter((t) => t.withinOnly)
+    .map((t) =>
+      JSON.stringify({
+        withinId: t.id,
+        host: t.host,
+        description: t.description,
+      }),
+    );
+
+  const targetLines = Array.from(ctx.targets.values())
+    .filter((t) => !t.withinOnly)
+    .map((t) =>
+      JSON.stringify({
+        targetId: t.id,
+        host: t.host,
+        description: t.description,
+      }),
+    );
 
   const listLines = Array.from(ctx.lists.values()).map((l) =>
     JSON.stringify({
       listId: l.id,
       host: l.host,
-      ...(l.containerId ? { containerTargetId: l.containerId } : {}),
+      ...(l.containerId ? { withinId: l.containerId } : {}),
       description: l.description,
       items: l.items.map((it) => ({ itemId: it.id, ...it.fields })),
     }),
@@ -987,13 +1292,13 @@ function buildCompilePrompt(
     "Compile the repeated browser steps into ONE concise parameterized workflow JSON.",
     "",
     "RULES:",
-    "1. Never write selectors. Every click/fill/select/readText/key/submit MUST have `stepIndex` of a step with `hasTarget: true` (matching the action, e.g. `fill` stepIndex for `fill`, `key` stepIndex for `key`), OR an exact `targetId` from PageSummary Targets. Never emit empty \"\".",
+    "1. Never write selectors. EVERY click/fill/select/readText/key/submit MUST set `stepIndex` to the matching `hasTarget: true` step from Steps (matching the action, e.g. `fill` stepIndex for `fill`, `key` stepIndex for `key`), OR an exact `targetId` from PageSummary Targets. Never omit `stepIndex` on a `click` or `fill`, never put a `withinId` into `targetId`, and never emit empty \"\".",
     "2. Pick ONE clean repetition and drop stray, decorative, or non-essential clicks and side excursions (e.g. help/info/tooltip links) even if repeated in every repetition. Never emit `navigate` to an informational/excursion URL or reload a form page the user is already on.",
     "3. Keep all distinct form fields (multi-field Tab forms keep every `fill` via its own `stepIndex`). Always preserve Enter-key submissions (`action: \"key\", key: \"Enter\"` with the `key` step's `stepIndex`) rather than dropping them.",
     "4. Copied values use `readText` with `bind` (REQUIRED on every `readText`, e.g. `\"bind\":\"<varName>\"`, NEVER omit `bind`) and `fill` with `\"{{<varName>}}\"`.",
     "5. User-supplied variables go in `params[]` and `\"{{paramName}}\"`. Never invent placeholder/masked literals; preserve `__PII_*__` tokens if typed literally.",
     "6. Tab switching is automatic; do NOT emit `navigate` for the start page load. `switchTab` uses `stepIndex` or `host` (hostname only), never `url`. Any `navigate` MUST reuse `stepIndex` or keep the full URL including port and path (never strip to bare host/origin).",
-    "7. Use `forEach` ONLY when PageSummary Lists is printed below AND has remaining unprocessed items (`runMode: \"run_remaining\"`, `itemIds` = ONLY remaining `itemId`s). Inside `forEach.steps`, only set `withinId` to a container `targetId` from PageSummary Targets (if any) and `withinTextParam` to an item field name from PageSummary Lists. Otherwise set `runMode: \"save_only\"` and emit flat steps.",
+    "7. Use `forEach` ONLY when PageSummary Lists is printed below AND has remaining unprocessed items (`runMode: \"run_remaining\"`). A `forEach` step MUST put ALL steps of one full repeated cycle (starting from the first repeated click/action, e.g. opening the row and switching tabs, NEVER skipping early cycle clicks and NEVER emitting `navigate` inside or before `forEach` to reload the current page) inside its own `steps: [...]` array (never as top-level sibling steps after `forEach`) and MUST set `itemIds: [\"item_...\"]` to ONLY remaining unprocessed `itemId`s (never include already-processed items such as item_1_1/item_1_2, and NEVER set `items` when `itemIds` is set). Inside `forEach.steps`, keep `stepIndex` on every `click`/`fill` in order, and set `withinId` + `withinTextParam` ONLY on row-scoped steps (matching each step's own table container, with `withinTextParam` set to the row's unique name/identifier key such as `col1` or `clientName`, NOT status/button columns like `col2`/`col3` or an unmapped `params[]` name). Otherwise set `runMode: \"save_only\"` and emit flat steps.",
     "8. `offerAt2: true` when clearly generalizable at 2 repeats; `risk: \"high\"` for irreversible external actions (payments/wires/deletes/external sends); `suggest: false` only if one-off.",
     "",
     `Observed repeat count: ${ctx.repeatCount}`,
@@ -1001,6 +1306,13 @@ function buildCompilePrompt(
     "Steps:",
     ...stepLines,
     "",
+    ...(containerLines.length > 0
+      ? [
+          "PageSummary Containers (for withinId ONLY, NEVER targetId):",
+          ...containerLines,
+          "",
+        ]
+      : []),
     ...(targetLines.length > 0 ? ["PageSummary Targets:", ...targetLines, ""] : []),
     ...(listLines.length > 0 ? ["PageSummary Lists:", ...listLines, ""] : []),
     ...(viewLines.length > 0 ? ["Page Summaries:", ...viewLines, ""] : []),
@@ -1090,6 +1402,9 @@ function resolveLeafStep(
   stabilityCounts: ReadonlyMap<string, number>,
   restoreMap: ReadonlyMap<string, string>,
   inLoop: boolean,
+  nextHintStep?: ModelLeafStep,
+  loopItemKeys?: ReadonlySet<string>,
+  fallbackItemKey?: string,
 ): { step: CompiledLeafStep; host?: string; url?: string } | null {
   const captured =
     raw.stepIndex !== undefined &&
@@ -1101,14 +1416,22 @@ function resolveLeafStep(
   const psTarget = raw.targetId ? ctx.targets.get(raw.targetId) : undefined;
   const withinTarget = raw.withinId ? ctx.targets.get(raw.withinId) : undefined;
 
+  const normalizeLoopParam = (rawParam: string | undefined): string | undefined => {
+    if (!rawParam || !rawParam.trim()) return undefined;
+    const stripped = stripParamBraces(rawParam);
+    if (!stripped) return undefined;
+    if (loopItemKeys && fallbackItemKey && !loopItemKeys.has(stripped)) {
+      return fallbackItemKey;
+    }
+    return stripped;
+  };
+
   const withinLocators: Locator[] = [];
   if (withinTarget) {
     withinLocators.push(...withinTarget.locators.map((l) => ({ ...l })));
-    if (raw.withinTextParam && raw.withinTextParam.trim()) {
-      const param = stripParamBraces(raw.withinTextParam);
-      if (param) {
-        withinLocators.push({ kind: "text", value: `{{${param}}}` });
-      }
+    const param = normalizeLoopParam(raw.withinTextParam);
+    if (param) {
+      withinLocators.push({ kind: "text", value: `{{${param}}}` });
     }
   }
 
@@ -1118,7 +1441,7 @@ function resolveLeafStep(
     raw.targetTextParam.trim() &&
     (withinTarget !== undefined || (inLoop && !captured?.target && !psTarget));
   if (allowTextTarget && raw.targetTextParam) {
-    const param = stripParamBraces(raw.targetTextParam);
+    const param = normalizeLoopParam(raw.targetTextParam);
     if (param) {
       targetLocators.push({ kind: "text", value: `{{${param}}}` });
     }
@@ -1133,22 +1456,72 @@ function resolveLeafStep(
           preferInvariant,
         ),
       );
-    }
-    if (psTarget && psTarget.locators.length > 0) {
+    } else if (psTarget && !psTarget.withinOnly && psTarget.locators.length > 0) {
       targetLocators.push(...psTarget.locators.map((l) => ({ ...l })));
     }
   }
 
-  const dedupedTarget = dedupeLocators(targetLocators);
+  let dedupedTarget = dedupeLocators(targetLocators);
   const dedupedWithin = dedupeLocators(withinLocators);
 
-  const stepHost = captured
-    ? normalizeHost(captured.app)
-    : psTarget
-      ? psTarget.host
-      : withinTarget
-        ? withinTarget.host
+  if (
+    (raw.action === "readText" || raw.action === "readValue") &&
+    !allowTextTarget &&
+    raw.withinId &&
+    withinTarget
+  ) {
+    const srcMeta = ctx.sourceMetaByContainerId.get(raw.withinId);
+    if (srcMeta) {
+      const hasInvariantCaptured =
+        captured?.target?.some(
+          (loc) =>
+            (stabilityCounts.get(`${captured.action}::${loc.kind}::${loc.value}`) ?? 0) >= 2,
+        ) ?? false;
+      const copyFallbackStep =
+        !captured && raw.action === "readText"
+          ? ctx.indexedSteps.find((s) => s.action === "copy" && Boolean(s.value))
+          : undefined;
+      const valueSourceStep = captured ?? copyFallbackStep;
+      const capturedVal = valueSourceStep?.value
+        ? restoreText(valueSourceStep.value, restoreMap).trim()
+        : "";
+      const matchedColByValue = capturedVal
+        ? srcMeta.columns.find((col) => col.texts.includes(capturedVal))
         : undefined;
+      const matchedColByLoc =
+        !matchedColByValue && valueSourceStep?.target
+          ? srcMeta.columns.find((col) =>
+              col.locators.some((cl) =>
+                valueSourceStep.target!.some(
+                  (tl) => tl.kind === cl.kind && tl.value === cl.value,
+                ),
+              ),
+            )
+          : undefined;
+      const matchedCol = matchedColByValue ?? matchedColByLoc;
+      if (
+        matchedCol &&
+        matchedCol.invariantLocators.length > 0 &&
+        (!hasInvariantCaptured || matchedColByValue !== undefined)
+      ) {
+        dedupedTarget = dedupeLocators(matchedCol.invariantLocators);
+      }
+    }
+  }
+
+  const capturedRealHost = captured
+    ? resolveStepRealHost({
+        app: captured.app,
+        url: captured.url ? restoreText(captured.url, restoreMap) : undefined,
+      })
+    : undefined;
+  const psTargetHost =
+    psTarget && !isPlaceholderHost(psTarget.host) ? psTarget.host : undefined;
+  const withinTargetHost =
+    withinTarget && !isPlaceholderHost(withinTarget.host)
+      ? withinTarget.host
+      : undefined;
+  const stepHost = capturedRealHost ?? psTargetHost ?? withinTargetHost;
   const stepUrl = captured?.url ? normalizeUrlHost(restoreText(captured.url, restoreMap)) : undefined;
 
   const optionalPart = raw.optional !== undefined ? { optional: raw.optional } : {};
@@ -1278,30 +1651,23 @@ function resolveLeafStep(
       const seenHostnames = new Set<string>();
       for (const s of ctx.indexedSteps) {
         if (s.app) {
-          seenHostnames.add(normalizeHost(s.app));
+          const norm = normalizeHost(s.app);
+          if (!isPlaceholderHost(norm)) {
+            seenHostnames.add(norm);
+          }
         }
         if (s.url) {
-          try {
-            seenHostnames.add(
-              normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname),
-            );
-          } catch {
-            // ignore invalid captured URL
+          const urlHost = hostnameFromUrl(restoreText(s.url, restoreMap));
+          if (urlHost) {
+            seenHostnames.add(urlHost);
           }
         }
       }
 
       const rawUrl = raw.url?.trim() ? raw.url.trim() : undefined;
-      let rawUrlHost: string | undefined;
-      if (rawUrl) {
-        try {
-          rawUrlHost = normalizeHost(
-            new URL(restoreText(rawUrl, restoreMap)).hostname,
-          );
-        } catch {
-          // ignore invalid URL when inferring host
-        }
-      }
+      const rawUrlHost = rawUrl
+        ? hostnameFromUrl(restoreText(rawUrl, restoreMap))
+        : undefined;
       const rawUrlSeen =
         rawUrlHost !== undefined && seenHostnames.has(rawUrlHost);
 
@@ -1328,25 +1694,22 @@ function resolveLeafStep(
         return null;
       }
 
-      const targetHost =
-        rawUrlHost ??
-        (raw.host?.trim()
-          ? normalizeHost(raw.host)
-          : captured?.app
-            ? normalizeHost(captured.app)
-            : undefined);
+      let targetHost = rawUrlHost;
+      if (!targetHost && raw.host?.trim()) {
+        const norm = normalizeHost(raw.host);
+        if (!isPlaceholderHost(norm)) targetHost = norm;
+      }
+      if (!targetHost && captured?.app) {
+        const norm = normalizeHost(captured.app);
+        if (!isPlaceholderHost(norm)) targetHost = norm;
+      }
       const matchingHostUrl = targetHost
         ? ctx.indexedSteps.find((s) => {
             if (!s.url) return false;
-            if (normalizeHost(s.app) === targetHost) return true;
-            try {
-              return (
-                normalizeHost(new URL(restoreText(s.url, restoreMap)).hostname) ===
-                targetHost
-              );
-            } catch {
-              return false;
-            }
+            return (
+              resolveStepRealHost(s) === targetHost ||
+              hostnameFromUrl(restoreText(s.url, restoreMap)) === targetHost
+            );
           })?.url
         : undefined;
       const candidateUrl = rawUrl
@@ -1354,10 +1717,18 @@ function resolveLeafStep(
         : matchingHostUrl;
       if (!candidateUrl) {
         if (raw.host?.trim()) {
-          const host = normalizeHost(raw.host);
-          if (!seenHostnames.has(host)) return null;
+          const rawNavHost = normalizeHost(raw.host);
+          const host = !isPlaceholderHost(rawNavHost) ? rawNavHost : stepHost;
+          if (!host || isPlaceholderHost(host) || !seenHostnames.has(host)) {
+            return null;
+          }
           return {
-            step: { action: "switchTab", host, ...optionalPart },
+            step: {
+              action: "switchTab",
+              host,
+              ...(stepUrl && hostnameFromUrl(stepUrl) === host ? { url: stepUrl } : {}),
+              ...optionalPart,
+            },
             host,
             url: stepUrl,
           };
@@ -1385,23 +1756,134 @@ function resolveLeafStep(
       };
     }
     case "switchTab": {
-      let rawHost = raw.host?.trim() || "";
-      if (!rawHost && raw.url?.trim()) {
-        try {
-          rawHost = new URL(raw.url.trim()).hostname;
-        } catch {
-          rawHost = raw.url.trim();
+      const candidateFromRawHost = (() => {
+        const trimmed = raw.host?.trim() ?? "";
+        if (!trimmed) return undefined;
+        if (trimmed.includes("://")) {
+          return hostnameFromUrl(trimmed);
         }
+        const hostOnly = trimmed.split("/")[0] ?? "";
+        const norm = normalizeHost(hostOnly);
+        return isPlaceholderHost(norm) ? undefined : norm;
+      })();
+
+      const rawUrlRestored = raw.url?.trim()
+        ? normalizeUrlHost(restoreText(raw.url.trim(), restoreMap))
+        : undefined;
+      const candidateFromRawUrl = hostnameFromUrl(rawUrlRestored);
+
+      const capturedUrlRestored = captured?.url?.trim()
+        ? normalizeUrlHost(restoreText(captured.url.trim(), restoreMap))
+        : undefined;
+      const candidateFromCapturedUrl = hostnameFromUrl(capturedUrlRestored);
+
+      const candidateFromCapturedApp = (() => {
+        if (!captured?.app) return undefined;
+        const norm = normalizeHost(captured.app);
+        return isPlaceholderHost(norm) ? undefined : norm;
+      })();
+
+      const hintStep =
+        nextHintStep?.stepIndex !== undefined &&
+        nextHintStep.stepIndex >= 0 &&
+        nextHintStep.stepIndex < ctx.indexedSteps.length
+          ? ctx.indexedSteps[nextHintStep.stepIndex]
+          : undefined;
+      const hintUrlRestored = hintStep?.url?.trim()
+        ? normalizeUrlHost(restoreText(hintStep.url.trim(), restoreMap))
+        : undefined;
+      const hintHost =
+        (hintStep
+          ? resolveStepRealHost({
+              app: hintStep.app,
+              url: hintUrlRestored,
+            })
+          : undefined) ??
+        (nextHintStep?.targetId
+          ? (() => {
+              const t = ctx.targets.get(nextHintStep.targetId!);
+              return t && !isPlaceholderHost(t.host) ? t.host : undefined;
+            })()
+          : undefined);
+
+      const directHost =
+        candidateFromRawHost ??
+        candidateFromRawUrl ??
+        candidateFromCapturedUrl ??
+        candidateFromCapturedApp;
+
+      let matchedStep: EnrichedStep | undefined;
+      if (directHost) {
+        matchedStep =
+          (hintStep &&
+          resolveStepRealHost(hintStep) === directHost &&
+          hintStep.url
+            ? hintStep
+            : undefined) ??
+          ctx.indexedSteps.find(
+            (s) =>
+              s.action === "tab_switch" &&
+              resolveStepRealHost(s) === directHost &&
+              Boolean(s.url),
+          ) ??
+          ctx.indexedSteps.find(
+            (s) => resolveStepRealHost(s) === directHost && Boolean(s.url),
+          );
+      } else if (hintHost) {
+        matchedStep =
+          (hintStep && hintStep.url ? hintStep : undefined) ??
+          ctx.indexedSteps.find(
+            (s) =>
+              s.action === "tab_switch" &&
+              resolveStepRealHost(s) === hintHost &&
+              Boolean(s.url),
+          ) ??
+          ctx.indexedSteps.find(
+            (s) => resolveStepRealHost(s) === hintHost && Boolean(s.url),
+          );
+      } else {
+        matchedStep =
+          ctx.indexedSteps.find(
+            (s) => s.action === "tab_switch" && resolveStepRealHost(s) !== undefined,
+          ) ??
+          ctx.indexedSteps.find((s) => resolveStepRealHost(s) !== undefined);
       }
-      if (!rawHost) {
-        rawHost = captured?.app ?? "";
+
+      const finalHost =
+        directHost ??
+        hintHost ??
+        (matchedStep ? resolveStepRealHost(matchedStep) : undefined);
+      if (!finalHost || isPlaceholderHost(finalHost)) {
+        return null;
       }
-      if (!rawHost.trim()) return null;
-      const host = normalizeHost(rawHost);
+
+      const matchedUrlRestored = matchedStep?.url?.trim()
+        ? normalizeUrlHost(restoreText(matchedStep.url.trim(), restoreMap))
+        : undefined;
+
+      const resolvedUrl =
+        (capturedUrlRestored && hostnameFromUrl(capturedUrlRestored) === finalHost
+          ? capturedUrlRestored
+          : undefined) ??
+        (rawUrlRestored && hostnameFromUrl(rawUrlRestored) === finalHost
+          ? rawUrlRestored
+          : undefined) ??
+        (hintUrlRestored && hostnameFromUrl(hintUrlRestored) === finalHost
+          ? hintUrlRestored
+          : undefined) ??
+        (matchedUrlRestored && hostnameFromUrl(matchedUrlRestored) === finalHost
+          ? matchedUrlRestored
+          : undefined);
+
       return {
-        step: { action: "switchTab", host, ...optionalPart },
-        host,
-        url: stepUrl,
+        step: {
+          action: "switchTab",
+          host: finalHost,
+          ...(resolvedUrl ? { url: resolvedUrl } : {}),
+          ...optionalPart,
+        },
+        host: finalHost,
+        url: resolvedUrl ?? stepUrl,
       };
     }
     case "key": {
@@ -1459,16 +1941,27 @@ function resolveSteps(
     }
   };
 
-  for (const raw of rawSteps) {
+  for (let idx = 0; idx < rawSteps.length; idx++) {
+    const raw = rawSteps[idx];
     if (raw.action === "forEach") {
       let resolvedItems: string | Record<string, string>[] | undefined;
 
-      if (raw.itemIds && raw.itemIds.length > 0) {
+      const explicitItemIds =
+        raw.itemIds && raw.itemIds.length > 0
+          ? raw.itemIds
+          : raw.items && raw.items.trim()
+            ? raw.items
+                .split(",")
+                .map((part) => stripParamBraces(part))
+                .filter((part) => ctx.items.has(part))
+            : [];
+
+      if (explicitItemIds.length > 0) {
         const rows: Record<string, string>[] = [];
-        for (const itemId of raw.itemIds) {
+        for (const itemId of explicitItemIds) {
           const item = ctx.items.get(itemId);
           if (item) {
-            recordLocation(item.host);
+            recordLocation(!isPlaceholderHost(item.host) ? item.host : undefined);
             const restoredRow: Record<string, string> = {};
             for (const [k, v] of Object.entries(item.fields)) {
               restoredRow[k] = restoreText(v, restoreMap);
@@ -1483,7 +1976,7 @@ function resolveSteps(
         const key = stripParamBraces(raw.items);
         const list = ctx.lists.get(key);
         if (list && list.items.length > 0) {
-          recordLocation(list.host);
+          recordLocation(!isPlaceholderHost(list.host) ? list.host : undefined);
           resolvedItems = list.items.map((item) => {
             const restoredRow: Record<string, string> = {};
             for (const [k, v] of Object.entries(item.fields)) {
@@ -1496,22 +1989,60 @@ function resolveSteps(
         }
       }
 
-      if (!resolvedItems || !raw.steps || raw.steps.length === 0) {
+      let childRawSteps = raw.steps;
+      let adoptedTrailing = false;
+      if ((!childRawSteps || childRawSteps.length === 0) && idx === rawSteps.length - 1 ? false : (!childRawSteps || childRawSteps.length === 0)) {
+        const trailing = rawSteps.slice(idx + 1);
+        if (trailing.length > 0 && trailing.every((s) => s.action !== "forEach")) {
+          childRawSteps = trailing as ModelLeafStep[];
+          adoptedTrailing = true;
+        }
+      }
+
+      if (!resolvedItems || !childRawSteps || childRawSteps.length === 0) {
         return null;
       }
 
+      let loopItemKeys: ReadonlySet<string> | undefined;
+      let fallbackItemKey: string | undefined;
+      if (Array.isArray(resolvedItems) && resolvedItems.length > 0) {
+        const keys = Object.keys(resolvedItems[0]);
+        const distinctKeys = keys.filter((k) => {
+          const vals = resolvedItems.map((r) => r[k]);
+          return vals.every(Boolean) && new Set(vals).size === vals.length;
+        });
+        loopItemKeys = new Set(
+          resolvedItems.length > 1 && distinctKeys.length > 0 ? distinctKeys : keys,
+        );
+        fallbackItemKey = distinctKeys[0] ?? keys[0];
+      }
+
       const nestedSteps: CompiledStep[] = [];
-      for (const child of raw.steps) {
+      for (let j = 0; j < childRawSteps.length; j++) {
+        const child = childRawSteps[j];
+        const nextChild = childRawSteps
+          .slice(j + 1)
+          .find((s) => s.action !== "switchTab");
         const resolved = resolveLeafStep(
           child,
           ctx,
           stabilityCounts,
           restoreMap,
           true,
+          nextChild,
+          loopItemKeys,
+          fallbackItemKey,
         );
-        if (!resolved) return null;
+        if (!resolved) {
+          if (child.action === "switchTab") continue;
+          return null;
+        }
         recordLocation(resolved.host, resolved.url);
         nestedSteps.push(resolved.step);
+      }
+
+      if (nestedSteps.length === 0) {
+        return null;
       }
 
       out.push({
@@ -1520,17 +2051,29 @@ function resolveSteps(
         steps: nestedSteps,
         ...(raw.optional !== undefined ? { optional: raw.optional } : {}),
       });
+      if (adoptedTrailing) {
+        break;
+      }
       continue;
     }
 
+    const nextTop = rawSteps
+      .slice(idx + 1)
+      .find((s) => s.action !== "switchTab" && s.action !== "forEach") as
+      | ModelLeafStep
+      | undefined;
     const resolved = resolveLeafStep(
       raw as ModelLeafStep,
       ctx,
       stabilityCounts,
       restoreMap,
       false,
+      nextTop,
     );
-    if (!resolved) return null;
+    if (!resolved) {
+      if (raw.action === "switchTab") continue;
+      return null;
+    }
     recordLocation(resolved.host, resolved.url);
     out.push(resolved.step);
   }
@@ -1653,7 +2196,11 @@ export async function compileWorkflow(
   const gemini = createCompileGeminiClient(ctx, opts);
 
   const distinctApps = Array.from(
-    new Set(indexedSteps.map((s) => normalizeHost(s.app)).filter(Boolean)),
+    new Set(
+      indexedSteps
+        .map((s) => resolveStepRealHost(s))
+        .filter((h): h is string => Boolean(h)),
+    ),
   );
   const irisDigest: Record<string, unknown> = {
     sourceApp: distinctApps[0] ?? "",
@@ -1664,7 +2211,7 @@ export async function compileWorkflow(
       const rawLabel = s.label ?? inferLabelFromTarget(s.target);
       return {
         action: s.action,
-        app: normalizeHost(s.app),
+        app: resolveStepRealHost(s) ?? normalizeHost(s.app),
         ...(rawLabel ? { label: scrubText(rawLabel) } : {}),
       };
     }),
@@ -1703,31 +2250,46 @@ export async function compileWorkflow(
     return null;
   }
 
-  const fallbackFirst = indexedSteps.find((s) => s.url) ?? indexedSteps[0];
-  const startHost = normalizeHost(
-    resolved.firstHost ?? fallbackFirst.app,
+  const firstRealStep = indexedSteps.find((s) => resolveStepRealHost(s) !== undefined);
+  const startHost =
+    (resolved.firstHost && !isPlaceholderHost(resolved.firstHost)
+      ? resolved.firstHost
+      : undefined) ??
+    (firstRealStep ? resolveStepRealHost(firstRealStep) : undefined);
+
+  const matchingHostStep = startHost
+    ? indexedSteps.find((s) => resolveStepRealHost(s) === startHost && s.url)
+    : undefined;
+  const fallbackUrlStep = indexedSteps.find(
+    (s) => s.url && hostnameFromUrl(s.url) !== undefined,
   );
-  const matchingHostStep = indexedSteps.find(
-    (s) => normalizeHost(s.app) === startHost && s.url,
-  );
+  const candidateStartUrl = matchingHostStep?.url
+    ? normalizeUrlHost(restoreText(matchingHostStep.url, restoreMap))
+    : resolved.firstUrl
+      ? resolved.firstUrl
+      : fallbackUrlStep?.url
+        ? normalizeUrlHost(restoreText(fallbackUrlStep.url, restoreMap))
+        : undefined;
   const rawStartUrl =
-    matchingHostStep?.url
-      ? normalizeUrlHost(restoreText(matchingHostStep.url, restoreMap))
-      : resolved.firstUrl
-        ? resolved.firstUrl
-        : fallbackFirst.url
-          ? normalizeUrlHost(restoreText(fallbackFirst.url, restoreMap))
-          : undefined;
+    candidateStartUrl && hostnameFromUrl(candidateStartUrl) !== undefined
+      ? candidateStartUrl
+      : undefined;
 
   const steps = [...resolved.steps];
-  if (steps[0]?.action !== "switchTab") {
-    steps.unshift({ action: "switchTab", host: startHost });
-  } else if (steps[0].host !== startHost) {
-    steps.unshift({ action: "switchTab", host: startHost });
+  if (startHost) {
+    if (steps[0]?.action !== "switchTab") {
+      steps.unshift({ action: "switchTab", host: startHost });
+    } else if (steps[0].host !== startHost) {
+      steps.unshift({ action: "switchTab", host: startHost });
+    }
   }
 
-  const appsSet = new Set<string>([startHost, ...resolved.hosts]);
-  const apps = Array.from(appsSet).filter(Boolean);
+  const appsSet = new Set<string>(
+    [startHost, ...resolved.hosts].filter(
+      (h): h is string => typeof h === "string" && !isPlaceholderHost(h),
+    ),
+  );
+  const apps = Array.from(appsSet);
 
   const params: CompiledParam[] = modelOut.params.map((p) => {
     const restoredDesc =
@@ -1872,16 +2434,23 @@ export async function compileWorkflow(
   for (const e of sourceEntries) {
     if (e.url) {
       try {
-        seenHosts.add(
-          normalizeHost(new URL(restoreText(e.url, restoreMap)).host),
-        );
-        continue;
+        const parsed = new URL(restoreText(e.url, restoreMap));
+        if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+          const urlHost = normalizeHost(parsed.host);
+          if (!isPlaceholderHost(urlHost)) {
+            seenHosts.add(urlHost);
+          }
+          continue;
+        }
       } catch {
         // fall back to app if URL is invalid
       }
     }
     if (e.app) {
-      seenHosts.add(normalizeHost(e.app));
+      const appHost = normalizeHost(e.app);
+      if (!isPlaceholderHost(appHost)) {
+        seenHosts.add(appHost);
+      }
     }
   }
 

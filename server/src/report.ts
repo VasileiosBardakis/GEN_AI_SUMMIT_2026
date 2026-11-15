@@ -151,7 +151,12 @@ function convertCompiledLeafStep(step: CompiledLeafStep): ScriptStep {
     case "wait":
       return { action: "wait", ms: step.ms, ...opt };
     case "switchTab":
-      return { action: "switchTab", host: step.host, ...opt };
+      return {
+        action: "switchTab",
+        host: step.host,
+        ...(step.url !== undefined ? { url: step.url } : {}),
+        ...opt,
+      };
     case "key": {
       const target = toScriptLocators(step.target);
       const within = toScriptLocators(step.within);
@@ -380,8 +385,11 @@ export function pickPrimaryCandidate(
       ),
   );
   const finalPool = filteredPool.length > 0 ? filteredPool : pool;
+  const isTrivialClickPair = (c: PatternCandidate) =>
+    c.actions.length <= 2 && c.actions.every((a) => a === "click");
   return [...finalPool].sort(
     (a, b) =>
+      (isTrivialClickPair(a) ? 1 : 0) - (isTrivialClickPair(b) ? 1 : 0) ||
       (b.count >= minRepeats ? 1 : 0) - (a.count >= minRepeats ? 1 : 0) ||
       b.count * b.actions.length - a.count * a.actions.length ||
       b.actions.length - a.actions.length ||

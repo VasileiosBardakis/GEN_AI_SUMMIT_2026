@@ -342,6 +342,7 @@ type Rep2CacheEntry = {
   actions: V2Action[];
   constants: Map<number, StepConstant>;
   compiled: CompiledWorkflow | null;
+  stepCount: number;
 };
 
 function primaryTargetKey(step: V2Step | undefined): string | undefined {
@@ -491,6 +492,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
   const rep2Cache = new Map<string, Rep2CacheEntry>();
   const lastSitePopupAt = new Map<string, number>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const queuedSessions = new Set<string>();
   let queue: Promise<void> = Promise.resolve();
   let closed = false;
 
@@ -658,7 +660,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
     if (candidate.count < repeatCount) {
       const existingRep2 = rep2Cache.get(cacheKey);
-      if (existingRep2) {
+      if (existingRep2 && (existingRep2.compiled !== null || steps.length <= existingRep2.stepCount)) {
         if (!existingRep2.compiled || !existingRep2.compiled.offerAt2) {
           return;
         }
@@ -691,6 +693,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
             candidate.actions.length,
           ),
           compiled,
+          stepCount: steps.length,
         });
 
         safeLog(
@@ -913,10 +916,15 @@ export function createProposer(deps: ProposerDeps): Proposer {
     }
     const timer = setTimeout(() => {
       timers.delete(sessionId);
-      if (closed) return;
+      if (closed || queuedSessions.has(sessionId)) return;
+      queuedSessions.add(sessionId);
       queue = queue
-        .then(() => processSession(sessionId))
+        .then(() => {
+          queuedSessions.delete(sessionId);
+          return processSession(sessionId);
+        })
         .catch((err) => {
+          queuedSessions.delete(sessionId);
           const message = err instanceof Error ? err.message : String(err);
           safeLog(`[propose] unexpected error: ${message}`);
         });
