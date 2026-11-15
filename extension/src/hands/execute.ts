@@ -957,6 +957,12 @@ export async function executeStep(
           (typeof HTMLTextAreaElement !== "undefined" && element instanceof HTMLTextAreaElement)
         ) {
           setNativeValue(element as HTMLInputElement | HTMLTextAreaElement, step.value);
+        } else if (
+          tag === "select" ||
+          (typeof HTMLSelectElement !== "undefined" && element instanceof HTMLSelectElement)
+        ) {
+          selectOption(element, step.value);
+          return { ok: true, url: location.href, value: readValue(element) };
         } else if ((element as HTMLElement).isContentEditable) {
           element.textContent = "";
           insertIntoEditable(element as HTMLElement, step.value);

@@ -1031,4 +1031,56 @@ describe("GEN-69: M2 Hands v2", () => {
     expect(executeScript).toHaveBeenCalledTimes(1);
     expect(executeScript.mock.calls[0]?.[0].target.tabId).toBe(404);
   });
+
+  it("executeStep selects recorded option on <select> for both action: 'select' and fallback action: 'fill'", async () => {
+    const root = new FakeDomElement("body");
+    const selectEl = new FakeDomElement("select", { id: "priority", name: "priority" });
+    selectEl.options = [
+      { value: "low", label: "Low", textContent: "Low", selected: true },
+      { value: "medium", label: "Medium", textContent: "Medium", selected: false },
+      { value: "high", label: "High Priority", textContent: "High Priority", selected: false },
+    ];
+    selectEl.value = "low";
+
+    const changeEvents: string[] = [];
+    selectEl.addEventListener("change", () => {
+      changeEvents.push(selectEl.value);
+    });
+
+    const nonFillableDiv = new FakeDomElement("div", { id: "readonly-box" }, "Static");
+    root.appendChild(selectEl);
+    root.appendChild(nonFillableDiv);
+
+    const dom = installFakeDom(root);
+    restoreDom = dom.restore;
+
+    const selectRes = await executeStep({
+      action: "select",
+      target: { kind: "css", value: "#priority" },
+      value: "medium",
+    });
+    expect(selectRes.ok).toBe(true);
+    expect(selectRes.value).toBe("medium");
+    expect(selectEl.value).toBe("medium");
+    expect(selectEl.options[1]?.selected).toBe(true);
+
+    const fillFallbackRes = await executeStep({
+      action: "fill",
+      target: { kind: "css", value: "#priority" },
+      value: "High Priority",
+    });
+    expect(fillFallbackRes.ok).toBe(true);
+    expect(fillFallbackRes.value).toBe("high");
+    expect(selectEl.value).toBe("high");
+    expect(selectEl.options[2]?.selected).toBe(true);
+    expect(changeEvents).toEqual(["medium", "high"]);
+
+    const divFillRes = await executeStep({
+      action: "fill",
+      target: { kind: "css", value: "#readonly-box" },
+      value: "anything",
+    });
+    expect(divFillRes.ok).toBe(false);
+    expect(divFillRes.error).toBe("Target is not fillable");
+  });
 });
