@@ -8,6 +8,7 @@ import {
   libraryEntryToOptimization,
   mergeServerAndLocalOptimizations,
   recordOptimizationRun,
+  type OptimizationItem,
 } from "../src/library.ts";
 
 describe("optimization library helpers", () => {
@@ -254,5 +255,46 @@ describe("optimization library helpers", () => {
       { id: "local_paused_1", status: "paused" },
       { id: "local_suggested_1", status: "suggested" },
     ]);
+  });
+
+  it("drops decider_* local shadow items once the matching entry exists on the server", () => {
+    const serverEntry = {
+      id: "lib_123",
+      name: "Fill Company Name",
+      kind: "workflow" as const,
+      status: "active" as const,
+      description: "Automate company field",
+      solution: "Fill the Company name field automatically.",
+      script: {
+        name: "Fill Company Name",
+        steps: [{ action: "click" as const, target: { kind: "css" as const, value: "#company" } }],
+      },
+      eyes: {
+        intent: "Fill Company Name",
+        scope: { apps: ["127.0.0.1"], urlPatterns: [], pageHints: [] },
+        targetHints: { roles: [], labelContains: [], locators: [] },
+        textHints: { prefixHints: [], minCharsBeforeMatch: 0 },
+        guards: { requireClipboard: false, fieldEmptyOnly: true, minSignals: 2, cooldownMs: 5000 },
+      },
+      runCount: 0,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    };
+
+    const localShadow: OptimizationItem = {
+      id: "decider_abc123",
+      title: "Fill Company Name",
+      description: "Fill the Company name field automatically.",
+      solution: "Fill the Company name field automatically.",
+      kind: "workflow",
+      status: "suggested",
+      timeSavedPerRunSec: 10,
+      runCount: 0,
+      totalTimeSavedSec: 0,
+      createdAt: 900,
+    };
+
+    const merged = mergeServerAndLocalOptimizations([serverEntry], [localShadow]);
+    expect(merged.map((item) => item.id)).toEqual(["lib_123"]);
   });
 });
