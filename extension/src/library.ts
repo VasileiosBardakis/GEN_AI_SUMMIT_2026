@@ -40,129 +40,9 @@ export interface LibrarySummary {
 
 export const LIBRARY_STORAGE_KEY = "eyes_optimization_library_v1";
 
-export function createDefaultOptimizations(now = Date.now()): OptimizationItem[] {
-  return [
-    {
-      id: "opt_shipping_reply",
-      title: "Customer shipping reply",
-      description: "Inserts your standard shipping update into customer reply fields.",
-      kind: "snippet",
-      status: "active",
-      app: "Support & Mail",
-      preview: "Hi, thanks for your order. It ships Friday and tracking will follow shortly.",
-      snippetText:
-        "Hi, thanks for your order. It ships Friday and tracking will follow shortly.",
-      shortcut: "Alt+1",
-      timeSavedPerRunSec: 22,
-      runCount: 14,
-      totalTimeSavedSec: 308,
-      createdAt: now - 5 * 86_400_000,
-      lastRunAt: now - 18 * 60_000,
-      flows: {
-        user: [
-          { kind: "click", label: "Open reply" },
-          { kind: "input", label: "Type update" },
-          { kind: "click", label: "Send" },
-          { kind: "loop", label: "Repeat" },
-        ],
-        proposed: [
-          { kind: "click", label: "Open reply" },
-          { kind: "ai", label: "Insert snippet" },
-          { kind: "done", label: "Done" },
-        ],
-      },
-    },
-    {
-      id: "opt_copy_invoice_erp",
-      title: "Copy invoice reference to ERP",
-      description: "Reads the current invoice code and fills the ERP reference box in one click.",
-      kind: "workflow",
-      status: "active",
-      app: "Invoice Desk",
-      preview: "Copy reference",
-      timeSavedPerRunSec: 15,
-      runCount: 11,
-      totalTimeSavedSec: 165,
-      createdAt: now - 3 * 86_400_000,
-      lastRunAt: now - 2 * 3_600_000,
-      script: {
-        name: "Copy invoice reference to ERP",
-        steps: [
-          { action: "readText", target: { kind: "css", value: "#invoice-source" }, bind: "ref" },
-          { action: "fill", target: { kind: "css", value: "#erp-invoice" }, value: "{{ref}}" },
-        ],
-      },
-      flows: {
-        user: [
-          { kind: "click", label: "Copy reference" },
-          { kind: "tab", label: "Switch to ERP" },
-          { kind: "paste", label: "Paste code" },
-          { kind: "loop", label: "Repeat" },
-        ],
-        proposed: [
-          { kind: "click", label: "Copy reference" },
-          { kind: "ai", label: "Fill ERP field" },
-          { kind: "done", label: "Done" },
-        ],
-      },
-    },
-    {
-      id: "opt_supplier_receipt",
-      title: "Supplier dispatch confirmation",
-      description: "Fills your standard warehouse confirmation note without retyping.",
-      kind: "snippet",
-      status: "active",
-      app: "Supplier Portal",
-      preview: "Confirmed receipt for this week's batch. Dock schedule remains unchanged.",
-      snippetText:
-        "Confirmed receipt for this week's batch. Dock schedule remains unchanged.",
-      shortcut: "Alt+2",
-      timeSavedPerRunSec: 19,
-      runCount: 7,
-      totalTimeSavedSec: 133,
-      createdAt: now - 2 * 86_400_000,
-      lastRunAt: now - 6 * 3_600_000,
-      flows: {
-        user: [
-          { kind: "click", label: "Open note" },
-          { kind: "input", label: "Type confirmation" },
-          { kind: "click", label: "Save" },
-          { kind: "loop", label: "Repeat" },
-        ],
-        proposed: [
-          { kind: "click", label: "Open note" },
-          { kind: "ai", label: "Insert note" },
-          { kind: "done", label: "Done" },
-        ],
-      },
-    },
-    {
-      id: "opt_grid_gross_fill",
-      title: "Fill invoice row across columns",
-      description: "Detected a repeated copy-and-paste pattern across adjacent grid cells.",
-      kind: "workflow",
-      status: "suggested",
-      app: "Invoice Grid",
-      preview: "Grid row B -> C",
-      timeSavedPerRunSec: 12,
-      runCount: 0,
-      totalTimeSavedSec: 0,
-      detectedCount: 4,
-      createdAt: now - 45 * 60_000,
-      flows: {
-        user: [
-          { kind: "click", label: "Select cell" },
-          { kind: "paste", label: "Copy to next" },
-          { kind: "loop", label: "Repeat x4" },
-        ],
-        proposed: [
-          { kind: "click", label: "Select row" },
-          { kind: "ai", label: "Fill column" },
-          { kind: "done", label: "Done" },
-        ],
-      },
-    },
-  ];
+export function createDefaultOptimizations(_now = Date.now()): OptimizationItem[] {
+  void _now;
+  return [];
 }
 
 export function formatDuration(totalSeconds: number): string {
@@ -333,7 +213,19 @@ const DEFAULT_MOCK_IDS = new Set([
   "opt_grid_gross_fill",
 ]);
 
-export function libraryEntryToOptimization(entry: LibraryEntry): OptimizationItem {
+export type LibraryEntryStats = {
+  repetitions?: number;
+  stepCount?: number;
+  manualSeconds?: number;
+  replaySeconds?: number;
+  timeSavedSeconds?: number;
+};
+
+export type LibraryEntryWithStats = LibraryEntry & {
+  stats?: LibraryEntryStats;
+};
+
+export function libraryEntryToOptimization(entry: LibraryEntryWithStats): OptimizationItem {
   const firstStep = entry.script.steps[0];
   const isSnippet =
     entry.kind === "snippet" &&
@@ -341,9 +233,13 @@ export function libraryEntryToOptimization(entry: LibraryEntry): OptimizationIte
     firstStep?.action === "insertText" &&
     typeof firstStep.value === "string";
   const snippetText = isSnippet && typeof firstStep.value === "string" ? firstStep.value : undefined;
-  const timeSavedPerRunSec = isSnippet && snippetText
+  const fallbackTimeSavedPerRunSec = isSnippet && snippetText
     ? Math.max(8, Math.round(snippetText.length / 4))
     : Math.max(10, entry.script.steps.length * 6);
+  const timeSavedPerRunSec =
+    typeof entry.stats?.timeSavedSeconds === "number"
+      ? entry.stats.timeSavedSeconds
+      : fallbackTimeSavedPerRunSec;
   const app = entry.eyes.scope.apps[0] || "Browser";
   const preview = snippetText
     ? snippetText.length > 64
@@ -366,13 +262,16 @@ export function libraryEntryToOptimization(entry: LibraryEntry): OptimizationIte
     timeSavedPerRunSec,
     runCount: entry.runCount,
     totalTimeSavedSec: entry.runCount * timeSavedPerRunSec,
+    ...(typeof entry.stats?.repetitions === "number"
+      ? { detectedCount: entry.stats.repetitions }
+      : {}),
     createdAt: entry.createdAt,
     lastRunAt: entry.runCount > 0 ? entry.updatedAt : undefined,
   };
 }
 
 export function mergeServerAndLocalOptimizations(
-  serverEntries: LibraryEntry[],
+  serverEntries: LibraryEntryWithStats[],
   localItems: OptimizationItem[]
 ): OptimizationItem[] {
   const localById = new Map(localItems.map((item) => [item.id, item]));
