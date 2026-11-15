@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Treasury Wire Transfer — Unseen Local Risky Form</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 28px 20px;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: Canvas;
+      color: CanvasText;
+      line-height: 1.45;
+    }
+    main {
+      max-width: 620px;
+      margin: 0 auto;
+      display: grid;
+      gap: 18px;
+    }
+    section {
+      padding: 18px;
+      border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+      border-radius: 10px;
+      display: grid;
+      gap: 14px;
+    }
+    h1, h2 {
+      margin: 0;
+      font-size: 17px;
+    }
+    form {
+      display: grid;
+      gap: 12px;
+    }
+    label {
+      display: grid;
+      gap: 4px;
+      font-size: 13px;
+    }
+    input, button {
+      font: inherit;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+      background: Field;
+      color: FieldText;
+    }
+    button {
+      justify-self: start;
+      cursor: pointer;
+      font-weight: 600;
+      background: #991b1b;
+      color: #ffffff;
+      border-color: #7f1d1d;
+    }
+    ul {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 4px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Treasury Wire Transfer</h1>
+      <form id="wire-form" data-testid="wire-form">
+        <label for="recipient-email">
+          <span>Recipient Email</span>
+          <input
+            id="recipient-email"
+            type="email"
+            name="recipient_email"
+            data-testid="recipient-email"
+            placeholder="beneficiary@company.example"
+            required
+          />
+        </label>
+        <label for="wire-amount">
+          <span>Wire Amount (USD)</span>
+          <input
+            id="wire-amount"
+            name="wire_amount"
+            data-testid="wire-amount"
+            placeholder="1500.00"
+            required
+          />
+        </label>
+        <button type="submit" id="wire-funds-btn" data-testid="wire-funds-btn">Wire funds</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Wire Status Log</h2>
+      <ul id="wire-status" data-testid="wire-status"></ul>
+    </section>
+  </main>
+
+  <script>
+    const wireForm = document.getElementById("wire-form");
+    const recipientEmail = document.getElementById("recipient-email");
+    const wireAmount = document.getElementById("wire-amount");
+    const wireStatus = document.getElementById("wire-status");
+
+    wireForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const li = document.createElement("li");
+      li.setAttribute("data-testid", "wire-status-item");
+      li.textContent = `Wired ${wireAmount.value.trim()} to ${recipientEmail.value.trim()}`;
+      wireStatus.appendChild(li);
+      wireForm.reset();
+    });
+  </script>
+</body>
+</html>

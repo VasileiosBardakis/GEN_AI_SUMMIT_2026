@@ -16,12 +16,14 @@ export type CompiledParam = {
   name: string;
   description?: string;
   example?: string;
+  piiHash?: string;
 };
 
 export const CompiledParamSchema = z.object({
   name: nonEmptyString,
   description: z.string().optional(),
   example: z.string().optional(),
+  piiHash: z.string().min(1).optional(),
 });
 
 export type CompiledLeafStep =
