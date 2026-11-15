@@ -5,9 +5,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { Event } from "@gen/shared";
 import { EventsSchema } from "@gen/shared/schema.ts";
 import type { GeminiClient, GeminiSdk } from "../src/llm/gemini.ts";
+import { createProposer } from "../src/propose.ts";
+import { compiledWorkflowToActionScript } from "../src/report.ts";
 import {
   COMPILER_RESPONSE_SCHEMA,
   compileWorkflow,
+  detectRepeatedCandidates,
+  eventsToSteps,
   normalizeHost,
   validateCompiledWorkflow,
   type CompiledWorkflow,
@@ -832,6 +836,137 @@ describe("Brain v2 compiler and validator", () => {
           ],
         }).ok,
       ).toBe(false);
+    }
+  });
+
+  it("compiles a 3-rep input + keydown(Enter) search trace, converts to pressKey(Enter), and triggers proposer at rep 3", async () => {
+    const searchLocators = [
+      { kind: "testid" as const, value: "search-input" },
+      { kind: "css" as const, value: "#search-input" },
+    ];
+    const queries = ["laptop", "monitor", "keyboard"];
+    const events: Event[] = [];
+    queries.forEach((query, idx) => {
+      const baseTs = 10_000 + idx * 5_000;
+      events.push(
+        {
+          v: 1,
+          id: `search-in-${idx}`,
+          ts: baseTs,
+          session: "s_enter_search",
+          source: "browser",
+          app: "search.local",
+          url: "http://search.local/",
+          type: "input",
+          target: {
+            tag: "input",
+            role: "searchbox",
+            label: "Search",
+            locators: searchLocators,
+          },
+          value: query,
+        },
+        {
+          v: 1,
+          id: `search-key-${idx}`,
+          ts: baseTs + 300,
+          session: "s_enter_search",
+          source: "browser",
+          app: "search.local",
+          url: "http://search.local/",
+          type: "keydown",
+          target: {
+            tag: "input",
+            role: "searchbox",
+            label: "Search",
+            locators: searchLocators,
+          },
+          meta: { key: "Enter", code: "Enter" },
+        },
+      );
+    });
+
+    const { steps } = eventsToSteps(events);
+    expect(steps.map((s) => s.action)).toEqual([
+      "fill",
+      "key",
+      "fill",
+      "key",
+      "fill",
+      "key",
+    ]);
+    for (const keyStep of steps.filter((s) => s.action === "key")) {
+      expect(keyStep.key).toBe("Enter");
+      expect(keyStep.target).toEqual(searchLocators);
+    }
+
+    const candidates = detectRepeatedCandidates(steps);
+    expect(candidates.some((c) => c.signature === "fill->key" && c.count === 3)).toBe(true);
+
+    const { client, prompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Search catalog",
+      reason: "Fills the search box and submits with Enter",
+      risk: "low",
+      runMode: "save_only",
+      params: [{ name: "query", example: "laptop" }],
+      steps: [
+        { action: "fill", stepIndex: 0, value: "{{query}}" },
+        { action: "key", stepIndex: 1, key: "Enter" },
+      ],
+    });
+
+    const wf = await compileWorkflow(
+      { events },
+      {
+        gemini: client,
+        iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      },
+    );
+
+    expect(prompts[0]).toContain("click/fill/select/readText/key/submit");
+    expect(prompts[0]).toContain("Enter");
+    expect(wf).not.toBeNull();
+
+    const script = compiledWorkflowToActionScript(wf!);
+    expect(script.steps).toEqual([
+      { action: "switchTab", host: "search.local" },
+      { action: "fill", target: searchLocators, value: "{{query}}" },
+      { action: "pressKey", key: "Enter", target: searchLocators },
+    ]);
+
+    let visibleCount = 4; // 2 reps first
+    const decided: Array<{ name: string; script: ReturnType<typeof compiledWorkflowToActionScript> }> = [];
+    const proposer = createProposer({
+      pipeline: "v2",
+      debounceMs: 10,
+      readSessionEvents: async () => events.slice(0, visibleCount),
+      compileV2: (input) =>
+        compileWorkflow(input, {
+          gemini: client,
+          iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+        }),
+      requestDecision: async (name, _solution, decidedScript) => {
+        decided.push({ name, script: decidedScript });
+        return { ok: true, decision: "approved" };
+      },
+      runScript: async () => ({ ok: true }),
+    });
+
+    try {
+      proposer.onEvents("s_enter_search");
+      await new Promise((r) => setTimeout(r, 60));
+      expect(decided).toHaveLength(0);
+
+      visibleCount = 6; // rep 3 arrives
+      proposer.onEvents("s_enter_search");
+      await new Promise((r) => setTimeout(r, 60));
+      expect(decided).toHaveLength(1);
+      expect(decided[0].script.steps).toEqual(script.steps);
+    } finally {
+      proposer.close();
     }
   });
 });
