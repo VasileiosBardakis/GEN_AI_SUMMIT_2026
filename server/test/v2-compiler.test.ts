@@ -2112,4 +2112,249 @@ describe("v2 compiler model and timeout configuration", () => {
     expect(nsWf!.steps.some((s) => s.action === "readText")).toBe(false);
     expect(nsWf!.params.some((p) => p.name === "amount")).toBe(true);
   });
+
+  it("retains earlier emptyControls across form updates, shows same-host URL changes, resolves colN/bind-less forEach readText and flat forEach trailing steps, and logs rejected steps (GEN-119)", async () => {
+    const erpFormSummary = (emptyFields: Array<{ name: string; label: string; testid: string }>) => ({
+      target: {
+        containerTag: "form",
+        containerLocators: [{ kind: "css" as const, value: "#erp-form" }],
+        emptyControls: emptyFields.map((f) => ({
+          tag: "input",
+          type: "text",
+          name: f.name,
+          label: f.label,
+          locators: [{ kind: "testid" as const, value: f.testid }],
+        })),
+        submitLocators: [{ kind: "testid" as const, value: "save-btn" }],
+      },
+    });
+
+    const portalSourceSummary = {
+      source: {
+        rowTag: "tr",
+        rows: [
+          {
+            locators: [{ kind: "css" as const, value: "tr:nth-of-type(1)" }],
+            cells: [
+              { text: "INV-2026-001 Copy", locators: [{ kind: "testid" as const, value: "portal-invoice-id-1" }] },
+              { text: "Acme Industrial Copy", locators: [{ kind: "testid" as const, value: "portal-vendor-1" }] },
+              { text: "1250.00 EUR Copy", locators: [{ kind: "testid" as const, value: "portal-amount-1" }] },
+            ],
+          },
+          {
+            locators: [{ kind: "css" as const, value: "tr:nth-of-type(2)" }],
+            cells: [
+              { text: "INV-2026-002 Copy", locators: [{ kind: "testid" as const, value: "portal-invoice-id-2" }] },
+              { text: "Globex Corp Copy", locators: [{ kind: "testid" as const, value: "portal-vendor-2" }] },
+              { text: "840.50 EUR Copy", locators: [{ kind: "testid" as const, value: "portal-amount-2" }] },
+            ],
+          },
+        ],
+      },
+    };
+
+    const baseEvents: Event[] = [
+      {
+        v: 1,
+        id: "g119-1",
+        ts: 1000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "nav",
+      },
+      {
+        v: 1,
+        id: "g119-2",
+        ts: 2000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/portal.html",
+        type: "copy",
+        value: "INV-2026-001",
+        target: { tag: "span", label: "INV-2026-001", locators: [{ kind: "testid", value: "portal-invoice-id" }] },
+      },
+      {
+        v: 1,
+        id: "g119-3",
+        ts: 3000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "paste",
+        value: "INV-2026-001",
+        target: { tag: "input", role: "textbox", label: "Invoice ID", locators: [{ kind: "testid", value: "erp-invoice-id" }] },
+        meta: {
+          pageSummary: erpFormSummary([
+            { name: "vendor", label: "Vendor", testid: "erp-vendor" },
+            { name: "amount", label: "Amount", testid: "erp-amount" },
+          ]),
+        },
+      },
+      {
+        v: 1,
+        id: "g119-4",
+        ts: 4000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/portal.html",
+        type: "copy",
+        value: "Acme Industrial",
+        target: { tag: "span", label: "Acme Industrial", locators: [{ kind: "testid", value: "portal-vendor" }] },
+      },
+      {
+        v: 1,
+        id: "g119-5",
+        ts: 5000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "paste",
+        value: "Acme Industrial",
+        target: { tag: "input", role: "textbox", label: "Vendor", locators: [{ kind: "testid", value: "erp-vendor" }] },
+        meta: {
+          pageSummary: erpFormSummary([{ name: "amount", label: "Amount", testid: "erp-amount" }]),
+        },
+      },
+      {
+        v: 1,
+        id: "g119-6",
+        ts: 6000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/portal.html",
+        type: "copy",
+        value: "1250.00 EUR",
+        target: { tag: "span", label: "1250.00 EUR", locators: [{ kind: "testid", value: "portal-amount-1" }] },
+        meta: { pageSummary: portalSourceSummary },
+      },
+      {
+        v: 1,
+        id: "g119-7",
+        ts: 7000,
+        session: "sess_g119",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "paste",
+        value: "1250.00 EUR",
+        target: { tag: "input", role: "textbox", label: "Amount", locators: [{ kind: "testid", value: "erp-amount" }] },
+        meta: {
+          pageSummary: erpFormSummary([{ name: "amount", label: "Amount", testid: "erp-amount" }]),
+        },
+      },
+    ];
+
+    // 1) All form targets (Amount, submit, Vendor) are preserved and portal.html URL is visible in Steps;
+    //    bind-less readText inside forEach resolves col1..col3 and startUrl picks portal.html.
+    const { client: nestedClient, prompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Portal to ERP",
+      reason: "Copies portal rows into ERP",
+      risk: "low",
+      runMode: "run_remaining",
+      params: [],
+      steps: [
+        {
+          action: "forEach",
+          items: "list_1",
+          steps: [
+            { action: "readText", withinId: "ps_4", withinTextParam: "col1" },
+            { action: "readText", withinId: "ps_4", withinTextParam: "col2" },
+            { action: "readText", withinId: "ps_4", withinTextParam: "col3" },
+            { action: "navigate", url: "http://127.0.0.1:5173/erp.html" },
+            { action: "fill", stepIndex: 2, value: "{{col1}}" },
+            { action: "fill", targetId: "ps_3", value: "{{col2}}" },
+            { action: "fill", targetId: "ps_1", value: "{{col3}}" },
+            { action: "click", targetId: "ps_2" },
+          ],
+        },
+      ],
+    });
+
+    const wfNested = await compileWorkflow(
+      { events: baseEvents },
+      { gemini: nestedClient, irisJudgment: { worthAutomating: true, pauseBeforeSubmit: false } },
+    );
+    expect(prompts[0]).toContain('"url":"http://127.0.0.1:5173/portal.html"');
+    expect(prompts[0]).toContain('"description":"field Vendor"');
+    expect(wfNested).not.toBeNull();
+    expect(wfNested!.startUrl).toBe("http://127.0.0.1:5173/portal.html");
+    expect(wfNested!.steps.map((s) => s.action)).toEqual([
+      "switchTab",
+      "extractList",
+      "forEach",
+    ]);
+    const loopStep = wfNested!.steps[2];
+    expect(loopStep.action).toBe("forEach");
+    if (loopStep.action === "forEach") {
+      expect(loopStep.steps[0]).toEqual({
+        action: "readText",
+        target: [{ kind: "css", value: "td:nth-of-type(1)" }],
+        within: [{ kind: "text", value: "{{col1}}" }],
+        bind: "col1",
+      });
+    }
+
+    // 2) Flat forEach (model puts body steps as siblings after forEach) still resolves cleanly
+    const { client: flatClient } = makeMockGemini({
+      suggest: true,
+      offerAt2: true,
+      kind: "workflow",
+      name: "Portal to ERP flat",
+      reason: "Copies portal rows into ERP",
+      risk: "low",
+      runMode: "run_remaining",
+      params: [],
+      steps: [
+        { action: "forEach", items: "list_1", withinId: "ps_4", withinTextParam: "col1" },
+        { action: "readText", withinTextParam: "col1", bind: "inv" },
+        { action: "fill", stepIndex: 2, value: "{{inv}}" },
+        { action: "click", targetId: "ps_2" },
+      ],
+    });
+    const wfFlat = await compileWorkflow(
+      { events: baseEvents },
+      { gemini: flatClient, irisJudgment: { worthAutomating: true, pauseBeforeSubmit: false } },
+    );
+    expect(wfFlat).not.toBeNull();
+    expect(wfFlat!.steps.some((s) => s.action === "forEach")).toBe(true);
+
+    // 3) Rejected step logs the first rejected step and reason
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { client: badClient } = makeMockGemini({
+        suggest: true,
+        offerAt2: false,
+        kind: "workflow",
+        name: "Bad target",
+        reason: "Unresolvable step",
+        risk: "low",
+        runMode: "save_only",
+        params: [],
+        steps: [{ action: "fill", targetId: "nonexistent_field", value: "x" }],
+      });
+      const wfBad = await compileWorkflow(
+        { events: baseEvents },
+        { gemini: badClient, irisJudgment: { worthAutomating: true, pauseBeforeSubmit: false } },
+      );
+      expect(wfBad).toBeNull();
+      expect(
+        logSpy.mock.calls.some((args) =>
+          String(args[0]).includes("[v2/compiler] rejected step action=fill") &&
+          String(args[0]).includes("targetId=nonexistent_field"),
+        ),
+      ).toBe(true);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
 });
