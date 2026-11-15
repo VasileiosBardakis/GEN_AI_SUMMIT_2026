@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Finding, Step } from "@gen/shared";
+import { normalizeText } from "../common/target.ts";
 import {
   detectSnippetsWithText,
   trigramJaccard,
@@ -12,10 +13,6 @@ export interface SharedEdgeOptions {
 }
 
 const FULL_SNIPPET_SIMILARITY_THRESHOLD = 0.8;
-
-function normalizeText(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
-}
 
 function primaryTargetKey(step: Step): string {
   const first = step.target?.[0];

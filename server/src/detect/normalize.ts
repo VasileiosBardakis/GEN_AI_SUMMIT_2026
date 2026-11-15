@@ -1,27 +1,5 @@
-import type { Event, Locator, Step } from "@gen/shared";
-
-const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-const PHONE_RE =
-  /(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)|\d{2,4})[\s.-]\d{3,4}[\s.-]\d{4}\b/g;
-const REDACTED_RE = /\[REDACTED:[^\]]*\]/g;
-const SHORTCUT_RE =
-  /\s+(?:F(?:[1-9]|1[0-2])|(?:(?:Ctrl|Alt|Shift|Cmd|Meta)\+)+[A-Za-z0-9]+)$/i;
-
-const DEFAULT_RANKS: Record<Locator["kind"], number> = {
-  testid: 0,
-  css: 1,
-  aria: 2,
-  text: 3,
-  uia: 4,
-};
-
-const GRID_RANKS: Record<Locator["kind"], number> = {
-  css: 0,
-  testid: 1,
-  aria: 2,
-  text: 3,
-  uia: 4,
-};
+import type { Event, Step } from "@gen/shared";
+import { formatTarget, maskPii, targetKey } from "../common/target.ts";
 
 const INCLUDED_TYPES = new Set<Event["type"]>([
   "click",
@@ -34,61 +12,6 @@ const INCLUDED_TYPES = new Set<Event["type"]>([
   "key",
   "keydown",
 ]);
-
-/**
- * Replace PII (emails and phone numbers) in a raw string with stable tokens.
- * Existing layer-1 `[REDACTED:...]` tokens are left untouched.
- */
-function maskPii(raw: string): string {
-  const redacted: string[] = [];
-  const shielded = raw.replace(REDACTED_RE, (token) => {
-    redacted.push(token);
-    return `\uE000${redacted.length - 1}\uE000`;
-  });
-
-  const masked = shielded
-    .replace(EMAIL_RE, "<email>")
-    .replace(PHONE_RE, "<phone>");
-
-  return masked.replace(
-    /\uE000(\d+)\uE000/g,
-    (_match: string, index: string) => redacted[Number(index)] ?? "",
-  );
-}
-
-function rankLocators(
-  target: NonNullable<Event["target"]>,
-  locators: Locator[],
-): Locator[] {
-  const isGrid =
-    target.role === "gridcell" || target.tag?.toLowerCase() === "td";
-  const ranks = isGrid ? GRID_RANKS : DEFAULT_RANKS;
-  return locators.sort((a, b) => ranks[a.kind] - ranks[b.kind]);
-}
-
-/**
- * Turn a raw captured target into a clean, ranked locator list.
- * Trailing keyboard shortcut hints (" F2", " Ctrl+C") are stripped from
- * text/aria locators so the canonical selector stays stable.
- */
-function formatTarget(target?: Event["target"]): Locator[] | undefined {
-  if (!target || target.locators.length === 0) return undefined;
-
-  const locators = target.locators.map((locator) => {
-    if (locator.kind === "text" || locator.kind === "aria") {
-      return { ...locator, value: locator.value.replace(SHORTCUT_RE, "") };
-    }
-    return { ...locator };
-  });
-
-  return rankLocators(target, locators);
-}
-
-function targetKey(target?: Event["target"]): string {
-  const formatted = formatTarget(target);
-  if (!formatted || formatted.length === 0) return "";
-  return `${formatted[0].kind}:${formatted[0].value}`;
-}
 
 /**
  * Collapse a noisy browser event trace into a canonical sequence of steps.

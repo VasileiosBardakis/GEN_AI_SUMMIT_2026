@@ -1,5 +1,8 @@
 import type { Locator } from "@gen/shared";
 import { z } from "../../../shared/node_modules/zod/index.js";
+import { isPlaceholderHost, normalizeHost } from "../common/host.ts";
+
+export { isPlaceholderHost, normalizeHost };
 
 export const DEFAULT_MAX_COMPILED_STEPS = 30;
 
@@ -281,18 +284,6 @@ export const CompiledWorkflowSchema: z.ZodType<CompiledWorkflow> = z.object({
   steps: z.array(CompiledStepSchema).min(1),
   stats: CompiledWorkflowStatsSchema,
 });
-
-const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
-
-export function isPlaceholderHost(host: string): boolean {
-  const trimmed = host.trim().toLowerCase();
-  const hostname = trimmed.split(":")[0] ?? "";
-  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
-}
-
-export function normalizeHost(host: string): string {
-  return host.trim().toLowerCase();
-}
 
 function countSteps(steps: readonly CompiledStep[]): number {
   let total = 0;

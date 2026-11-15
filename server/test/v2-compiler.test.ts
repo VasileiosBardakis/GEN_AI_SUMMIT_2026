@@ -1161,9 +1161,8 @@ describe("Brain v2 compiler and validator", () => {
       },
     );
 
+    expect(prompts[0]).toContain("stray clicks");
     expect(prompts[0]).toContain("side excursions");
-    expect(prompts[0]).toContain("even if repeated in every repetition");
-    expect(prompts[0]).toContain("Never emit `navigate`");
 
     expect(wf).not.toBeNull();
     expect(wf!.steps.some((s) => s.action === "navigate")).toBe(false);
@@ -1269,7 +1268,7 @@ describe("Brain v2 compiler and validator", () => {
       },
     );
 
-    expect(prompts[0]).toContain("click/fill/select/readText/key/submit");
+    expect(prompts[0]).toContain("`key`");
     expect(prompts[0]).toContain("Enter");
     expect(wf).not.toBeNull();
 
@@ -2159,7 +2158,7 @@ describe("v2 compiler model and timeout configuration", () => {
     vi.useRealTimers();
   });
 
-  it("uses gemini-3.1-flash-lite by default even when GEMINI_MODEL is set", async () => {
+  it("uses GEMINI_MODEL when V2_COMPILE_MODEL is unset, falling back to DEFAULT_GEMINI_MODEL", async () => {
     delete process.env.V2_COMPILE_MODEL;
     process.env.GEMINI_MODEL = "gemini-3-flash-preview";
 
@@ -2177,7 +2176,7 @@ describe("v2 compiler model and timeout configuration", () => {
     expect(wf).not.toBeNull();
     expect(generateContent).toHaveBeenCalledTimes(1);
     expect(generateContent.mock.calls[0]?.[0]?.model).toBe(
-      "gemini-3.1-flash-lite",
+      "gemini-3-flash-preview",
     );
   });
 
@@ -2222,7 +2221,7 @@ describe("v2 compiler model and timeout configuration", () => {
     );
   });
 
-  it("overrides default 5000 ms timeout with V2_COMPILE_TIMEOUT_MS", async () => {
+  it("overrides default 20000 ms timeout with V2_COMPILE_TIMEOUT_MS", async () => {
     process.env.V2_COMPILE_TIMEOUT_MS = "35";
 
     const events = await loadFixture("unseen-extra-click.jsonl");

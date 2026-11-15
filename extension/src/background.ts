@@ -14,8 +14,20 @@ import {
   upsertOptimizationItem,
   type OptimizationItem,
 } from "./library.ts";
+import {
+  DEFAULT_SERVER_URL,
+  isExactHostMatch,
+  lookupBinding,
+  normalizeLoopbackHost,
+  normalizeUrlPath,
+  scoreTabUrlMatch,
+  substituteBindings,
+  tabMatchesHost,
+} from "./utils.ts";
 
-const SERVER_URL = "http://localhost:8787";
+export { normalizeLoopbackHost, scoreTabUrlMatch, tabMatchesHost };
+
+const SERVER_URL = DEFAULT_SERVER_URL;
 const BATCH_INTERVAL_MS = 300;
 const MAX_BATCH_SIZE = 40;
 
@@ -872,17 +884,6 @@ function tryHostFromUrl(url: string | undefined): string | undefined {
   }
 }
 
-function normalizeUrlPath(pathname: string): string {
-  if (pathname.length > 1 && pathname.endsWith("/")) {
-    return pathname.slice(0, -1);
-  }
-  return pathname;
-}
-
-export function normalizeLoopbackHost(host: string): string {
-  return host.trim().toLowerCase();
-}
-
 function urlsMatchForPrecheck(stepUrl: string, openTabUrl: string): boolean {
   if (stepUrl === openTabUrl) return true;
   try {
@@ -1407,63 +1408,6 @@ export async function runActionScript(
   }
 }
 
-function isExactHostMatch(url: string | undefined, targetHost: string): boolean {
-  if (!url) return false;
-  try {
-    const parsed = new URL(url);
-    const want = targetHost.trim().toLowerCase();
-    const got = want.includes(":") ? parsed.host.toLowerCase() : parsed.hostname.toLowerCase();
-    return got === want;
-  } catch {
-    return false;
-  }
-}
-
-export function tabMatchesHost(url: string | undefined, targetHost: string): boolean {
-  if (!url) return false;
-  try {
-    const parsed = new URL(url);
-    const want = normalizeLoopbackHost(targetHost);
-    if (!want) return false;
-    const got = normalizeLoopbackHost(want.includes(":") ? parsed.host : parsed.hostname);
-    return got === want;
-  } catch {
-    return false;
-  }
-}
-
-export function scoreTabUrlMatch(tabUrl: string | undefined, targetUrl: string): number {
-  if (!tabUrl) return 0;
-  if (tabUrl === targetUrl) return 4;
-  try {
-    const tabParsed = new URL(tabUrl);
-    if (targetUrl.startsWith("/")) {
-      const targetPath = normalizeUrlPath(targetUrl.split("?")[0]);
-      if (normalizeUrlPath(tabParsed.pathname) === targetPath) return 2;
-      if (tabParsed.pathname.startsWith(targetPath)) return 1;
-      return 0;
-    }
-    const targetParsed = new URL(targetUrl);
-    if (tabParsed.href.replace(/#.*$/, "") === targetParsed.href.replace(/#.*$/, "")) return 4;
-    if (normalizeLoopbackHost(tabParsed.host) !== normalizeLoopbackHost(targetParsed.host)) {
-      return 0;
-    }
-    if (
-      normalizeUrlPath(tabParsed.pathname) === normalizeUrlPath(targetParsed.pathname) &&
-      tabParsed.search === targetParsed.search
-    ) {
-      return 3;
-    }
-    if (normalizeUrlPath(tabParsed.pathname) === normalizeUrlPath(targetParsed.pathname)) {
-      return targetParsed.search ? 0 : 2;
-    }
-    if (tabUrl.startsWith(targetUrl)) return 1;
-    return 0;
-  } catch {
-    return tabUrl.startsWith(targetUrl) ? 1 : 0;
-  }
-}
-
 function isPlainObject(val: unknown): val is Record<string, unknown> {
   return Boolean(val && typeof val === "object" && !Array.isArray(val));
 }
@@ -1517,7 +1461,7 @@ function resolveForEachItems(
     const candidates: unknown[] = [
       bindings[rawItems],
       scope[rawItems],
-      lookup(
+      lookupBinding(
         {
           ...bindings,
           ...scope,
@@ -1878,40 +1822,7 @@ async function executeDomStep(tabId: number, step: V2DomStep): Promise<StepResul
 }
 
 export function substitute<T>(value: T, vars: Record<string, unknown>): T {
-  if (typeof value === "string") return substituteString(value, vars) as T;
-  if (Array.isArray(value)) return value.map((item) => substitute(item, vars)) as T;
-  if (value && typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    const isForEach = obj.action === "forEach";
-    const result: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(obj)) {
-      if (key === "bind" || (isForEach && key === "steps")) {
-        result[key] = child;
-      } else {
-        result[key] = substitute(child, vars);
-      }
-    }
-    return result as T;
-  }
-  return value;
-}
-
-function substituteString(value: string, vars: Record<string, unknown>): unknown {
-  const whole = /^\{\{\s*([^}]+?)\s*\}\}$/.exec(value);
-  if (whole) return lookup(vars, whole[1]);
-  return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, path: string) => {
-    const found = lookup(vars, path);
-    return found === undefined ? "" : String(found);
-  });
-}
-
-function lookup(vars: Record<string, unknown>, path: string): unknown {
-  let current: unknown = vars;
-  for (const part of path.split(".")) {
-    if (!current || typeof current !== "object") return undefined;
-    current = (current as Record<string, unknown>)[part];
-  }
-  return current;
+  return substituteBindings(value, vars, { skipBindKey: true });
 }
 
 function sleep(ms: number): Promise<void> {

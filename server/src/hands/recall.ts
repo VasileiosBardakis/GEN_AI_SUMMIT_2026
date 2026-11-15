@@ -1,4 +1,8 @@
 import type { Event } from "@gen/shared";
+import {
+  normalizeHost as normalizeHostBase,
+  resolveEventHost,
+} from "../common/host.ts";
 import { judgeRecallIris, type IrisJudgeOptions } from "../llm/iris.ts";
 import { buildStartSignature } from "./implementor.ts";
 import type { LibraryEntry } from "./types.ts";
@@ -15,7 +19,6 @@ const INTERACTIVE_EVENT_TYPES = new Set<Event["type"]>([
 ]);
 
 const CLIPBOARD_WINDOW_MS = 120_000;
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "[::1]"]);
 const IMPLICIT_TAG_ROLES: Record<string, string> = {
   button: "button",
   a: "link",
@@ -27,24 +30,11 @@ const IMPLICIT_TAG_ROLES: Record<string, string> = {
 };
 
 function normalizeHost(raw: string): string {
-  const trimmed = raw.trim().toLowerCase();
-  if (!trimmed) return "";
-  let host = trimmed;
-  try {
-    const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
-    host = new URL(withScheme).hostname.toLowerCase();
-  } catch {
-    host = trimmed.replace(/^https?:\/\//, "").split(/[/?#]/)[0] ?? "";
-  }
-  return LOOPBACK_HOSTS.has(host) ? "localhost" : host;
+  return normalizeHostBase(raw, { collapseLoopback: true });
 }
 
 function extractEventHost(evt: Event): string {
-  if (evt.url) {
-    const fromUrl = normalizeHost(evt.url);
-    if (fromUrl) return fromUrl;
-  }
-  return normalizeHost(evt.app);
+  return resolveEventHost(evt, { preferUrl: true, collapseLoopback: true }) ?? "";
 }
 
 function normalizeUrlForPattern(rawUrl: string): string {

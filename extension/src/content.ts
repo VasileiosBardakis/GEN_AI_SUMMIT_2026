@@ -9,8 +9,9 @@ import {
   sanitizeValue,
 } from "./privacy.ts";
 import { buildDeciderSuggestion, createSuggestionEngine } from "./suggestion.ts";
-import type { FlowNode, Suggestion, SuggestionParam } from "./suggestion.ts";
+import type { Suggestion, SuggestionParam } from "./suggestion.ts";
 import { suggestionToOptimization } from "./library.ts";
+import { DEFAULT_SERVER_URL, escapeHtml, renderFlowNodes } from "./utils.ts";
 import type { ActionScript } from "./types.ts";
 
 export type WatcherMode = "all_raw" | "all_throttled" | "semantic";
@@ -66,7 +67,7 @@ function getConfig(): WatcherConfig {
   const win = (typeof window !== "undefined" ? window : {}) as unknown as GlobalEyesWindow;
   return {
     mode: win.__EYES_CONFIG__?.mode ?? "all_throttled",
-    endpoint: win.__EYES_CONFIG__?.endpoint ?? "http://localhost:8787/events",
+    endpoint: win.__EYES_CONFIG__?.endpoint ?? `${DEFAULT_SERVER_URL}/events`,
     batchMs: win.__EYES_CONFIG__?.batchMs ?? 250,
     maxBatchSize: win.__EYES_CONFIG__?.maxBatchSize ?? 50,
   };
@@ -102,73 +103,6 @@ const committedTextByElement = new WeakMap<HTMLElement, string>();
 const lastNonEmptyByElement = new WeakMap<HTMLElement, string>();
 let lastSuggestionShownAt = 0;
 let activePopupDismiss: (() => void) | null = null;
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => {
-    switch (char) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      case '"':
-        return "&quot;";
-      default:
-        return "&#39;";
-    }
-  });
-}
-
-function nodeKindIcon(kind: FlowNode["kind"]): string {
-  switch (kind) {
-    case "click":
-      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 1.8l6.8 3.6-3.1 1-1.3 3.1-2.4-7.7Z"/></svg>';
-    case "input":
-      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><path d="M2 3.5h8M2 6h6M2 8.5h4.5"/></svg>';
-    case "tab":
-      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="2.5" width="9" height="7" rx="1.2"/><path d="M1.5 5h9M5.5 2.5V5"/></svg>';
-    case "paste":
-      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="6.5" height="7.5" rx="1"/><path d="M4.5 3V2a1 1 0 0 1 1-1h1.5a1 1 0 0 1 1 1v1"/></svg>';
-    case "loop":
-      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 4.5A3.8 3.8 0 0 0 3 3.4M2.5 7.5A3.8 3.8 0 0 0 9 8.6"/><path d="M9.7 2.4v2.2H7.5M2.3 9.6V7.4h2.2"/></svg>';
-    case "ai":
-      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" aria-hidden="true"><path d="M1.5 6c1.2-2 2.8-3 4.5-3s3.3 1 4.5 3c-1.2 2-2.8 3-4.5 3S2.7 8 1.5 6Z" stroke="currentColor" stroke-width="1.3"/><circle cx="6" cy="6" r="1.3" fill="currentColor"/></svg>';
-    case "done":
-      return '<svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="4.3"/><path d="M4.2 6.1l1.2 1.2 2.5-2.5"/></svg>';
-  }
-}
-
-function nodeKindTitle(kind: FlowNode["kind"]): string {
-  switch (kind) {
-    case "ai":
-      return "Eyes";
-    case "loop":
-      return "Loop";
-    default:
-      return kind[0].toUpperCase() + kind.slice(1);
-  }
-}
-
-function renderFlowNodes(nodes: FlowNode[]): string {
-  const arrowSvg = `
-    <svg class="flow-arrow" viewBox="0 0 14 10" width="12" height="10" aria-hidden="true">
-      <path d="M1 5h10M8.5 2.5L11.5 5l-3 2.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
-    </svg>
-  `;
-  return nodes
-    .map((node, index) => {
-      const arrow = index < nodes.length - 1 ? arrowSvg : "";
-      const kindClass = node.kind === "ai" ? "eyes-step" : node.kind;
-      return `
-        <div class="flow-node ${kindClass}" title="${escapeHtml(node.label)}">
-          <div class="flow-kind">${nodeKindIcon(node.kind)}<span>${escapeHtml(nodeKindTitle(node.kind))}</span></div>
-          <div class="flow-label">${escapeHtml(node.label)}</div>
-        </div>${arrow}
-      `;
-    })
-    .join("");
-}
 
 function renderFlows(suggestion: Suggestion): string {
   const hasLoop = suggestion.flows.user.some((node) => node.kind === "loop");

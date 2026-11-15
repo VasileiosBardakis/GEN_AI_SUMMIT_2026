@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { hostnameFromUrl, isPlaceholderHost } from "../common/host.ts";
 import {
   createGeminiClient,
   type GeminiClientOptions,
@@ -122,25 +123,8 @@ function createGeminiGenerator(geminiOpts?: GeminiClientOptions): ImplementorGen
   };
 }
 
-const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
-
-function isPlaceholderHost(host?: string): boolean {
-  if (!host) return true;
-  const trimmed = host.trim().toLowerCase();
-  const hostname = trimmed.split(":")[0] ?? "";
-  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
-}
-
 function extractHostFromUrl(rawUrl?: string): string | null {
-  if (!rawUrl) return null;
-  try {
-    const parsed = new URL(rawUrl.trim());
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    const host = parsed.hostname.toLowerCase();
-    return isPlaceholderHost(host) ? null : host;
-  } catch {
-    return null;
-  }
+  return hostnameFromUrl(rawUrl) ?? null;
 }
 
 function resolveContextHost(context?: ImplementContext): string | null {

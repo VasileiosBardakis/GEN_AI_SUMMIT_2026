@@ -32,7 +32,9 @@ import {
   type GeminiClientOptions,
 } from "./llm/gemini.ts";
 import type { IrisJudgeOptions } from "./llm/iris.ts";
+import { normalizeText } from "./common/target.ts";
 import {
+  collectFlatSteps,
   createProposer,
   type HandsDecision,
   type HandsOutcome,
@@ -123,15 +125,7 @@ function formatStartSignature(sig: StartSignature): string {
 }
 
 function countFlatScriptSteps(steps: ActionScript["steps"]): number {
-  let count = 0;
-  for (const step of steps) {
-    if (step.action === "forEach") {
-      count += countFlatScriptSteps(step.steps);
-    } else {
-      count += 1;
-    }
-  }
-  return count;
+  return collectFlatSteps(steps).length;
 }
 
 export function createServer(opts: CreateServerOptions): http.Server {
@@ -149,7 +143,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
           }
         }
       : undefined;
-  const precheckTimeoutMs = opts.precheckTimeoutMs ?? 5000;
+  const precheckTimeoutMs = opts.precheckTimeoutMs ?? 10000;
   let latestScript: ActionScript | null = null;
   const scriptsByFindingId = new Map<string, ActionScript>();
   const reportCache = new Map<string, Report>();
@@ -389,7 +383,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
       if (entry.status !== "active" || entry.kind !== "snippet") continue;
       const step = entry.script.steps[0];
       if (step?.action === "insertText" && typeof step.value === "string") {
-        savedNorms.add(step.value.trim().toLowerCase().replace(/\s+/g, " "));
+        savedNorms.add(normalizeText(step.value));
       }
     }
     if (savedNorms.size === 0) return findings;
@@ -402,8 +396,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         step?.action === "insertText" &&
         typeof step.value === "string"
       ) {
-        const norm = step.value.trim().toLowerCase().replace(/\s+/g, " ");
-        if (savedNorms.has(norm)) return false;
+        if (savedNorms.has(normalizeText(step.value))) return false;
       }
       return true;
     });

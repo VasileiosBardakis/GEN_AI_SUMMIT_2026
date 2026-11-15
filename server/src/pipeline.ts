@@ -1,5 +1,13 @@
 import type { Event, Finding, Step, Verdict, Workflow } from "@gen/shared";
 import { writeSnippetArtifact } from "./artifacts.ts";
+import { isPlaceholderHost, resolveEventHost as resolveHostFromEvent } from "./common/host.ts";
+import {
+  ARIA_FIRST_RANKS,
+  collapseEventsToStepMeta,
+  SHORTCUT_RE,
+  stripRowSuffix,
+  targetKey,
+} from "./common/target.ts";
 import {
   buildDigest,
   decideSecond,
@@ -72,51 +80,8 @@ export type SafetyCheckResult =
 
 export const generatedScripts = new Map<string, ActionScript>();
 
-const INCLUDED_EVENT_TYPES = new Set<Event["type"]>([
-  "click",
-  "input",
-  "change",
-  "paste",
-  "copy",
-  "nav",
-  "submit",
-  "key",
-  "keydown",
-]);
-
-const SHORTCUT_RE =
-  /\s+(?:F(?:[1-9]|1[0-2])|(?:(?:Ctrl|Alt|Shift|Cmd|Meta)\+)+[A-Za-z0-9]+)$/i;
-
-const DEFAULT_RANKS: Record<NonNullable<Step["target"]>[number]["kind"], number> = {
-  testid: 0,
-  aria: 1,
-  text: 2,
-  css: 3,
-  uia: 4,
-};
-
-const GRID_RANKS: Record<NonNullable<Step["target"]>[number]["kind"], number> = {
-  css: 0,
-  testid: 1,
-  aria: 2,
-  text: 3,
-  uia: 4,
-};
-
 function eventTargetKey(target?: Event["target"]): string {
-  if (!target || target.locators.length === 0) return "";
-  const isGrid =
-    target.role === "gridcell" || target.tag?.toLowerCase() === "td";
-  const ranks = isGrid ? GRID_RANKS : DEFAULT_RANKS;
-  const sorted = target.locators
-    .map((loc) => {
-      if (loc.kind === "text" || loc.kind === "aria") {
-        return { ...loc, value: loc.value.replace(SHORTCUT_RE, "") };
-      }
-      return { ...loc };
-    })
-    .sort((a, b) => ranks[a.kind] - ranks[b.kind]);
-  return `${sorted[0].kind}:${sorted[0].value}`;
+  return targetKey(target, ARIA_FIRST_RANKS);
 }
 
 type EventStepMapping = {
@@ -128,7 +93,6 @@ type EventStepMapping = {
 
 function mapEventsToSteps(steps: Step[], events?: Event[]): EventStepMapping {
   const labelsByStepKey = new Map<string, string[]>();
-  const stepIndexByEvent = new Map<number, number>();
 
   if (!events || events.length === 0) {
     return {
@@ -137,7 +101,7 @@ function mapEventsToSteps(steps: Step[], events?: Event[]): EventStepMapping {
         const ts = (s as { ts?: number }).ts;
         return typeof ts === "number" ? { startTs: ts, endTs: ts } : {};
       }),
-      stepIndexByEvent,
+      stepIndexByEvent: new Map<number, number>(),
       labelsByStepKey,
     };
   }
@@ -151,120 +115,7 @@ function mapEventsToSteps(steps: Step[], events?: Event[]): EventStepMapping {
     }
   }
 
-  const collapsed: Array<{
-    action: Step["action"];
-    startTs: number;
-    endTs: number;
-    app: string;
-    label?: string;
-    lastValue?: string;
-  }> = [];
-  let lastKey = "";
-
-  for (let evIdx = 0; evIdx < events.length; evIdx++) {
-    const ev = events[evIdx];
-    if (!INCLUDED_EVENT_TYPES.has(ev.type)) continue;
-
-    if (ev.type === "input") {
-      const key = eventTargetKey(ev.target);
-      const prev = collapsed[collapsed.length - 1];
-      if (prev && prev.action === "fill" && lastKey === key) {
-        prev.endTs = ev.ts;
-        prev.lastValue = ev.value ?? "";
-        stepIndexByEvent.set(evIdx, collapsed.length - 1);
-      } else {
-        collapsed.push({
-          action: "fill",
-          startTs: ev.ts,
-          endTs: ev.ts,
-          app: ev.app,
-          label: ev.target?.label,
-          lastValue: ev.value ?? "",
-        });
-        stepIndexByEvent.set(evIdx, collapsed.length - 1);
-      }
-      lastKey = key;
-    } else if (ev.type === "change") {
-      const key = eventTargetKey(ev.target);
-      const prev = collapsed[collapsed.length - 1];
-      if (
-        prev &&
-        prev.action === "fill" &&
-        lastKey === key &&
-        prev.lastValue === (ev.value ?? "")
-      ) {
-        prev.endTs = ev.ts;
-        stepIndexByEvent.set(evIdx, collapsed.length - 1);
-      } else {
-        collapsed.push({
-          action: "fill",
-          startTs: ev.ts,
-          endTs: ev.ts,
-          app: ev.app,
-          label: ev.target?.label,
-          lastValue: ev.value ?? "",
-        });
-        stepIndexByEvent.set(evIdx, collapsed.length - 1);
-      }
-      lastKey = key;
-    } else if (ev.type === "nav") {
-      collapsed.push({
-        action: "nav",
-        startTs: ev.ts,
-        endTs: ev.ts,
-        app: ev.app,
-      });
-      stepIndexByEvent.set(evIdx, collapsed.length - 1);
-      lastKey = "";
-    } else if (ev.type === "key" || ev.type === "keydown") {
-      if (ev.meta?.key !== "Enter") continue;
-      collapsed.push({
-        action: "submit",
-        startTs: ev.ts,
-        endTs: ev.ts,
-        app: ev.app,
-        label: ev.target?.label,
-        lastValue: "Enter",
-      });
-      stepIndexByEvent.set(evIdx, collapsed.length - 1);
-      lastKey = eventTargetKey(ev.target);
-    } else if (ev.type === "submit") {
-      const prev = collapsed[collapsed.length - 1];
-      if (prev && prev.action === "submit" && prev.lastValue === "Enter") {
-        prev.endTs = ev.ts;
-        prev.lastValue = undefined;
-        if (!prev.label && ev.target?.label) {
-          prev.label = ev.target.label;
-        }
-        stepIndexByEvent.set(evIdx, collapsed.length - 1);
-      } else {
-        collapsed.push({
-          action: "submit",
-          startTs: ev.ts,
-          endTs: ev.ts,
-          app: ev.app,
-          label: ev.target?.label,
-        });
-        stepIndexByEvent.set(evIdx, collapsed.length - 1);
-      }
-      lastKey = eventTargetKey(ev.target);
-    } else if (
-      ev.type === "click" ||
-      ev.type === "paste" ||
-      ev.type === "copy"
-    ) {
-      collapsed.push({
-        action: ev.type,
-        startTs: ev.ts,
-        endTs: ev.ts,
-        app: ev.app,
-        label: ev.target?.label,
-      });
-      stepIndexByEvent.set(evIdx, collapsed.length - 1);
-      lastKey = eventTargetKey(ev.target);
-    }
-  }
-
+  const { collapsed, stepIndexByEvent } = collapseEventsToStepMeta(events);
   const aligned = collapsed.length === steps.length;
   const stepMeta = steps.map((s, idx) => {
     const inlineTs = (s as { ts?: number }).ts;
@@ -369,12 +220,6 @@ function splitIntoSequences(
   }
 
   return afterLoopSplit;
-}
-
-const ROW_SUFFIX_RE = /(?:-\d+|_\d+)(?=(?:["']\])?$)/;
-
-function stripRowSuffix(value: string): string {
-  return value.replace(ROW_SUFFIX_RE, "");
 }
 
 function normalizedStepKey(step: Step): string {
@@ -726,32 +571,8 @@ export function isSelectStep(step: Step, events?: Event[]): boolean {
   return false;
 }
 
-const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
-
-function isPlaceholderHost(host?: string): boolean {
-  if (!host) return true;
-  const trimmed = host.trim().toLowerCase();
-  const hostname = trimmed.split(":")[0] ?? "";
-  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
-}
-
 function resolveEventHost(ev?: Event): string | undefined {
-  if (!ev) return undefined;
-  if (ev.app && !isPlaceholderHost(ev.app)) {
-    return ev.app.trim();
-  }
-  if (ev.url) {
-    try {
-      const parsed = new URL(ev.url);
-      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-        const host = parsed.hostname.trim().toLowerCase();
-        if (!isPlaceholderHost(host)) return host;
-      }
-    } catch {
-      // ignore invalid URL
-    }
-  }
-  return undefined;
+  return resolveHostFromEvent(ev);
 }
 
 function resolveWorkflowHosts(

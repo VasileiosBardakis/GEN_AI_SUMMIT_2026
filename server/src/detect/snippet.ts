@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Finding, Step } from "@gen/shared";
+import { normalizeText } from "../common/target.ts";
 
 export interface SnippetOptions {
   minLength?: number;
@@ -21,10 +22,6 @@ interface Cluster {
   repRaw: string;
   repNorm: string;
   members: Candidate[];
-}
-
-function normalizeText(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function buildTrigrams(s: string): Set<string> {

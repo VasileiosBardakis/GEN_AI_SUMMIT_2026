@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { Event, Finding, Verdict } from "@gen/shared";
+import { normalizeText, primaryTargetKey, stripRowSuffix } from "./common/target.ts";
 import { toLocatorList, type ActionScript } from "./hands/types.ts";
 import {
   compiledWorkflowToActionScript,
@@ -16,7 +17,6 @@ import {
   type CompiledWorkflow,
   type PatternInstance,
   type V2Action,
-  type V2Step,
 } from "./v2/index.ts";
 
 export type HandsDecision = "approved" | "dismissed";
@@ -127,15 +127,11 @@ function inferDetector(finding: Finding): string {
   return "finding";
 }
 
-function normalizeText(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
 function normalizeIdentifier(raw: string): string {
   return raw.trim().toLowerCase().replace(/[-_\s]+/g, "_");
 }
 
-function collectFlatSteps(steps: ActionScript["steps"]): ActionScript["steps"] {
+export function collectFlatSteps(steps: ActionScript["steps"]): ActionScript["steps"] {
   const flat: ActionScript["steps"] = [];
   for (const step of steps) {
     if (step.action === "forEach") {
@@ -152,7 +148,7 @@ function addTargetTokens(target: { kind: string; value: string }, out: Set<strin
   if (!raw) return;
   out.add(raw);
   out.add(normalizeIdentifier(raw));
-  const noRow = raw.replace(/(?:-\d+|_\d+)(?=(?:["']\])?$)/, "");
+  const noRow = stripRowSuffix(raw);
   if (noRow !== raw) {
     out.add(noRow);
     out.add(normalizeIdentifier(noRow));
@@ -344,12 +340,6 @@ type Rep2CacheEntry = {
   compiled: CompiledWorkflow | null;
   stepCount: number;
 };
-
-function primaryTargetKey(step: V2Step | undefined): string | undefined {
-  const loc = step?.target?.[0];
-  if (!loc) return undefined;
-  return `${loc.kind}:${loc.value}`;
-}
 
 function extractConstantsFromPair(
   instances: readonly PatternInstance[],

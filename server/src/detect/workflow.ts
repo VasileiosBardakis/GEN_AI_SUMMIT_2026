@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
-import type { Event, Locator, Step, Workflow } from "@gen/shared";
+import type { Event, Step, Workflow } from "@gen/shared";
+import { isPlaceholderHost, resolveEventHost } from "../common/host.ts";
+import { collapseEventsToStepMeta, exactStepKey } from "../common/target.ts";
 import { trigramJaccard } from "./snippet.ts";
+
+export { exactStepKey };
 
 export type Candidate = {
   workflow: Workflow;
@@ -24,81 +28,6 @@ interface EnrichedStep {
   app?: string;
 }
 
-const INCLUDED_EVENT_TYPES = new Set<Event["type"]>([
-  "click",
-  "input",
-  "change",
-  "paste",
-  "copy",
-  "nav",
-  "submit",
-  "key",
-  "keydown",
-]);
-
-const SHORTCUT_RE =
-  /\s+(?:F(?:[1-9]|1[0-2])|(?:(?:Ctrl|Alt|Shift|Cmd|Meta)\+)+[A-Za-z0-9]+)$/i;
-
-const DEFAULT_RANKS: Record<Locator["kind"], number> = {
-  testid: 0,
-  aria: 1,
-  text: 2,
-  css: 3,
-  uia: 4,
-};
-
-const GRID_RANKS: Record<Locator["kind"], number> = {
-  css: 0,
-  testid: 1,
-  aria: 2,
-  text: 3,
-  uia: 4,
-};
-
-function eventTargetKey(target?: Event["target"]): string {
-  if (!target || target.locators.length === 0) return "";
-  const isGrid =
-    target.role === "gridcell" || target.tag?.toLowerCase() === "td";
-  const ranks = isGrid ? GRID_RANKS : DEFAULT_RANKS;
-  const sorted = target.locators
-    .map((loc) => {
-      if (loc.kind === "text" || loc.kind === "aria") {
-        return { ...loc, value: loc.value.replace(SHORTCUT_RE, "") };
-      }
-      return { ...loc };
-    })
-    .sort((a, b) => ranks[a.kind] - ranks[b.kind]);
-  return `${sorted[0].kind}:${sorted[0].value}`;
-}
-
-const PLACEHOLDER_HOSTS = new Set(["", "browser", "unknown", "local-page"]);
-
-function isPlaceholderHost(host?: string): boolean {
-  if (!host) return true;
-  const trimmed = host.trim().toLowerCase();
-  const hostname = trimmed.split(":")[0] ?? "";
-  return PLACEHOLDER_HOSTS.has(trimmed) || PLACEHOLDER_HOSTS.has(hostname);
-}
-
-function resolveEventHost(ev?: { app?: string; url?: string }): string | undefined {
-  if (!ev) return undefined;
-  if (ev.app && !isPlaceholderHost(ev.app)) {
-    return ev.app.trim();
-  }
-  if (ev.url) {
-    try {
-      const parsed = new URL(ev.url);
-      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-        const host = parsed.hostname.trim().toLowerCase();
-        if (!isPlaceholderHost(host)) return host;
-      }
-    } catch {
-      // ignore invalid URL
-    }
-  }
-  return undefined;
-}
-
 function mapEventsToStepMeta(
   steps: Step[],
   events?: Event[],
@@ -110,100 +39,7 @@ function mapEventsToStepMeta(
     });
   }
 
-  const collapsed: {
-    action: Step["action"];
-    startTs: number;
-    endTs: number;
-    app: string;
-    lastValue?: string;
-  }[] = [];
-  let lastKey = "";
-
-  for (const ev of events) {
-    if (!INCLUDED_EVENT_TYPES.has(ev.type)) continue;
-
-    if (ev.type === "input") {
-      const key = eventTargetKey(ev.target);
-      const prev = collapsed[collapsed.length - 1];
-      if (prev && prev.action === "fill" && lastKey === key) {
-        prev.endTs = ev.ts;
-        prev.lastValue = ev.value ?? "";
-      } else {
-        collapsed.push({
-          action: "fill",
-          startTs: ev.ts,
-          endTs: ev.ts,
-          app: resolveEventHost(ev) ?? ev.app,
-          lastValue: ev.value ?? "",
-        });
-      }
-      lastKey = key;
-    } else if (ev.type === "change") {
-      const key = eventTargetKey(ev.target);
-      const prev = collapsed[collapsed.length - 1];
-      if (
-        prev &&
-        prev.action === "fill" &&
-        lastKey === key &&
-        prev.lastValue === (ev.value ?? "")
-      ) {
-        prev.endTs = ev.ts;
-      } else {
-        collapsed.push({
-          action: "fill",
-          startTs: ev.ts,
-          endTs: ev.ts,
-          app: resolveEventHost(ev) ?? ev.app,
-          lastValue: ev.value ?? "",
-        });
-      }
-      lastKey = key;
-    } else if (ev.type === "nav") {
-      collapsed.push({
-        action: "nav",
-        startTs: ev.ts,
-        endTs: ev.ts,
-        app: resolveEventHost(ev) ?? ev.app,
-      });
-      lastKey = "";
-    } else if (ev.type === "key" || ev.type === "keydown") {
-      if (ev.meta?.key !== "Enter") continue;
-      collapsed.push({
-        action: "submit",
-        startTs: ev.ts,
-        endTs: ev.ts,
-        app: ev.app,
-        lastValue: "Enter",
-      });
-      lastKey = eventTargetKey(ev.target);
-    } else if (ev.type === "submit") {
-      const prev = collapsed[collapsed.length - 1];
-      if (prev && prev.action === "submit" && prev.lastValue === "Enter") {
-        prev.endTs = ev.ts;
-        prev.lastValue = undefined;
-      } else {
-        collapsed.push({
-          action: "submit",
-          startTs: ev.ts,
-          endTs: ev.ts,
-          app: ev.app,
-        });
-      }
-      lastKey = eventTargetKey(ev.target);
-    } else if (
-      ev.type === "click" ||
-      ev.type === "paste" ||
-      ev.type === "copy"
-    ) {
-      collapsed.push({
-        action: ev.type,
-        startTs: ev.ts,
-        endTs: ev.ts,
-        app: resolveEventHost(ev) ?? ev.app,
-      });
-      lastKey = eventTargetKey(ev.target);
-    }
-  }
+  const { collapsed } = collapseEventsToStepMeta(events);
 
   return steps.map((s, idx) => {
     const inlineTs = (s as { ts?: number }).ts;
@@ -230,10 +66,6 @@ function mapEventsToStepMeta(
 
     return { startTs, endTs, app };
   });
-}
-
-export function exactStepKey(step: Step): string {
-  return `${step.action}:${step.target?.[0]?.kind ?? ""}:${step.target?.[0]?.value ?? ""}`;
 }
 
 function splitSequences(

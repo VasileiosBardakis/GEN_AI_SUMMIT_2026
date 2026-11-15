@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { Event, Finding, Locator, Report } from "@gen/shared";
+import { primaryTargetKey } from "./common/target.ts";
 import {
   ActionScriptSchema,
   FindingSchema,
@@ -250,12 +251,6 @@ function isExactRepetitionOf(
     if (longer[i] !== shorter[i % shorter.length]) return false;
   }
   return true;
-}
-
-function primaryTargetKey(step: V2Step | undefined): string | undefined {
-  const loc = step?.target?.[0];
-  if (!loc) return undefined;
-  return `${loc.kind}:${loc.value}`;
 }
 
 function hasAnyPrimaryTarget(cand: PatternCandidate): boolean {

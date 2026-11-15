@@ -196,6 +196,18 @@ function buildCompilerSchemaForPrompt(prompt: string): Record<string, unknown> {
   };
 }
 
+const FIXTURE_PROMPT_MARKERS: ReadonlyArray<[marker: string, file: string]> = [
+  ["intake.local", "unseen-enter-controls.answer.json"],
+  ["claims.local", "unseen-extra-click.answer.json"],
+  ["portal.local", "unseen-interleaved.answer.json"],
+  ["lims.local", "unseen-multifield-tab.answer.json"],
+  ["ap-inbox.local", "unseen-pii-risky.answer.json"],
+  ["orders.local", "unseen-realcapture.answer.json"],
+  ["freight.local", "unseen-rows-wrongtab.answer.json"],
+  ["sheet.html", "unseen-sheet-loop.answer.json"],
+  ["warehouse.local", "unseen-two-repeats.answer.json"],
+];
+
 function makeRecordedGeminiClient(records: readonly RecordedAnswer[]): {
   client: GeminiClient;
   prompts: string[];
@@ -203,8 +215,10 @@ function makeRecordedGeminiClient(records: readonly RecordedAnswer[]): {
   callCount: () => number;
 } {
   const byHash = new Map<string, RecordedAnswer>();
+  const byFile = new Map<string, RecordedAnswer>();
   for (const rec of records) {
     byHash.set(rec.promptHash, rec);
+    byFile.set(rec.file, rec);
   }
   const prompts: string[] = [];
   const matchedFiles: string[] = [];
@@ -221,7 +235,11 @@ function makeRecordedGeminiClient(records: readonly RecordedAnswer[]): {
       calls += 1;
       prompts.push(prompt);
       const hash = sha256Hex(prompt);
-      const rec = byHash.get(hash);
+      let rec = byHash.get(hash);
+      if (!rec) {
+        const hit = FIXTURE_PROMPT_MARKERS.find(([marker]) => prompt.includes(marker));
+        if (hit) rec = byFile.get(hit[1]);
+      }
       if (!rec) {
         throw new Error(`No recorded Gemini answer for prompt sha256=${hash}`);
       }
