@@ -72,6 +72,7 @@ Available actions:
 - fill: { action: "fill", target, value } -> Sets value on <input>, <textarea>, or contenteditable. Never use fill on <select>.
 - select: { action: "select", target, value } -> Picks an option on <select>.
 - click: { action: "click", target } -> Clicks a button, link, or control.
+- pressKey: { action: "pressKey", key, target? } -> Presses "Enter", "Tab", or "Escape" on target (or focused element). Use for Enter-key submissions or tag-input commits.
 - waitFor: { action: "waitFor", target, timeoutMs? } -> Emit before interacting with elements that load after navigate or modal-opening clicks (default timeoutMs: 5000).
 - readText / readValue: { action: "readText" | "readValue", target, bind } -> Saves element text/value into variable <bind>, referenced later as "{{<bind>}}".
 - extractList: { action: "extractList", target, bind, fields? } -> Extracts repeating row elements into <bind>; each field locator is relative to the row.

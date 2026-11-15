@@ -201,4 +201,58 @@ describe("normalize", () => {
       "Keep [REDACTED:email] and [REDACTED:415-555-0199] intact",
     ]);
   });
+
+  it("preserves 3x (input, key/keydown Enter) on the same target followed by click and deduplicates keydown(Enter) + <form> submit", () => {
+    const tagInput: Target = {
+      tag: "input",
+      role: "textbox",
+      locators: [{ kind: "testid", value: "tag-input" }],
+    };
+    const saveBtn: Target = {
+      tag: "button",
+      role: "button",
+      locators: [{ kind: "testid", value: "save-tags" }],
+    };
+
+    const tagSteps = normalize([
+      makeEvent("input", { target: tagInput, value: "urgent" }),
+      makeEvent("keydown", { target: tagInput, meta: { key: "Enter" } }),
+      makeEvent("input", { target: tagInput, value: "billing" }),
+      makeEvent("key", { target: tagInput, meta: { key: "Enter" } }),
+      makeEvent("input", { target: tagInput, value: "vip" }),
+      makeEvent("keydown", { target: tagInput, meta: { key: "Enter" } }),
+      makeEvent("click", { target: saveBtn }),
+    ]);
+
+    expect(tagSteps).toEqual([
+      { action: "fill", target: [{ kind: "testid", value: "tag-input" }], value: "urgent" },
+      { action: "submit", target: [{ kind: "testid", value: "tag-input" }], value: "Enter" },
+      { action: "fill", target: [{ kind: "testid", value: "tag-input" }], value: "billing" },
+      { action: "submit", target: [{ kind: "testid", value: "tag-input" }], value: "Enter" },
+      { action: "fill", target: [{ kind: "testid", value: "tag-input" }], value: "vip" },
+      { action: "submit", target: [{ kind: "testid", value: "tag-input" }], value: "Enter" },
+      { action: "click", target: [{ kind: "testid", value: "save-tags" }] },
+    ]);
+
+    const searchInput: Target = {
+      tag: "input",
+      role: "searchbox",
+      locators: [{ kind: "testid", value: "search-input" }],
+    };
+    const searchForm: Target = {
+      tag: "form",
+      locators: [{ kind: "testid", value: "search-form" }],
+    };
+
+    const dedupedSteps = normalize([
+      makeEvent("input", { target: searchInput, value: "laptop" }),
+      makeEvent("keydown", { target: searchInput, meta: { key: "Enter" } }),
+      makeEvent("submit", { target: searchForm }),
+    ]);
+
+    expect(dedupedSteps).toEqual([
+      { action: "fill", target: [{ kind: "testid", value: "search-input" }], value: "laptop" },
+      { action: "submit", target: [{ kind: "testid", value: "search-input" }] },
+    ]);
+  });
 });

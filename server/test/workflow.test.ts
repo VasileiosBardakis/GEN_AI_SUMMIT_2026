@@ -184,4 +184,46 @@ describe("detectWorkflows", () => {
     expect(detectWorkflows(stepsWithGaps, { gapMs: 30_001 })).toEqual([]);
     expect(detectWorkflows(stepsWithGaps, { gapMs: 40_000 })).toEqual([]);
   });
+
+  it("keeps 3 repetitions of [click, fill, submit(Enter), fill, submit(Enter), fill, submit(Enter), click Save] intact per repetition", () => {
+    const tagTarget = [{ kind: "testid" as const, value: "tag-input" }];
+    const saveTarget = [{ kind: "testid" as const, value: "save-btn" }];
+
+    const steps: Step[] = [
+      ["t1a", "t1b", "t1c"],
+      ["t2a", "t2b", "t2c"],
+      ["t3a", "t3b", "t3c"],
+    ].flatMap(([tag1, tag2, tag3]) => [
+      { action: "click" as const, target: tagTarget },
+      { action: "fill" as const, target: tagTarget, value: tag1 },
+      { action: "submit" as const, target: tagTarget, value: "Enter" },
+      { action: "fill" as const, target: tagTarget, value: tag2 },
+      { action: "submit" as const, target: tagTarget, value: "Enter" },
+      { action: "fill" as const, target: tagTarget, value: tag3 },
+      { action: "submit" as const, target: tagTarget, value: "Enter" },
+      { action: "click" as const, target: saveTarget },
+    ]);
+
+    const candidates = detectWorkflows(steps);
+    expect(candidates).toHaveLength(1);
+    const [candidate] = candidates;
+    expect(candidate.repetitions).toBe(3);
+    expect(candidate.workflow.steps).toHaveLength(8);
+    expect(candidate.workflow.steps.map((s) => s.action)).toEqual([
+      "click",
+      "fill",
+      "submit",
+      "fill",
+      "submit",
+      "fill",
+      "submit",
+      "click",
+    ]);
+    expect(candidate.workflow.instances).toHaveLength(3);
+    expect(candidate.workflow.instances.map((i) => Object.values(i.bindings))).toEqual([
+      ["t1a", "t1b", "t1c"],
+      ["t2a", "t2b", "t2c"],
+      ["t3a", "t3b", "t3c"],
+    ]);
+  });
 });
