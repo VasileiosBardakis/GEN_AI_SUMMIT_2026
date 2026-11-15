@@ -1,34 +1,39 @@
 {
-  "promptHash": "3a29bd0b091a9cb303c70fcb6e91a3f29668160a8eba408a3f2177154f8f54c9",
+  "promptHash": "4340c270a80df4a7e429076e112785f8631f901af93daab7ccd9587dcb95d120",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Process Assay Readings",
-    "reason": "Automation of repetitive sample readings entry into LIMS system",
+    "name": "Automated Assay Sample Entry",
+    "reason": "Process queued samples from the bench notebook into the LIMS assay entry form by iterating through the assay queue list.",
     "risk": "low",
     "runMode": "run_remaining",
     "params": [
       {
-        "name": "ph",
+        "name": "phValue",
         "example": "7.12"
       },
       {
-        "name": "cond",
+        "name": "condValue",
         "example": "410"
       },
       {
-        "name": "turb",
+        "name": "turbValue",
         "example": "0.8"
       }
     ],
     "steps": [
       {
         "action": "forEach",
-        "items": "list_1",
+        "itemIds": [
+          "item_1_1",
+          "item_1_2",
+          "item_1_3"
+        ],
         "steps": [
           {
             "action": "switchTab",
+            "stepIndex": 2,
             "host": "lims.local"
           },
           {
@@ -38,25 +43,21 @@
           {
             "action": "fill",
             "stepIndex": 4,
-            "value": "{{ph}}"
+            "value": "{{phValue}}"
           },
           {
             "action": "fill",
             "stepIndex": 5,
-            "value": "{{cond}}"
+            "value": "{{condValue}}"
           },
           {
             "action": "fill",
             "stepIndex": 6,
-            "value": "{{turb}}"
+            "value": "{{turbValue}}"
           },
           {
             "action": "click",
             "stepIndex": 7
-          },
-          {
-            "action": "switchTab",
-            "host": "bench.local"
           }
         ]
       }

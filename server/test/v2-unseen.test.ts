@@ -13,6 +13,7 @@ import type { ActionScript } from "../src/hands/types.ts";
 import { createGeminiClient, type GeminiClient, type ZodLikeSchema } from "../src/llm/gemini.ts";
 import type { StageLogEvent } from "../src/propose.ts";
 import { readLibrary } from "../src/hands/library.ts";
+import { COMPILER_RESPONSE_SCHEMA } from "../src/v2/compiler.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -100,8 +101,14 @@ const COMPILER_LEAF_ACTIONS = [
 
 function buildCompilerSchemaForPrompt(prompt: string): Record<string, unknown> {
   const lines = prompt.split("\n");
-  const hasTargets = lines.includes("PageSummary Targets:");
+  const hasContainers = lines.includes(
+    "PageSummary Containers (for withinId ONLY, NEVER targetId):",
+  );
+  const hasTargets = lines.includes("PageSummary Targets:") || hasContainers;
   const hasLists = lines.includes("PageSummary Lists:");
+  if (hasTargets && hasLists) {
+    return COMPILER_RESPONSE_SCHEMA as unknown as Record<string, unknown>;
+  }
 
   const leafProps: Record<string, unknown> = {
     action: { type: "string", enum: [...COMPILER_LEAF_ACTIONS] },
@@ -838,13 +845,16 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       body: JSON.stringify(sess2Events),
     });
 
-    await vi.waitFor(() => {
-      expect(
-        stageLogs.some(
-          (e) => e.stage === "rate_limit" && e.session === "sess_claims_2",
-        ),
-      ).toBe(true);
-    });
+    await vi.waitFor(
+      () => {
+        expect(
+          stageLogs.some(
+            (e) => e.stage === "rate_limit" && e.session === "sess_claims_2",
+          ),
+        ).toBe(true);
+      },
+      { timeout: process.env.V2_UNSEEN_LIVE === "1" ? 15_000 : 1500 },
+    );
     const rateLimitedPoll = await pollHandsNext(baseUrl, 40);
     expect(rateLimitedPoll.status).toBe(204);
 

@@ -1,43 +1,70 @@
 {
-  "promptHash": "6e0f4614fac12149cbfc7c6743767d283183e71619f5e28b1703ac8f9b56cf9d",
+  "promptHash": "bd8576e20bf48dba62ec25aaeccfeb2715bfc530b759fd4d585a374f4f0158ab",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Process Pending Orders to Dispatch",
-    "reason": "Automate the creation of shipments for multiple pending orders by copying details from the orders dashboard to the dispatch system.",
-    "risk": "low",
+    "name": "Sync Orders to Dispatch",
+    "reason": "Automates the creation of shipments by migrating order details from the pending orders table to the dispatch portal.",
+    "risk": "medium",
     "runMode": "run_remaining",
     "params": [
       {
-        "name": "orderId"
+        "name": "col1",
+        "description": "The Order ID value"
       },
       {
-        "name": "customerName"
+        "name": "col2",
+        "description": "The Customer name value"
       }
     ],
     "steps": [
       {
-        "action": "switchTab",
-        "host": "dispatch.local"
-      },
-      {
-        "action": "fill",
-        "stepIndex": 4,
-        "value": "{{orderId}}"
-      },
-      {
-        "action": "fill",
-        "stepIndex": 5,
-        "value": "{{customerName}}"
-      },
-      {
-        "action": "click",
-        "stepIndex": 6
-      },
-      {
-        "action": "switchTab",
-        "host": "orders.local"
+        "action": "forEach",
+        "itemIds": [
+          "item_1_3",
+          "item_1_4",
+          "item_1_5"
+        ],
+        "steps": [
+          {
+            "action": "readText",
+            "stepIndex": 1,
+            "withinId": "ps_1",
+            "withinTextParam": "col1",
+            "bind": "orderId"
+          },
+          {
+            "action": "readText",
+            "stepIndex": 2,
+            "withinId": "ps_1",
+            "withinTextParam": "col2",
+            "bind": "customer"
+          },
+          {
+            "action": "switchTab",
+            "host": "dispatch.local"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 4,
+            "value": "{{orderId}}"
+          },
+          {
+            "action": "fill",
+            "stepIndex": 5,
+            "value": "{{customer}}"
+          },
+          {
+            "action": "click",
+            "stepIndex": 6,
+            "targetId": "ps_2"
+          },
+          {
+            "action": "switchTab",
+            "host": "orders.local"
+          }
+        ]
       }
     ]
   }

@@ -1,59 +1,68 @@
 {
-  "promptHash": "b259189c70885b95f51abf8f1a6d9b354308f5a3d7538c65c1dfc7a2713d16fe",
+  "promptHash": "e3df4895cbb832b947474f62de1ee77d8664a2d4646bd7a55d2ed25be772d001",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Sync Client Lookup Values",
-    "reason": "Automate the transfer of lookup values from the sheet to client details for pending items.",
+    "name": "Update Client Lookup Values",
+    "reason": "Automate updating client lookup values from the sheet table to the client detail forms.",
     "risk": "low",
     "runMode": "run_remaining",
     "params": [
       {
-        "name": "clientName"
-      },
-      {
-        "name": "lookupValue"
+        "name": "clientName",
+        "description": "The name of the client to process"
       }
     ],
     "steps": [
       {
         "action": "forEach",
-        "items": "list_2",
+        "itemIds": [
+          "item_1_3",
+          "item_1_4"
+        ],
         "steps": [
           {
             "action": "click",
-            "targetId": "ps_1",
+            "stepIndex": 1,
             "withinId": "ps_1",
             "withinTextParam": "clientName"
           },
           {
             "action": "click",
-            "targetId": "ps_2"
+            "stepIndex": 2,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName"
           },
           {
             "action": "readText",
-            "targetId": "ps_4",
+            "stepIndex": 3,
             "withinId": "ps_4",
-            "withinTextParam": "lookupValue",
-            "bind": "val"
+            "withinTextParam": "clientName",
+            "bind": "lookupValue"
           },
           {
             "action": "click",
-            "targetId": "ps_2"
+            "stepIndex": 4
           },
           {
             "action": "fill",
-            "targetId": "ps_3",
-            "value": "{{val}}"
+            "stepIndex": 5,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName",
+            "value": "{{lookupValue}}"
           },
           {
             "action": "click",
-            "targetId": "ps_2"
+            "stepIndex": 6,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName"
           },
           {
             "action": "click",
-            "targetId": "ps_1"
+            "stepIndex": 7,
+            "withinId": "ps_2",
+            "withinTextParam": "clientName"
           }
         ]
       }

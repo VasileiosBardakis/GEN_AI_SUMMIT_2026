@@ -1,38 +1,42 @@
 {
-  "promptHash": "c5dd693ee6a2206c4097d03d50d889174512026020914fbb5757927e5e21ef5b",
+  "promptHash": "9940d3d9b3290436645de05cc8d94d18bb1d1312f1e42bffca0a34419c9460f9",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Process Pending Customs Declarations",
-    "reason": "Automate the filing of pending freight declarations from the manifest into the customs system",
+    "name": "File Freight Declarations",
+    "reason": "Automates the process of reading waybill data from the freight manifest and filing declarations in the customs portal.",
     "risk": "medium",
     "runMode": "run_remaining",
     "params": [
       {
-        "name": "waybill"
+        "name": "waybill",
+        "description": "Waybill number extracted from the freight manifest."
       },
       {
-        "name": "weight"
+        "name": "weight",
+        "description": "Weight extracted from the freight manifest."
       }
     ],
     "steps": [
       {
         "action": "forEach",
-        "stepIndex": 0,
-        "targetId": "ps_1",
-        "url": "http://freight.local:4100/manifest",
-        "items": "list_1",
+        "itemIds": [
+          "item_1_4",
+          "item_1_5"
+        ],
         "steps": [
           {
             "action": "readText",
             "stepIndex": 1,
+            "withinId": "item_1_4",
             "withinTextParam": "col1",
             "bind": "waybill"
           },
           {
             "action": "readText",
             "stepIndex": 2,
+            "withinId": "item_1_4",
             "withinTextParam": "col2",
             "bind": "weight"
           },

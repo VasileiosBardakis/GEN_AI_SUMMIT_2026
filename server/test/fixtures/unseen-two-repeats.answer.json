@@ -1,31 +1,47 @@
 {
-  "promptHash": "1610e613b98436eff9a24ae4b13feaa62759b688ab04fec82eb7cc768fb1fa1b",
+  "promptHash": "5507c2891babffc5cf2a103dcf0215016b1fc5480ce46809ed401516f41be8db",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Automate Stock Transfer Posting",
-    "reason": "Automates the process of transferring stock from the warehouse table to the ERP system for each remaining entry.",
-    "risk": "medium",
+    "name": "Process Pending Inventory Transfers",
+    "reason": "Automates the transfer of stock records from the warehouse list to the ERP inventory posting portal.",
+    "risk": "low",
     "runMode": "run_remaining",
-    "params": [],
+    "params": [
+      {
+        "name": "sku",
+        "description": "The SKU code extracted from the transfer row."
+      },
+      {
+        "name": "bin",
+        "description": "The destination bin code extracted from the transfer row."
+      }
+    ],
     "steps": [
       {
         "action": "forEach",
-        "stepIndex": 0,
-        "items": "list_1",
+        "itemIds": [
+          "item_1_2",
+          "item_1_3",
+          "item_1_4",
+          "item_1_5",
+          "item_1_6"
+        ],
         "steps": [
           {
             "action": "readText",
             "stepIndex": 1,
-            "value": "{{SKU}}",
-            "bind": "SKU"
+            "withinId": "list_1",
+            "withinTextParam": "SKU",
+            "bind": "sku"
           },
           {
             "action": "readText",
             "stepIndex": 2,
-            "value": "{{Bin}}",
-            "bind": "Bin"
+            "withinId": "list_1",
+            "withinTextParam": "Bin",
+            "bind": "bin"
           },
           {
             "action": "switchTab",
@@ -34,12 +50,12 @@
           {
             "action": "fill",
             "stepIndex": 4,
-            "value": "{{SKU}}"
+            "value": "{{sku}}"
           },
           {
             "action": "fill",
             "stepIndex": 5,
-            "value": "{{Bin}}"
+            "value": "{{bin}}"
           },
           {
             "action": "click",

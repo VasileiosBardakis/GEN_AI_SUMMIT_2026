@@ -1,39 +1,41 @@
 {
-  "promptHash": "13d88d29d327fd9f67a8f11111adff85142a466d4fffc97bb899162db8a11ea0",
+  "promptHash": "2bf92ed6c85a8e7d00e92fb4899d26092cbdc9cf6c299a9afc31dfa8a02b683c",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Process Claims to Ledger",
-    "reason": "Automates recording claims from queue to the payout ledger system.",
+    "name": "Process Open Claims to Ledger",
+    "reason": "Automates the repetitive task of copying claim details from the claims queue to the ledger approval form.",
     "risk": "medium",
     "runMode": "run_remaining",
     "params": [
       {
-        "name": "claimId"
+        "name": "claimId",
+        "example": "CLM-701"
       },
       {
-        "name": "claimRef"
+        "name": "claimRef",
+        "example": "REF-19A"
       }
     ],
     "steps": [
       {
         "action": "forEach",
-        "items": "list_1",
+        "itemIds": [
+          "item_1_1",
+          "item_1_2",
+          "item_1_3"
+        ],
         "steps": [
-          {
-            "action": "switchTab",
-            "host": "claims.local"
-          },
           {
             "action": "readText",
             "stepIndex": 1,
-            "bind": "claimId"
+            "value": "{{claimId}}"
           },
           {
             "action": "readText",
             "stepIndex": 2,
-            "bind": "claimRef"
+            "value": "{{claimRef}}"
           },
           {
             "action": "switchTab",
@@ -52,6 +54,10 @@
           {
             "action": "click",
             "stepIndex": 6
+          },
+          {
+            "action": "switchTab",
+            "host": "claims.local"
           }
         ]
       }

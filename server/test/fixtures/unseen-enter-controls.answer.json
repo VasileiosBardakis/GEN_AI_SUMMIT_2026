@@ -1,22 +1,25 @@
 {
-  "promptHash": "1d90dd93d15160f798d8c8db727a1f7ea49a3bf20eb6632df3795e7cceb50fd4",
+  "promptHash": "47888ebdb9d750b0fcbf6a7e6136d7b3d513763b2c642593d7938b3e7b319c51",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Assign Triage Tickets to Routing",
-    "reason": "Automate the transfer of ticket IDs from the triage queue to the dispatch console and set routing priorities.",
-    "risk": "medium",
+    "name": "Automated Ticket Routing",
+    "reason": "Repeated process of copying Ticket IDs from intake to dispatch console and assigning priority.",
+    "risk": "low",
     "runMode": "save_only",
     "params": [
       {
-        "name": "ticketId"
-      },
-      {
-        "name": "priority"
+        "name": "priority",
+        "example": "expedited"
       }
     ],
     "steps": [
+      {
+        "action": "readText",
+        "stepIndex": 1,
+        "value": "ticketId"
+      },
       {
         "action": "switchTab",
         "host": "routing.local"
@@ -27,7 +30,7 @@
         "value": "{{ticketId}}"
       },
       {
-        "action": "fill",
+        "action": "select",
         "stepIndex": 4,
         "value": "{{priority}}"
       },

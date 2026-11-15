@@ -1,11 +1,11 @@
 {
-  "promptHash": "d1c5f36c3a0802bfd24340c704d990777c1f58a5009df5a8d6fcd7a0ed23a16d",
+  "promptHash": "468f1e01bb59e5642e2c2861447de3c4a62b70674c647caa7abe5a02ceed05b3",
   "response": {
     "suggest": true,
     "offerAt2": true,
     "kind": "workflow",
-    "name": "Sync Order Fulfillment and Helpdesk Notes",
-    "reason": "Automates the synchronization of order processing between the portal and ERP, followed by updating helpdesk tickets with status notes.",
+    "name": "Process Order Resolution",
+    "reason": "Automates the synchronization of order codes from the portal to the ERP system and updates corresponding helpdesk tickets with resolution notes.",
     "risk": "low",
     "runMode": "save_only",
     "params": [
@@ -15,10 +15,15 @@
       },
       {
         "name": "resolutionNote",
-        "example": "Resolution details here"
+        "example": "Issue resolved"
       }
     ],
     "steps": [
+      {
+        "action": "readText",
+        "stepIndex": 1,
+        "bind": "orderCode"
+      },
       {
         "action": "switchTab",
         "host": "erp.local"
