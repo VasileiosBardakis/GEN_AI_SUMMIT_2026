@@ -77,3 +77,33 @@ export function mergeSessions(
     };
   });
 }
+
+export function mergeWithinSession(
+  eventsBySession: EventsBySession,
+): MergedSession[] {
+  const sessionLists = collectSessionLists(eventsBySession);
+  const bySession = new Map<string, Array<{ event: Event; index: number }>>();
+
+  let index = 0;
+  for (const events of sessionLists) {
+    for (const event of events) {
+      let bucket = bySession.get(event.session);
+      if (!bucket) {
+        bucket = [];
+        bySession.set(event.session, bucket);
+      }
+      bucket.push({ event, index: index++ });
+    }
+  }
+
+  const result: MergedSession[] = [];
+  for (const [session, indexed] of bySession.entries()) {
+    indexed.sort((a, b) => a.event.ts - b.event.ts || a.index - b.index);
+    result.push({
+      session,
+      events: indexed.map((item) => ({ ...item.event })),
+    });
+  }
+
+  return result;
+}
