@@ -18,6 +18,7 @@ import {
   DEFAULT_PIPELINE_CONFIG,
   describeCandidate,
   filterNoisySteps,
+  isSelectStep,
   runPipeline,
 } from "../src/pipeline.ts";
 
@@ -684,6 +685,202 @@ describe("pipeline unit & config tests", () => {
         stability: 0.9,
       }),
     ).toBe('Insert reply: "Hi, thanks for your order. It ships Frid..."');
+  });
+
+  it("buildSolutionText emits select <select> for <select> targets (css, combobox aria, or matching events) while keeping fill for <input>", () => {
+    const wf: Workflow = {
+      id: "wf_dropdown",
+      name: "erp.local workflow (4 steps)",
+      sourceApp: "erp.local",
+      destApp: "erp.local",
+      steps: [
+        {
+          action: "fill",
+          target: [{ kind: "css", value: 'select[name="priority"]' }],
+          value: "urgent",
+        },
+        {
+          action: "fill",
+          target: [
+            { kind: "testid", value: "status-select" },
+            { kind: "css", value: "#status" },
+          ],
+          value: { param: "status" },
+        },
+        {
+          action: "fill",
+          target: [
+            { kind: "aria", value: 'combobox[name="Region"]' },
+            { kind: "css", value: "#region-picker" },
+          ],
+          value: "eu-west",
+        },
+        {
+          action: "fill",
+          target: [
+            { kind: "testid", value: "note-input" },
+            { kind: "css", value: 'input[name="note"]' },
+          ],
+          value: { param: "note" },
+        },
+        {
+          action: "submit",
+          target: [{ kind: "css", value: "#entry-form" }],
+        },
+      ],
+      params: [
+        { name: "status", example: "approved" },
+        { name: "note", example: "Verified invoice" },
+      ],
+      instances: [],
+    };
+
+    const events: Event[] = [
+      {
+        v: 1,
+        id: "ev-status",
+        ts: 1000,
+        session: "sess_drop",
+        source: "browser",
+        app: "erp.local",
+        type: "change",
+        target: {
+          tag: "select",
+          role: "combobox",
+          locators: [
+            { kind: "testid", value: "status-select" },
+            { kind: "css", value: "#status" },
+          ],
+        },
+        value: "approved",
+        meta: { selectedValue: "approved", selectedLabel: "Approved" },
+      },
+      {
+        v: 1,
+        id: "ev-note",
+        ts: 1100,
+        session: "sess_drop",
+        source: "browser",
+        app: "erp.local",
+        type: "input",
+        target: {
+          tag: "input",
+          role: "textbox",
+          locators: [
+            { kind: "testid", value: "note-input" },
+            { kind: "css", value: 'input[name="note"]' },
+          ],
+        },
+        value: "Verified invoice",
+      },
+    ];
+
+    expect(isSelectStep(wf.steps[0])).toBe(true);
+    expect(isSelectStep(wf.steps[1])).toBe(false);
+    expect(isSelectStep(wf.steps[1], events)).toBe(true);
+    expect(isSelectStep(wf.steps[2])).toBe(true);
+    expect(isSelectStep(wf.steps[3], events)).toBe(false);
+
+    const solution = buildSolutionText("rung2", wf, undefined, events);
+    expect(solution).not.toBeNull();
+    expect(solution).toContain(
+      '1. select <select> css="select[name="priority"]" with "urgent"',
+    );
+    expect(solution).toContain(
+      '2. select <select> testid="status-select" with "approved"',
+    );
+    expect(solution).toContain(
+      '3. select <select> css="#region-picker" with "eu-west"',
+    );
+    expect(solution).toContain(
+      '4. fill testid="note-input" with "Verified invoice"',
+    );
+    expect(solution).not.toContain('fill css="select[name="priority"]"');
+    expect(solution).not.toContain('fill testid="status-select"');
+    expect(solution).not.toContain('select <select> testid="note-input"');
+  });
+
+  it("runPipeline passes events to buildSolutionText so implementor receives select <select> for dropdowns", async () => {
+    const baseTs = 1_700_000_000_000;
+    const events: Event[] = [0, 1, 2].flatMap((i) => [
+      {
+        v: 1 as const,
+        id: `sel-${i}`,
+        ts: baseTs + i * 5000,
+        session: "sess_dropdown_pipe",
+        source: "browser" as const,
+        app: "erp.local",
+        type: "change" as const,
+        target: {
+          tag: "select",
+          role: "combobox",
+          locators: [{ kind: "css" as const, value: "#priority" }],
+        },
+        value: "high",
+        meta: { selectedValue: "high", selectedLabel: "High" },
+      },
+      {
+        v: 1 as const,
+        id: `inp-${i}`,
+        ts: baseTs + i * 5000 + 200,
+        session: "sess_dropdown_pipe",
+        source: "browser" as const,
+        app: "erp.local",
+        type: "input" as const,
+        target: {
+          tag: "input",
+          role: "textbox",
+          locators: [{ kind: "css" as const, value: "#summary" }],
+        },
+        value: `Item ${i + 1}`,
+      },
+      {
+        v: 1 as const,
+        id: `sub-${i}`,
+        ts: baseTs + i * 5000 + 400,
+        session: "sess_dropdown_pipe",
+        source: "browser" as const,
+        app: "erp.local",
+        type: "submit" as const,
+        target: {
+          tag: "form",
+          locators: [{ kind: "css" as const, value: "#ticket-form" }],
+        },
+      },
+    ]);
+
+    const steps = normalize(events);
+    let capturedSolution = "";
+    const implement = vi.fn(async (solution: string, opts?: { name?: string }) => {
+      capturedSolution = solution;
+      return makeFakeActionScript(opts?.name);
+    });
+
+    const findings = await runPipeline(steps, {
+      llm: true,
+      events,
+      gemini: {
+        sdk: {
+          models: {
+            generateContent: async () => ({
+              text: JSON.stringify({
+                level: "rung2",
+                confidence: 0.95,
+                name: "Submit priority ticket",
+                risky: false,
+              }),
+            }),
+          },
+        },
+      },
+      implement,
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].verdict).toBe("rung2");
+    expect(implement).toHaveBeenCalledTimes(1);
+    expect(capturedSolution).toContain('select <select> css="#priority" with "high"');
+    expect(capturedSolution).toContain('fill css="#summary" with "Item 1"');
   });
 });
 

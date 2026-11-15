@@ -743,6 +743,9 @@ async function executeDomStepInPage(step: DomStep): Promise<StepResult> {
         }
         if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
           setNativeValue(element, step.value);
+        } else if (element instanceof HTMLSelectElement) {
+          selectOption(element, step.value);
+          return { ok: true, url: location.href, value: readValue(element) };
         } else if (element instanceof HTMLElement && element.isContentEditable) {
           element.textContent = "";
           insertIntoEditable(element, step.value);

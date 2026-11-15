@@ -644,10 +644,58 @@ function pickBestLocator(
   return best;
 }
 
+const CSS_SELECT_TARGET_RE = /(?:^|[\s>+~,])select(?=[#.[:\s>+~,]|$)/i;
+
+function normalizeLocatorKey(loc: { kind: string; value: string }): string {
+  const val =
+    loc.kind === "text" || loc.kind === "aria"
+      ? loc.value.replace(SHORTCUT_RE, "")
+      : loc.value;
+  return `${loc.kind}:${val}`;
+}
+
+export function isSelectStep(step: Step, events?: Event[]): boolean {
+  const target = step.target;
+  if (!target || target.length === 0) return false;
+
+  for (const loc of target) {
+    if (loc.kind === "css" && CSS_SELECT_TARGET_RE.test(loc.value.trim())) {
+      return true;
+    }
+    if (
+      loc.kind === "aria" &&
+      loc.value.trim().toLowerCase().startsWith("combobox[")
+    ) {
+      return true;
+    }
+  }
+
+  if (!events || events.length === 0) return false;
+
+  const stepKeys = new Set(target.map(normalizeLocatorKey));
+  for (const ev of events) {
+    const evLocs = ev.target?.locators;
+    if (!evLocs || evLocs.length === 0) continue;
+    const matchesTarget = evLocs.some((loc) =>
+      stepKeys.has(normalizeLocatorKey(loc)),
+    );
+    if (!matchesTarget) continue;
+    if (
+      ev.target?.tag?.toLowerCase() === "select" ||
+      ev.meta?.selectedValue !== undefined
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function buildSolutionText(
   verdict: Verdict,
-  workflow: Workflow,
+  workflow?: Workflow,
   snippetText?: string,
+  events?: Event[],
 ): string | null {
   if (verdict === "rung1") {
     if (typeof snippetText === "string" && snippetText.trim().length > 0) {
@@ -657,6 +705,7 @@ export function buildSolutionText(
   }
 
   if (verdict === "rung2") {
+    if (!workflow) return null;
     const paramExampleByName = new Map<string, string>();
     for (const p of workflow.params ?? []) {
       if (typeof p.example === "string" && p.example.trim().length > 0) {
@@ -706,6 +755,9 @@ export function buildSolutionText(
         }
       }
 
+      const isSelect = step.action === "fill" && isSelectStep(step, events);
+      const actionVerb = isSelect ? "select <select>" : step.action;
+
       if (
         (step.action === "fill" || step.action === "paste") &&
         step.value !== undefined &&
@@ -713,13 +765,15 @@ export function buildSolutionText(
       ) {
         const { param } = step.value;
         if (copiedParams.has(param)) {
-          rawLines.push(`fill ${targetDesc} with "{{${param}}}"`);
+          rawLines.push(
+            `${isSelect ? "select <select>" : "fill"} ${targetDesc} with "{{${param}}}"`,
+          );
         } else {
           const example = paramExampleByName.get(param);
           if (example) {
-            rawLines.push(`${step.action} ${targetDesc} with "${example}"`);
+            rawLines.push(`${actionVerb} ${targetDesc} with "${example}"`);
           } else {
-            rawLines.push(`${step.action} ${targetDesc} with {${param}}`);
+            rawLines.push(`${actionVerb} ${targetDesc} with {${param}}`);
           }
         }
         continue;
@@ -735,7 +789,7 @@ export function buildSolutionText(
               : paramExampleByName.has(step.value.param)
                 ? ` with "${paramExampleByName.get(step.value.param)}"`
                 : ` with {${step.value.param}}`;
-      rawLines.push(`${step.action} ${targetDesc}${valDesc}`);
+      rawLines.push(`${actionVerb} ${targetDesc}${valDesc}`);
     }
 
     const lines = rawLines.map((line, idx) => `${idx + 1}. ${line}`);
@@ -1065,6 +1119,7 @@ export async function runPipeline(
           verdict,
           candidate.workflow,
           item.snippetText,
+          opts.events,
         );
         if (solution && opts.llm) {
           const implementStartedAt = Date.now();
