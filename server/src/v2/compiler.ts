@@ -197,7 +197,12 @@ export const COMPILER_RESPONSE_SCHEMA = {
   properties: {
     suggest: { type: "boolean" },
     offerAt2: { type: "boolean" },
-    kind: { type: "string", enum: ["snippet", "workflow"] },
+    kind: {
+      type: "string",
+      enum: ["snippet", "workflow"],
+      description:
+        "Use 'snippet' when the steps are paste/fill of the same literal text into one field with no copy/source read (even with clear clicks in between); otherwise 'workflow'.",
+    },
     name: { type: "string" },
     reason: { type: "string" },
     risk: { type: "string", enum: ["low", "medium", "high"] },
@@ -394,7 +399,12 @@ function buildCompilerSchemaForPrompt(prompt: string): Record<string, unknown> {
     properties: {
       suggest: { type: "boolean" },
       offerAt2: { type: "boolean" },
-      kind: { type: "string", enum: ["snippet", "workflow"] },
+      kind: {
+        type: "string",
+        enum: ["snippet", "workflow"],
+        description:
+          "Use 'snippet' when the steps are paste/fill of the same literal text into one field with no copy/source read (even with clear clicks in between); otherwise 'workflow'.",
+      },
       name: { type: "string" },
       reason: { type: "string" },
       risk: { type: "string", enum: ["low", "medium", "high"] },
@@ -1380,15 +1390,16 @@ function buildCompilePrompt(ctx: PromptContext): string {
       : "1. Never write CSS/DOM selectors and NEVER invent a `targetId`. Every UI step (`click`, `fill`, `select`, `readText`, `readValue`, `extractList`, `waitFor`, `key`, `submit`) must reference a `stepIndex` from Steps (omit `targetId` and `withinId` since no PageSummary Targets exist).";
 
   return [
-    "Compile the user's browser steps into ONE concise parameterized workflow JSON if worth automating.",
+    "Compile the user's browser steps into ONE concise JSON (a reusable `snippet` or parameterized `workflow`) if worth automating.",
     "",
     "RULES:",
     rule1,
-    "2. Output one clean generalized workflow repetition; drop one-off stray clicks or irrelevant side excursions, and do not add extra `navigate` steps unless the user navigated between distinct pages as part of the task.",
+    "2. Output one clean generalized repetition; drop one-off stray clicks or irrelevant side excursions, and do not add extra `navigate` steps unless the user navigated between distinct pages as part of the task.",
     "3. Keep all distinct form inputs and submit keys (e.g. `Enter`).",
-    "4. Parameterize user-supplied variables in `params[]` and `\"{{paramName}}\"`. When `copy` steps have a readable source (`sourceTargetId` for copy-button steps, or a non-button source `stepIndex`/PageSummary source target), emit `readText`/`readValue` with `stepIndex` (or `sourceTargetId`), setting `bind: \"varName\"` (NOT `value`) to store each copied value and filling the destination field with `\"{{varName}}\"`. NEVER emit `readText`/`readValue` on a Copy button or on the destination input field being filled (no self-read). If a `copy` step has `noReadableSource: true`, parameterize it in `params[]` and `\"{{paramName}}\"` with NO `readText`/`readValue`.",
+    "4. Parameterize user-supplied variables in `params[]` and `\"{{paramName}}\"` (EXCEPT for `kind: \"snippet\"`, which keeps the repeated text literal with `params: []`). When `copy` steps have a readable source (`sourceTargetId` for copy-button steps, or a non-button source `stepIndex`/PageSummary source target), emit `readText`/`readValue` with `stepIndex` (or `sourceTargetId`), setting `bind: \"varName\"` (NOT `value`) to store each copied value and filling the destination field with `\"{{varName}}\"`. NEVER emit `readText`/`readValue` on a Copy button or on the destination input field being filled (no self-read). If a `copy` step has `noReadableSource: true`, parameterize it in `params[]` and `\"{{paramName}}\"` with NO `readText`/`readValue`.",
     "5. `switchTab` uses `stepIndex` or `host` (hostname only). Any `navigate` must preserve the full URL (scheme, host, port, path).",
-    "6. When PageSummary Lists contains a source list with rows on the source page, ALWAYS emit `forEach` with `runMode: \"run_remaining\"` and `itemIds` (for remaining unprocessed items, or `items: \"<listId>\"` for all rows) and put ALL per-row steps inside `forEach.steps: [...]` (never leave `forEach.steps` empty or put body steps after `forEach`). Inside `forEach.steps`, scope row-level `readText`/`click` steps using `withinId` and `withinTextParam` (NOT on `forEach` itself) plus `stepIndex` (or `targetId`), and fill destination fields using `stepIndex` or exact `ps_*` `targetId`. When the user pastes or types the same literal text repeatedly into one field (even with clears in between), set `suggest: true`, `kind: \"snippet\"`, `params: []`, `runMode: \"save_only\"`, and emit ONE `insertText` step with that exact repeated text. Otherwise set `runMode: \"save_only\"` with flat steps. Set `risk: \"high\"` for irreversible external actions; set `suggest: true` for repeated workflows (2+ cycles), snippet pastes, or multi-field transfers with a PageSummary list — set `suggest: false` if one-off or incomplete.",
+    "6. SNIPPET: When the steps are `paste` or `fill` of the same literal text into one field with no `copy`/source read (even with clear clicks or empty clears in between), set `suggest: true`, `kind: \"snippet\"`, `params: []`, `runMode: \"save_only\"`, and emit ONLY ONE `insertText` step with `stepIndex` and that exact repeated text (no `fill`, `click`, or clear steps).",
+    "7. WORKFLOW: When PageSummary Lists contains a source list with rows on the source page, ALWAYS emit `forEach` with `runMode: \"run_remaining\"` and `itemIds` (for remaining unprocessed items, or `items: \"<listId>\"` for all rows) and put ALL per-row steps inside `forEach.steps: [...]` (never leave `forEach.steps` empty or put body steps after `forEach`). Inside `forEach.steps`, scope row-level `readText`/`click` steps using `withinId` and `withinTextParam` (NOT on `forEach` itself) plus `stepIndex` (or `targetId`), and fill destination fields using `stepIndex` or exact `ps_*` `targetId`. Otherwise set `runMode: \"save_only\"` with flat steps. Set `risk: \"high\"` for irreversible external actions; set `suggest: true` for repeated workflows (2+ cycles), snippet pastes, or multi-field transfers with a PageSummary list — set `suggest: false` if one-off or incomplete.",
     "",
     "Steps:",
     ...stepLines,
@@ -2499,7 +2510,7 @@ export async function compileWorkflow(
       : undefined;
 
   const steps = [...resolved.steps];
-  if (startHost) {
+  if (startHost && modelOut.kind !== "snippet") {
     const startSwitchStep: CompiledStep = {
       action: "switchTab",
       host: startHost,

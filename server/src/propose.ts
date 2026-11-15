@@ -325,11 +325,13 @@ export function createProposer(deps: ProposerDeps): Proposer {
       script.runMode === "run_remaining" || workflow.kind === "snippet";
     let runParams: Record<string, string> | undefined;
 
+    const wasOffered = shouldRun;
     if (shouldRun) {
       const decideScript: ActionScript =
         script.runMode === "save_only"
           ? { ...script, runMode: "run_remaining" }
           : script;
+      safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} offered`);
       let outcome: HandsOutcome;
       try {
         outcome = await deps.requestDecision(
@@ -372,6 +374,9 @@ export function createProposer(deps: ProposerDeps): Proposer {
         if (hookRes && typeof hookRes.shouldRun === "boolean") {
           shouldRun = hookRes.shouldRun;
         }
+        if (wasOffered) {
+          safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} saved`);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         safeLog(`[propose:v2] ${name} -> save failed: ${msg}`);
@@ -381,7 +386,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
     if (closed) return;
 
     if (!shouldRun) {
-      safeLog(`[propose:v2] ${name} -> saved (save_only)`);
+      safeLog(`[propose:v2] ${name} -> kind=${workflow.kind} saved (save_only)`);
       emitStageLog({
         stage: "run",
         session: sessionId,

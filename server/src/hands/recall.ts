@@ -304,11 +304,13 @@ function matchEntryToEvent(
       targetCorpus.some((part) => containsHintPhrase(part, tok)),
     );
 
-  const firstStep = entry.script.steps[0];
-  const fullSnippetNorm =
-    firstStep?.action === "insertText" && typeof firstStep.value === "string"
-      ? firstStep.value.toLowerCase().replace(/\s+/g, " ").trim()
-      : "";
+  const snippetStep = entry.script.steps.find(
+    (s): s is Extract<Step, { action: "insertText" }> =>
+      s.action === "insertText" && typeof s.value === "string",
+  );
+  const fullSnippetNorm = snippetStep
+    ? snippetStep.value.toLowerCase().replace(/\s+/g, " ").trim()
+    : "";
   const alreadyHasSnippet =
     fullSnippetNorm.length > 0 &&
     (normalizedVal === fullSnippetNorm || normalizedVal.includes(fullSnippetNorm));

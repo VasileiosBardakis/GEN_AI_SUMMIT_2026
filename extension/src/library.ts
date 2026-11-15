@@ -222,13 +222,14 @@ export type LibraryEntryWithStats = LibraryEntry & {
 };
 
 export function libraryEntryToOptimization(entry: LibraryEntryWithStats): OptimizationItem {
-  const firstStep = entry.script.steps[0];
-  const isSnippet =
-    entry.kind === "snippet" &&
-    entry.script.steps.length === 1 &&
-    firstStep?.action === "insertText" &&
-    typeof firstStep.value === "string";
-  const snippetText = isSnippet && typeof firstStep.value === "string" ? firstStep.value : undefined;
+  const insertStep =
+    entry.kind === "snippet"
+      ? entry.script.steps.find(
+          (s): s is Extract<typeof s, { action: "insertText" }> =>
+            s.action === "insertText" && typeof s.value === "string",
+        )
+      : undefined;
+  const snippetText = insertStep ? insertStep.value : undefined;
   const timeSavedPerRunSec =
     typeof entry.stats?.timeSavedSeconds === "number"
       ? entry.stats.timeSavedSeconds

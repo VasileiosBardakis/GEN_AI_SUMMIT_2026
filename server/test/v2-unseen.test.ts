@@ -1161,4 +1161,201 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       results: [{ ok: true }],
     });
   }, TEST_TIMEOUT_MS);
+
+  it("saves repeated section-5 paste as kind=snippet, recalls Insert on empty field click, and fills text", async () => {
+    const reply = "Hi, thanks for your order. It ships Friday and tracking will follow shortly.";
+    const replyTarget: NonNullable<Event["target"]> = {
+      tag: "textarea",
+      role: "textbox",
+      label: "Reply to customer",
+      locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+    };
+    const clearTarget: NonNullable<Event["target"]> = {
+      tag: "button",
+      role: "button",
+      label: "Clear reply",
+      locators: [{ kind: "css", value: "#clear-reply" }],
+    };
+
+    const snippetGemini: GeminiClient = {
+      async generateText() {
+        throw new Error("unexpected");
+      },
+      async generateJson<T>(
+        _prompt: string,
+        schema: Parameters<GeminiClient["generateJson"]>[1],
+      ): Promise<T> {
+        const payload = {
+          suggest: true,
+          offerAt2: false,
+          kind: "snippet",
+          name: "Reply to customer",
+          reason: "Inserts repeated customer reply",
+          risk: "low",
+          runMode: "save_only",
+          params: [],
+          steps: [{ action: "insertText", stepIndex: 0, value: reply }],
+        };
+        const parsed = schema.safeParse(payload);
+        if (!parsed.success) throw new Error("invalid mock");
+        return parsed.data as T;
+      },
+    };
+
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.map(String).join(" "));
+    });
+    try {
+      const { baseUrl, dataDir: snipDataDir } = await startV2Server({
+        gemini: snippetGemini,
+        subDir: "sec5-snippet",
+      });
+
+      const pasteEvents: Event[] = [
+        {
+          v: 1,
+          id: "c1000000-0000-4000-8000-000000000001",
+          ts: 1746000001000,
+          session: "sess_sec5",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:5173/",
+          type: "paste",
+          target: replyTarget,
+          value: reply,
+        },
+        {
+          v: 1,
+          id: "c1000000-0000-4000-8000-000000000002",
+          ts: 1746000002000,
+          session: "sess_sec5",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:5173/",
+          type: "click",
+          target: clearTarget,
+        },
+        {
+          v: 1,
+          id: "c1000000-0000-4000-8000-000000000003",
+          ts: 1746000003000,
+          session: "sess_sec5",
+          source: "browser",
+          app: "localhost",
+          url: "http://localhost:5173/",
+          type: "paste",
+          target: replyTarget,
+          value: reply,
+        },
+      ];
+
+      await fetch(`${baseUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pasteEvents),
+      });
+
+      const pre = await pollHandsNext(baseUrl);
+      expect(pre.cmd?.kind).toBe("precheck");
+      await postHandsResult(baseUrl, {
+        id: pre.cmd!.id,
+        ok: true,
+        results: [{ index: 0, action: "insertText", ok: true, matchCount: 1 }],
+      });
+
+      const offerDec = await pollHandsNext(baseUrl);
+      expect(offerDec.cmd?.kind).toBe("decide");
+      expect(offerDec.cmd?.script?.steps).toEqual([
+        {
+          action: "insertText",
+          target: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+          value: reply,
+        },
+      ]);
+      await postHandsResult(baseUrl, {
+        id: offerDec.cmd!.id,
+        ok: true,
+        decision: "approved",
+      });
+
+      const offerRun = await pollHandsNext(baseUrl);
+      expect(offerRun.status).toBe(200);
+      expect(offerRun.cmd?.kind).toBeUndefined();
+      await postHandsResult(baseUrl, {
+        id: offerRun.cmd!.id,
+        ok: true,
+        results: [{ ok: true }],
+      });
+
+      const saved = await readLibrary(snipDataDir);
+      expect(saved).toHaveLength(1);
+      expect(saved[0].kind).toBe("snippet");
+      expect(saved[0].script.steps).toEqual([
+        {
+          action: "insertText",
+          target: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+          value: reply,
+        },
+      ]);
+      expect(logs.some((l) => l.includes("[propose:v2] Reply to customer -> kind=snippet offered"))).toBe(true);
+      expect(logs.some((l) => l.includes("[propose:v2] Reply to customer -> kind=snippet saved"))).toBe(true);
+
+      // Clicking the empty field later recalls the snippet as Insert and fills the text
+      const recallPoll = pollHandsNext(baseUrl);
+      await fetch(`${baseUrl}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify([
+          {
+            v: 1,
+            id: "c1000000-0000-4000-8000-000000000004",
+            ts: 1746000005000,
+            session: "sess_sec5_later",
+            source: "browser",
+            app: "localhost",
+            url: "http://localhost:5173/",
+            type: "click",
+            target: replyTarget,
+            value: "",
+          },
+        ]),
+      });
+
+      const recallDec = await recallPoll;
+      expect(recallDec.status).toBe(200);
+      expect(recallDec.cmd?.kind).toBe("decide");
+      expect(recallDec.cmd?.script?.steps).toEqual([
+        {
+          action: "insertText",
+          target: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+          value: reply,
+        },
+      ]);
+
+      const recallRunPoll = pollHandsNext(baseUrl);
+      await postHandsResult(baseUrl, {
+        id: recallDec.cmd!.id,
+        ok: true,
+        decision: "approved",
+      });
+      const recallRun = await recallRunPoll;
+      expect(recallRun.status).toBe(200);
+      expect(recallRun.cmd?.kind).toBeUndefined();
+      expect(recallRun.cmd?.script?.steps).toEqual([
+        {
+          action: "insertText",
+          target: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+          value: reply,
+        },
+      ]);
+      await postHandsResult(baseUrl, {
+        id: recallRun.cmd!.id,
+        ok: true,
+        results: [{ ok: true }],
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
 });
