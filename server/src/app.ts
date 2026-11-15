@@ -1263,7 +1263,12 @@ export function createServer(opts: CreateServerOptions): http.Server {
           script,
           timeoutMs,
         });
-        if (outcome.ok && outcome.decision !== "approved" && outcome.decision !== "dismissed") {
+        if (
+          outcome.ok &&
+          outcome.decision !== "approved" &&
+          outcome.decision !== "dismissed" &&
+          outcome.decision !== "never"
+        ) {
           console.error(`[server] POST /decide id=${id} missing decision in outcome:`, outcome);
           sendJson(res, 502, {
             id,
@@ -1377,7 +1382,9 @@ export function createServer(opts: CreateServerOptions): http.Server {
           return;
         }
         const decision: HandsDecision | undefined =
-          body.decision === "approved" || body.decision === "dismissed"
+          body.decision === "approved" ||
+          body.decision === "dismissed" ||
+          body.decision === "never"
             ? body.decision
             : undefined;
         let params: Record<string, string> | undefined;

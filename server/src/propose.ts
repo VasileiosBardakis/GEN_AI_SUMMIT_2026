@@ -24,7 +24,7 @@ import {
   type CompiledWorkflow,
 } from "./v2/index.ts";
 
-export type HandsDecision = "approved" | "dismissed";
+export type HandsDecision = "approved" | "dismissed" | "never";
 
 export type HandsOutcome = {
   ok: boolean;
@@ -304,6 +304,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
   };
 
   const proposedKeys = new Set<string>();
+  const neverFlowTipKeys = new Set<string>();
   const inFlightSessions = new Set<string>();
   const pendingRerunSessions = new Set<string>();
   const shownFlowTipLabels: string[] = [];
@@ -446,7 +447,12 @@ export function createProposer(deps: ProposerDeps): Proposer {
       return;
     }
 
-    const key = `${sessionId}::${flowTipDedupeKey(suggestion)}`;
+    const tipKey = flowTipDedupeKey(suggestion);
+    if (neverFlowTipKeys.has(tipKey)) {
+      safeLog(`[tip] session=${sessionId} skipped reason=never`);
+      return;
+    }
+    const key = `${sessionId}::${tipKey}`;
     if (proposedKeys.has(key)) {
       safeLog(`[tip] session=${sessionId} skipped reason=duplicate`);
       return;
@@ -459,7 +465,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
     flowTipPending = true;
     try {
       const tipEventMeta = findLastMeaningfulEventMeta(events);
-      await deps.requestDecision(
+      const outcome = await deps.requestDecision(
         name,
         suggestion.tip.trim(),
         { name, steps: [{ action: "wait", ms: 0 }] },
@@ -471,6 +477,10 @@ export function createProposer(deps: ProposerDeps): Proposer {
             }
           : undefined,
       );
+      if (outcome?.decision === "never") {
+        neverFlowTipKeys.add(tipKey);
+        safeLog(`[tip] session=${sessionId} never key=${tipKey}`);
+      }
     } catch {
       // Never let tip delivery affect workflow proposals
     } finally {

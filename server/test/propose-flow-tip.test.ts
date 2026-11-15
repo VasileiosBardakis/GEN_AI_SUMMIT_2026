@@ -243,6 +243,46 @@ describe("propose flow tips", () => {
     expect(logs.some((l) => l.includes("[tip] session=s1 skipped reason=duplicate"))).toBe(true);
   });
 
+  it("hides a tip key process-wide across sessions when decision is never, while keeping normal tips per-session", async () => {
+    const shownBySession: string[] = [];
+    const logs: string[] = [];
+    const proposer = createProposer({
+      readSessionEvents: async (sessionId) =>
+        copyPasteEvents(2).map((ev) => ({ ...ev, session: sessionId })),
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: async () => null,
+      suggestFlowTip: async () => ({
+        tip: "Use Ctrl+C then Ctrl+V.",
+        keys: ["Ctrl+C", "Ctrl+V"],
+        why: "Shortcut.",
+      }),
+      requestDecision: async (name) => {
+        shownBySession.push(name);
+        return { ok: true, decision: shownBySession.length === 2 ? "never" : "approved" };
+      },
+      runScript: async () => ({ ok: true }),
+      log: (line) => logs.push(line),
+    });
+
+    // Session 1: user clicks "Got it" -> approved (per-session only)
+    proposer.onEvents("s1");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(shownBySession).toHaveLength(1);
+
+    // Session 2: same tip can still be shown; user clicks "Don't show again" -> never
+    proposer.onEvents("s2");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(shownBySession).toHaveLength(2);
+
+    // Session 3: skipped process-wide due to never
+    proposer.onEvents("s3");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    proposer.close();
+
+    expect(shownBySession).toHaveLength(2);
+    expect(logs.some((l) => l.includes("[tip] session=s3 skipped reason=never"))).toBe(true);
+  });
+
   it("queues a Got it tip decide through the HTTP bridge when Iris says yes and compile returns null", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "gen-flow-tip-"));
     const tipClient: GeminiClient = {
