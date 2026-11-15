@@ -20,11 +20,15 @@ test("portal-to-erp 3-row cross-tab copy/paste triggers Run popup with real Gemi
     !process.env.GOOGLE_CLOUD_PROJECT,
     "GOOGLE_CLOUD_PROJECT must be set for real Gemini E2E test",
   );
-  test.setTimeout(90_000);
+  test.setTimeout(120_000);
 
   const prevUseVertexAi = process.env.GOOGLE_GENAI_USE_VERTEXAI;
+  const prevCompileTimeout = process.env.V2_COMPILE_TIMEOUT_MS;
   if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_GENAI_USE_VERTEXAI) {
     process.env.GOOGLE_GENAI_USE_VERTEXAI = "true";
+  }
+  if (!process.env.V2_COMPILE_TIMEOUT_MS) {
+    process.env.V2_COMPILE_TIMEOUT_MS = "25000";
   }
 
   const demoServer = await startDemoServer({ dir: demoDir, port: 0 });
@@ -33,6 +37,7 @@ test("portal-to-erp 3-row cross-tab copy/paste triggers Run popup with real Gemi
   const apiServer: http.Server = createServer({
     tracesDir,
     dataDir,
+    pipeline: "v2",
     autoPropose: true,
     proposeDebounceMs: 500,
   });
@@ -49,6 +54,7 @@ test("portal-to-erp 3-row cross-tab copy/paste triggers Run popup with real Gemi
   const context = await chromium.launchPersistentContext(profileDir, {
     executablePath,
     headless: true,
+    recordVideo: { dir: path.join(rootDir, "test-results", "videos") },
     args: [
       `--disable-extensions-except=${extensionDir}`,
       `--load-extension=${extensionDir}`,
@@ -167,11 +173,30 @@ test("portal-to-erp 3-row cross-tab copy/paste triggers Run popup with real Gemi
       return host.shadowRoot?.querySelector("[data-eyes-primary]")?.textContent?.trim() ?? "";
     });
     expect(primaryText).toBe("Run");
+
+    // 3. Click Run and verify replay saves row 4 onto erpPage
+    await popup.locator("[data-eyes-primary]").click();
+
+    const savedRows = erpPage.locator("#saved-invoices tr");
+    await expect(savedRows.nth(3)).toBeVisible({ timeout: 30_000 });
+
+    const row4Cells = await savedRows.nth(3).locator("td").allTextContents();
+    expect(row4Cells.map((c) => c.trim())).toEqual([
+      "INV-2026-004",
+      "Umbrella Supplies",
+      "475.25 EUR",
+      "2026-03-11",
+    ]);
   } finally {
     if (prevUseVertexAi === undefined) {
       delete process.env.GOOGLE_GENAI_USE_VERTEXAI;
     } else {
       process.env.GOOGLE_GENAI_USE_VERTEXAI = prevUseVertexAi;
+    }
+    if (prevCompileTimeout === undefined) {
+      delete process.env.V2_COMPILE_TIMEOUT_MS;
+    } else {
+      process.env.V2_COMPILE_TIMEOUT_MS = prevCompileTimeout;
     }
     await context.close().catch(() => {});
     apiServer.closeAllConnections?.();
