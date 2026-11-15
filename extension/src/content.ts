@@ -1523,19 +1523,83 @@ export function showSuggestion(
   document.documentElement.appendChild(host);
 }
 
+function isGoogleSheetsPage(): boolean {
+  try {
+    if (typeof location !== "undefined" && location.href) {
+      if (
+        /^https?:\/\/docs\.google\.com\/spreadsheets\b/i.test(location.href) ||
+        (location.hostname === "docs.google.com" && location.pathname.startsWith("/spreadsheets"))
+      ) {
+        return true;
+      }
+    }
+    if (typeof window !== "undefined" && window.top && window.top !== window && window.top.location) {
+      const topHref = window.top.location.href || "";
+      if (/^https?:\/\/docs\.google\.com\/spreadsheets\b/i.test(topHref)) {
+        return true;
+      }
+    }
+  } catch {
+    // Cross-origin frame
+  }
+  return false;
+}
+
+function resolveSheetsCellEditor(el: HTMLElement | null): HTMLElement | null {
+  if (!el) return null;
+  if (
+    el.classList?.contains?.("cell-input") ||
+    /\bcell-input\b/.test(el.getAttribute?.("class") || "")
+  ) {
+    return el;
+  }
+  if (typeof el.closest === "function") {
+    try {
+      const cellInput = el.closest<HTMLElement>(".cell-input");
+      if (cellInput) return cellInput;
+    } catch {
+      // ignore
+    }
+  }
+  const ce = el.getAttribute?.("contenteditable");
+  if (el.isContentEditable || (ce !== null && ce !== "false")) {
+    if (typeof el.closest === "function") {
+      try {
+        return (
+          el.closest<HTMLElement>(
+            '[contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
+          ) || el
+        );
+      } catch {
+        return el;
+      }
+    }
+    return el;
+  }
+  return null;
+}
+
 function getElementValue(el: HTMLElement | null): string | undefined {
   if (!el) return undefined;
+  const tag = el.tagName?.toLowerCase() ?? "";
   if (
-    el instanceof HTMLInputElement ||
-    el instanceof HTMLTextAreaElement ||
-    el instanceof HTMLSelectElement
+    (typeof HTMLInputElement !== "undefined" && el instanceof HTMLInputElement) ||
+    (typeof HTMLTextAreaElement !== "undefined" && el instanceof HTMLTextAreaElement) ||
+    (typeof HTMLSelectElement !== "undefined" && el instanceof HTMLSelectElement) ||
+    tag === "input" ||
+    tag === "textarea" ||
+    tag === "select"
   ) {
-    return el.value;
+    return (el as HTMLInputElement).value;
   }
+  const ce = el.getAttribute?.("contenteditable");
   if (
     el.isContentEditable ||
-    el.getAttribute("role") === "gridcell" ||
-    el.getAttribute("role") === "textbox"
+    (ce !== null && ce !== "false") ||
+    el.classList?.contains?.("cell-input") ||
+    /\bcell-input\b/.test(el.getAttribute?.("class") || "") ||
+    el.getAttribute?.("role") === "gridcell" ||
+    el.getAttribute?.("role") === "textbox"
   ) {
     return (el.innerText || el.textContent || "").trim();
   }
@@ -1956,6 +2020,56 @@ export function setupEventListeners(): void {
       const mode = getConfig().mode;
       if (e.ctrlKey || e.metaKey || e.altKey) lastShortcutKeyTs = Date.now();
       if (mode === "semantic") {
+        if (
+          isGoogleSheetsPage() &&
+          (e.key === "Enter" || e.key === "Tab") &&
+          !e.ctrlKey &&
+          !e.metaKey &&
+          !e.altKey &&
+          !e.repeat
+        ) {
+          const cellEditor = resolveSheetsCellEditor(targetEl);
+          if (cellEditor) {
+            const cellText = getElementValue(cellEditor) ?? "";
+            const editorSess =
+              typingSessions.get(cellEditor) ??
+              (targetEl ? typingSessions.get(targetEl) : undefined);
+            const hasCellEdit =
+              cellText.length > 0 ||
+              Boolean(
+                editorSess &&
+                  (cellText !== editorSess.initialValue || editorSess.keystrokeCount > 0)
+              );
+            if (hasCellEdit) {
+              const grid = extractGridContext(cellEditor, cellText);
+              const durationMs = editorSess ? Math.max(1, Date.now() - editorSess.startedAt) : 1;
+              emit("input", cellEditor, cellText, {
+                subType: "grid_commit",
+                ...(grid
+                  ? {
+                      grid: {
+                        ...grid,
+                        ...(editorSess?.initialValue && editorSess.initialValue !== cellText
+                          ? { prevValue: editorSess.initialValue }
+                          : {}),
+                      },
+                    }
+                  : {}),
+                typing: {
+                  inputType: editorSess?.lastInputType || "insertText",
+                  keystrokeCount: editorSess?.keystrokeCount ?? 0,
+                  backspaceCount: editorSess?.backspaceCount ?? 0,
+                  typingDurationMs: durationMs,
+                  isAutofill: false,
+                  autofillEligible: privacyCheck.autofillEligible,
+                  autocompleteAttr: privacyCheck.autocompleteAttr,
+                },
+              });
+              typingSessions.delete(cellEditor);
+              if (targetEl) typingSessions.delete(targetEl);
+            }
+          }
+        }
         const isShortcut = e.ctrlKey || e.metaKey || e.altKey || /^F([1-9]|1[0-2])$/.test(e.key);
         const isActionKey = [
           "Enter",
@@ -2254,27 +2368,43 @@ export function setupEventListeners(): void {
   document.addEventListener(
     "copy",
     (e: ClipboardEvent) => {
+      const copyTargetEl =
+        typeof HTMLElement !== "undefined" && e.target instanceof HTMLElement
+          ? e.target
+          : typeof Node !== "undefined" && e.target instanceof Node && e.target.parentElement
+            ? e.target.parentElement
+            : typeof HTMLElement !== "undefined" && document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : document.body;
       const selText =
         e.clipboardData?.getData("text/plain") ||
-        window.getSelection()?.toString() ||
-        getElementValue(e.target as HTMLElement) ||
+        window.getSelection?.()?.toString() ||
+        getElementValue(copyTargetEl) ||
         "";
       const { value: cleanText, privacy } = sanitizeValue(
         selText,
-        inspectElementPrivacy(e.target as Element)
+        inspectElementPrivacy(copyTargetEl)
       );
-      const grid = extractGridContext(e.target as HTMLElement, cleanText);
-      const rawCopyEl =
-        e.target instanceof HTMLElement
-          ? e.target
-          : typeof Node !== "undefined" && e.target instanceof Node
-            ? e.target.parentElement
-            : null;
+      let grid = extractGridContext(copyTargetEl, cleanText);
+      if (!grid && isGoogleSheetsPage() && typeof document.querySelector === "function") {
+        let fallbackGridEl: HTMLElement | null = null;
+        try {
+          fallbackGridEl = document.querySelector<HTMLElement>(
+            ".cell-input, #waffle-grid-container, canvas"
+          );
+        } catch {
+          fallbackGridEl = null;
+        }
+        if (fallbackGridEl) {
+          grid = extractGridContext(fallbackGridEl, cleanText);
+        }
+      }
+      const rawCopyEl = copyTargetEl;
       let sourceSummary = captureSourceSummary(rawCopyEl);
       if (!sourceSummary && typeof window !== "undefined") {
         const anchorNode = window.getSelection?.()?.anchorNode ?? null;
         const selEl =
-          anchorNode instanceof HTMLElement
+          typeof HTMLElement !== "undefined" && anchorNode instanceof HTMLElement
             ? anchorNode
             : typeof Node !== "undefined" && anchorNode instanceof Node
               ? anchorNode.parentElement
@@ -2285,10 +2415,11 @@ export function setupEventListeners(): void {
       }
       emit(
         "copy",
-        e.target,
+        (e.target ?? copyTargetEl) as EventTarget | null,
         cleanText,
         {
           privacy,
+          ...(grid ? { grid } : {}),
           ...clipboardTrigger("copy"),
           ...(sourceSummary ? { pageSummary: { source: sourceSummary } } : {}),
         },
@@ -2472,7 +2603,9 @@ export function setupEventListeners(): void {
   }
 
   const observedNodes = new WeakSet<Node>();
-  const observer = new MutationObserver((mutations) => {
+  const observer =
+    typeof MutationObserver === "function"
+      ? new MutationObserver((mutations) => {
     const mode = getConfig().mode;
     let addedCount = 0;
     let removedCount = 0;
@@ -2554,12 +2687,13 @@ export function setupEventListeners(): void {
         },
       });
     }
-  });
+  })
+      : null;
 
   function startDomObservers(): void {
     emit("nav", document.body, location.href, { subType: "page_load" });
     checkUrlForAuthFlow();
-    if (document.documentElement) {
+    if (document.documentElement && observer) {
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true,

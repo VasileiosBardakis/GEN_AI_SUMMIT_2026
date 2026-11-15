@@ -441,6 +441,27 @@ export async function executeStep(
     return resolveText(locator.value, root);
   }
 
+  function hasContentEditable(element: Element): boolean {
+    if ((element as HTMLElement).isContentEditable) return true;
+    const ce = element.getAttribute("contenteditable");
+    return ce !== null && ce !== "false";
+  }
+
+  function isSheetsReplaceTarget(element: Element): boolean {
+    if (element.id === "t-name-box") return true;
+    if (element.classList?.contains?.("cell-input")) return true;
+    const cls = element.getAttribute("class") || "";
+    if (/\bcell-input\b/.test(cls)) return true;
+    if (typeof element.closest === "function") {
+      try {
+        if (element.closest("#t-name-box, .cell-input")) return true;
+      } catch {
+        // ignore selector error in mocks
+      }
+    }
+    return false;
+  }
+
   function isEditableElement(element: Element): boolean {
     const tag = element.tagName.toLowerCase();
     if (tag === "textarea" || tag === "select") return true;
@@ -448,7 +469,7 @@ export async function executeStep(
       const inputType = (element.getAttribute("type") || "text").toLowerCase();
       return !/^(hidden|submit|button|reset|image)$/.test(inputType);
     }
-    if ((element as HTMLElement).isContentEditable) return true;
+    if (hasContentEditable(element) || isSheetsReplaceTarget(element)) return true;
     const role = (element.getAttribute("role") || "").toLowerCase();
     return (
       role === "textbox" ||
@@ -882,7 +903,7 @@ export async function executeStep(
     ) {
       return (element as HTMLInputElement).value ?? "";
     }
-    if ((element as HTMLElement).isContentEditable) {
+    if (hasContentEditable(element)) {
       return (element as HTMLElement).innerText ?? element.textContent ?? "";
     }
     return readNonButtonText(element);
@@ -906,25 +927,32 @@ export async function executeStep(
     element.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
-  function insertIntoEditable(element: HTMLElement, value: string): void {
+  function insertIntoEditable(element: HTMLElement, value: string, replaceExisting = false): void {
     if (typeof element.focus === "function") element.focus();
     const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
     if (selection && typeof document.createRange === "function") {
-      const hasRangeInside =
-        selection.rangeCount > 0 &&
-        element.contains(selection.getRangeAt(0).commonAncestorContainer);
-      if (!hasRangeInside) {
+      if (replaceExisting) {
         const range = document.createRange();
         range.selectNodeContents(element);
-        range.collapse(false);
         selection.removeAllRanges();
         selection.addRange(range);
+      } else {
+        const hasRangeInside =
+          selection.rangeCount > 0 &&
+          element.contains(selection.getRangeAt(0).commonAncestorContainer);
+        if (!hasRangeInside) {
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
       }
     }
     const inserted =
       typeof document.execCommand === "function" && document.execCommand("insertText", false, value);
     if (!inserted) {
-      element.textContent = `${element.textContent ?? ""}${value}`;
+      element.textContent = replaceExisting ? value : `${element.textContent ?? ""}${value}`;
       const InputCtor = typeof InputEvent === "function" ? InputEvent : Event;
       element.dispatchEvent(
         new InputCtor("input", { bubbles: true, inputType: "insertText", data: value } as InputEventInit),
@@ -934,6 +962,7 @@ export async function executeStep(
 
   function insertText(element: Element, value: string): void {
     const tag = element.tagName.toLowerCase();
+    const replaceSheets = isSheetsReplaceTarget(element);
     const isInputOrArea =
       tag === "input" ||
       tag === "textarea" ||
@@ -946,9 +975,10 @@ export async function executeStep(
       const existingNorm = existing.trim().toLowerCase();
       const incomingNorm = value.trim().toLowerCase();
       if (
-        existingNorm.length > 0 &&
-        incomingNorm.length > 0 &&
-        incomingNorm.startsWith(existingNorm)
+        replaceSheets ||
+        (existingNorm.length > 0 &&
+          incomingNorm.length > 0 &&
+          incomingNorm.startsWith(existingNorm))
       ) {
         setNativeValue(inputEl, value);
       } else {
@@ -964,8 +994,8 @@ export async function executeStep(
       }
       return;
     }
-    if ((element as HTMLElement).isContentEditable) {
-      insertIntoEditable(element as HTMLElement, value);
+    if (hasContentEditable(element) || replaceSheets) {
+      insertIntoEditable(element as HTMLElement, value, replaceSheets);
       return;
     }
     throw new Error("Target is not editable");
@@ -1008,14 +1038,74 @@ export async function executeStep(
   }
 
   function dispatchPressKey(element: Element, rawKey: string): void {
-    const keyName = rawKey === "Esc" ? "Escape" : rawKey;
+    const parts = rawKey
+      .split("+")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    let ctrlKey = false;
+    let shiftKey = false;
+    let altKey = false;
+    let metaKey = false;
+    let rawKeyPart = rawKey.trim();
+
+    if (parts.length > 1) {
+      rawKeyPart = parts[parts.length - 1] ?? rawKeyPart;
+      for (const mod of parts.slice(0, -1)) {
+        const lower = mod.toLowerCase();
+        if (lower === "control" || lower === "ctrl") ctrlKey = true;
+        else if (lower === "shift") shiftKey = true;
+        else if (lower === "alt" || lower === "option") altKey = true;
+        else if (lower === "meta" || lower === "cmd" || lower === "command") metaKey = true;
+      }
+    }
+
+    const KEY_ALIASES: Record<string, string> = {
+      enter: "Enter",
+      return: "Enter",
+      tab: "Tab",
+      escape: "Escape",
+      esc: "Escape",
+      arrowdown: "ArrowDown",
+      down: "ArrowDown",
+      arrowup: "ArrowUp",
+      up: "ArrowUp",
+      arrowleft: "ArrowLeft",
+      left: "ArrowLeft",
+      arrowright: "ArrowRight",
+      right: "ArrowRight",
+      home: "Home",
+      end: "End",
+      pageup: "PageUp",
+      pagedown: "PageDown",
+      backspace: "Backspace",
+      delete: "Delete",
+      del: "Delete",
+      space: " ",
+    };
+    const keyName = KEY_ALIASES[rawKeyPart.toLowerCase()] ?? rawKeyPart;
     const keyMeta: Record<string, { code: string; keyCode: number }> = {
       Enter: { code: "Enter", keyCode: 13 },
       Tab: { code: "Tab", keyCode: 9 },
       Escape: { code: "Escape", keyCode: 27 },
+      ArrowDown: { code: "ArrowDown", keyCode: 40 },
+      ArrowUp: { code: "ArrowUp", keyCode: 38 },
+      ArrowLeft: { code: "ArrowLeft", keyCode: 37 },
+      ArrowRight: { code: "ArrowRight", keyCode: 39 },
+      Home: { code: "Home", keyCode: 36 },
+      End: { code: "End", keyCode: 35 },
+      PageUp: { code: "PageUp", keyCode: 33 },
+      PageDown: { code: "PageDown", keyCode: 34 },
+      Backspace: { code: "Backspace", keyCode: 8 },
+      Delete: { code: "Delete", keyCode: 46 },
+      " ": { code: "Space", keyCode: 32 },
     };
     const meta = keyMeta[keyName] ?? {
-      code: keyName.length === 1 ? `Key${keyName.toUpperCase()}` : keyName,
+      code:
+        keyName.length === 1 && /[a-z]/i.test(keyName)
+          ? `Key${keyName.toUpperCase()}`
+          : keyName.length === 1 && /\d/.test(keyName)
+            ? `Digit${keyName}`
+            : keyName,
       keyCode: keyName.length === 1 ? keyName.toUpperCase().charCodeAt(0) : 0,
     };
 
@@ -1030,6 +1120,10 @@ export async function executeStep(
           code: meta.code,
           keyCode: meta.keyCode,
           which: meta.keyCode,
+          ctrlKey,
+          shiftKey,
+          altKey,
+          metaKey,
           bubbles: true,
           cancelable: true,
         });
@@ -1039,11 +1133,15 @@ export async function executeStep(
         code: meta.code,
         keyCode: meta.keyCode,
         which: meta.keyCode,
+        ctrlKey,
+        shiftKey,
+        altKey,
+        metaKey,
       });
     };
 
     const notCancelled = element.dispatchEvent(createKeyEvent("keydown"));
-    if (keyName === "Enter" && notCancelled) {
+    if (keyName === "Enter" && !ctrlKey && !shiftKey && !altKey && !metaKey && notCancelled) {
       const tag = element.tagName?.toLowerCase() ?? "";
       const isInputOrTextarea =
         tag === "input" ||

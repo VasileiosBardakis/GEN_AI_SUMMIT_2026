@@ -214,6 +214,37 @@ function buildCssSelector(el: HTMLElement): { selector: string; unique: boolean 
   return { selector: finalPath, unique: isUniqueCssSelector(finalPath) };
 }
 
+const SHEETS_CONTROL_IDS = new Set(["t-name-box", "t-formula-bar-input"]);
+
+function findAncestorById(el: HTMLElement, ids: Set<string>): HTMLElement | null {
+  let curr: HTMLElement | null = el;
+  while (curr) {
+    if (curr.id && ids.has(curr.id)) return curr;
+    curr = curr.parentElement;
+  }
+  return null;
+}
+
+function isSheetsCellSurfaceElement(el: HTMLElement): boolean {
+  const tag = el.tagName.toLowerCase();
+  if (tag === "canvas") return true;
+  let curr: HTMLElement | null = el;
+  while (curr) {
+    if (curr.classList?.contains?.("cell-input")) return true;
+    const cls = curr.getAttribute?.("class") || "";
+    if (/\bcell-input\b/.test(cls)) return true;
+    curr = curr.parentElement;
+  }
+  if (typeof el.closest === "function") {
+    try {
+      if (el.closest("canvas, .cell-input")) return true;
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+
 export function extractTarget(rawEl: EventTarget | null): {
   element: HTMLElement | null;
   target?: {
@@ -233,19 +264,74 @@ export function extractTarget(rawEl: EventTarget | null): {
     return { element: null, target: undefined };
   }
 
+  const sheetsControl = findAncestorById(el, SHEETS_CONTROL_IDS);
   const interactive =
+    sheetsControl ||
     el.closest<HTMLElement>(
       'button, a, input, select, textarea, [role="button"], [role="menuitem"], [role="tab"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [role="treeitem"], [role="gridcell"], [role="textbox"], [role="searchbox"], [role="combobox"], [data-testid], [data-cell], td, th, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]'
-    ) || el;
+    ) ||
+    el;
 
   const locators: Locator[] = [];
   const tag = interactive.tagName.toLowerCase();
   const inputType = (interactive.getAttribute("type") || "text").toLowerCase();
+  const isContentEditable =
+    interactive.isContentEditable ||
+    interactive.getAttribute("contenteditable") === "true" ||
+    interactive.getAttribute("contenteditable") === "" ||
+    interactive.getAttribute("contenteditable") === "plaintext-only";
   const role =
     interactive.getAttribute("role") ||
     (tag === "input"
       ? (INPUT_TYPE_ROLES[inputType] ?? "textbox")
-      : (TAG_ROLES[tag] ?? (interactive.isContentEditable ? "textbox" : undefined)));
+      : (TAG_ROLES[tag] ?? (isContentEditable ? "textbox" : undefined)));
+
+  if (sheetsControl) {
+    locators.push({ kind: "css", value: `#${cssEscapeIdent(sheetsControl.id)}` });
+    for (const attr of TEST_ID_ATTRS) {
+      const val = interactive.getAttribute(attr);
+      if (val) {
+        locators.push({ kind: "testid", value: val });
+        break;
+      }
+    }
+    const label = getReadableLabel(interactive);
+    const hasExplicitLabel = Boolean(
+      interactive.getAttribute("aria-label")?.trim() ||
+        interactive.getAttribute("aria-labelledby")?.trim() ||
+        interactive.getAttribute("title")?.trim()
+    );
+    if (hasExplicitLabel || sheetsControl.id === "t-name-box") {
+      if (role && label && label.length <= 60) {
+        locators.push({ kind: "aria", value: `${role}[name="${escapeCssAttr(label)}"]` });
+      } else if (interactive.getAttribute("aria-label")) {
+        locators.push({
+          kind: "aria",
+          value: `[aria-label="${escapeCssAttr(interactive.getAttribute("aria-label")!)}"]`,
+        });
+      }
+    }
+    return {
+      element: interactive,
+      target: {
+        locators,
+        tag,
+        label: hasExplicitLabel || sheetsControl.id === "t-name-box" ? label : undefined,
+        role,
+      },
+    };
+  }
+
+  if (isSheetsCellSurfaceElement(interactive)) {
+    return {
+      element: interactive,
+      target: {
+        locators: [],
+        tag,
+        role,
+      },
+    };
+  }
 
   for (const attr of TEST_ID_ATTRS) {
     const val = interactive.getAttribute(attr);
@@ -299,13 +385,145 @@ function colIndexToLetter(colIdx1Based: number): string {
   return letters || "A";
 }
 
+function getAccessibleGridDocuments(el: HTMLElement | null): Document[] {
+  const docs: Document[] = [];
+  const addDoc = (doc: Document | null | undefined): void => {
+    if (doc && typeof doc.querySelector === "function" && !docs.includes(doc)) {
+      docs.push(doc);
+    }
+  };
+  try {
+    if (typeof window !== "undefined" && window.top && window.top !== window) {
+      addDoc(window.top.document);
+    }
+  } catch {
+    // Cross-origin frame
+  }
+  try {
+    if (el?.ownerDocument) {
+      addDoc(el.ownerDocument);
+    }
+  } catch {
+    // Ignore
+  }
+  if (typeof document !== "undefined") {
+    addDoc(document);
+  }
+  return docs;
+}
+
+function queryGridSelector<T extends Element>(docs: Document[], selectors: string[]): T | null {
+  for (const doc of docs) {
+    for (const selector of selectors) {
+      try {
+        const found = doc.querySelector<T>(selector);
+        if (found) return found;
+      } catch {
+        // Ignore selector errors in minimal DOM mocks
+      }
+    }
+  }
+  return null;
+}
+
+function isGridSurfaceElement(el: HTMLElement, docs: Document[]): boolean {
+  let curr: HTMLElement | null = el;
+  while (curr) {
+    const tag = curr.tagName.toLowerCase();
+    const role = (curr.getAttribute?.("role") || "").toLowerCase();
+    const cls = curr.getAttribute?.("class") || "";
+    if (
+      tag === "table" ||
+      tag === "canvas" ||
+      role === "grid" ||
+      curr.id === "waffle-grid-container" ||
+      curr.id === "t-formula-bar-input" ||
+      curr.classList?.contains?.("cell-input") ||
+      curr.classList?.contains?.("grid-scrollable-wrapper") ||
+      curr.classList?.contains?.("grid-container") ||
+      /\b(cell-input|grid-scrollable-wrapper|grid-container)\b/.test(cls)
+    ) {
+      return true;
+    }
+    curr = curr.parentElement;
+  }
+
+  if (typeof el.closest === "function") {
+    try {
+      if (
+        el.closest(
+          '[role="grid"], table, canvas, #waffle-grid-container, .grid-scrollable-wrapper, .grid-container, .cell-input, [class*="cell-input"], #t-formula-bar-input'
+        )
+      ) {
+        return true;
+      }
+    } catch {
+      // Ignore selector errors in minimal DOM mocks
+    }
+  }
+
+  try {
+    if (typeof window !== "undefined") {
+      const frameEl = window.frameElement as Element | null | undefined;
+      if (frameEl) {
+        const frameCls = frameEl.getAttribute?.("class") || "";
+        if (
+          frameEl.classList?.contains?.("docs-texteventtarget-iframe") ||
+          /\bdocs-texteventtarget-iframe\b/.test(frameCls) ||
+          (typeof frameEl.closest === "function" &&
+            Boolean(frameEl.closest("#waffle-grid-container, .docs-texteventtarget-iframe")))
+        ) {
+          return true;
+        }
+      }
+      if (window.top && window.top !== window) {
+        const ce = el.getAttribute?.("contenteditable");
+        const isEditableOrBody =
+          el.isContentEditable ||
+          (ce !== null && ce !== "false") ||
+          el.tagName.toLowerCase() === "body";
+        if (isEditableOrBody && queryGridSelector(docs, ["#t-name-box"])) {
+          return true;
+        }
+      }
+    }
+  } catch {
+    // Cross-origin frame
+  }
+
+  const ce = el.getAttribute?.("contenteditable");
+  const isEditableSurface = el.isContentEditable || (ce !== null && ce !== "false");
+  if (isEditableSurface && queryGridSelector(docs, ["#t-name-box"])) {
+    let inDialog = false;
+    if (typeof el.closest === "function") {
+      try {
+        inDialog = Boolean(el.closest('[role="dialog"]'));
+      } catch {
+        inDialog = false;
+      }
+    }
+    if (!inDialog) return true;
+  }
+
+  return false;
+}
+
 export function extractGridContext(
   el: HTMLElement | null,
   currentValue?: string
 ): EventMeta["grid"] | undefined {
-  if (!el || typeof document === "undefined") return undefined;
+  if (!el) return undefined;
+  const docs = getAccessibleGridDocuments(el);
+  if (docs.length === 0) return undefined;
 
-  const cellEl = el.closest<HTMLElement>('[data-cell], [role="gridcell"], td, th');
+  let cellEl: HTMLElement | null = null;
+  if (typeof el.closest === "function") {
+    try {
+      cellEl = el.closest<HTMLElement>('[data-cell], [role="gridcell"], td, th');
+    } catch {
+      cellEl = null;
+    }
+  }
   let cellRef =
     cellEl?.getAttribute("data-cell") || el.getAttribute("data-cell") || undefined;
   let rowIndex: number | undefined;
@@ -321,10 +539,14 @@ export function extractGridContext(
     if (rAttr) rowIndex = parseInt(rAttr, 10);
     if (cAttr) colIndex = parseInt(cAttr, 10);
 
-    if (cellEl instanceof HTMLTableCellElement) {
+    if (typeof HTMLTableCellElement !== "undefined" && cellEl instanceof HTMLTableCellElement) {
       if (colIndex === undefined) colIndex = cellEl.cellIndex + 1;
       const tr = cellEl.parentElement;
-      if (rowIndex === undefined && tr instanceof HTMLTableRowElement) {
+      if (
+        rowIndex === undefined &&
+        typeof HTMLTableRowElement !== "undefined" &&
+        tr instanceof HTMLTableRowElement
+      ) {
         rowIndex = tr.rowIndex + 1;
       }
     }
@@ -334,22 +556,21 @@ export function extractGridContext(
     }
   }
 
-  const isGridSurface = Boolean(
-    cellEl ||
-      el.closest(
-        '[role="grid"], table, canvas, #waffle-grid-container, .grid-scrollable-wrapper, .grid-container, [class*="cell-input"]'
-      )
-  );
+  const isGridSurface = Boolean(cellEl) || isGridSurfaceElement(el, docs);
 
   if (!cellRef && isGridSurface) {
-    const nameBox = document.querySelector<HTMLInputElement>(
-      '#t-name-box, input.waffle-name-box, input[aria-label*="Name box" i], input[data-testid="name-box"]'
-    );
+    const nameBox = queryGridSelector<HTMLInputElement>(docs, [
+      "#t-name-box",
+      "input.waffle-name-box",
+      'input[aria-label*="Name box" i]',
+      'input[data-testid="name-box"]',
+    ]);
+    const rawNameBoxVal = (nameBox?.value ?? nameBox?.getAttribute?.("value") ?? "").trim();
     if (
-      nameBox?.value &&
-      /^[A-Z]{1,3}\d{1,6}(:[A-Z]{1,3}\d{1,6})?$/i.test(nameBox.value.trim())
+      rawNameBoxVal &&
+      /^[A-Z]{1,3}\d{1,7}(:[A-Z]{1,3}\d{1,7})?$/i.test(rawNameBoxVal)
     ) {
-      cellRef = nameBox.value.trim().toUpperCase();
+      cellRef = rawNameBoxVal.toUpperCase();
     }
   }
 
@@ -357,9 +578,11 @@ export function extractGridContext(
     return undefined;
   }
 
-  const sheetTab = document.querySelector<HTMLElement>(
-    '.docs-sheet-active-tab .docs-sheet-tab-name, [role="tab"][aria-selected="true"], [data-testid="active-sheet-tab"]'
-  );
+  const sheetTab = queryGridSelector<HTMLElement>(docs, [
+    ".docs-sheet-active-tab .docs-sheet-tab-name",
+    '[role="tab"][aria-selected="true"]',
+    '[data-testid="active-sheet-tab"]',
+  ]);
   const sheetName = sheetTab?.textContent?.trim() || undefined;
 
   const val = currentValue?.trim() || "";
