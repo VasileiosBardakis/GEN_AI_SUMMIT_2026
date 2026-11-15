@@ -998,13 +998,18 @@ function stepLocatorsForPrecheck(step: {
   if (Array.isArray(step.target)) raw.push(...step.target);
   else if (step.target) raw.push(step.target);
   if (Array.isArray(step.targets)) raw.push(...step.targets);
-  return filterPrecheckLocators(raw);
+  return dropTemplatedLocators(filterPrecheckLocators(raw));
+}
+
+// Locators still holding a {{param}} cannot be resolved before Run fills them in.
+function dropTemplatedLocators(locs: Locator[]): Locator[] {
+  return locs.filter((loc) => !/\{\{[^}]*\}\}/.test(loc.value ?? ""));
 }
 
 function withinLocatorsForPrecheck(step: { within?: Locator | Locator[] }): Locator[] {
   if (!step.within) return [];
   const raw = Array.isArray(step.within) ? step.within : [step.within];
-  return filterPrecheckLocators(raw);
+  return dropTemplatedLocators(filterPrecheckLocators(raw));
 }
 
 type PrecheckStepInput = V2Step & {

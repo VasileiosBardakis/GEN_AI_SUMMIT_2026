@@ -1246,6 +1246,11 @@ function resolveCopySourceContext(
 
     const host = resolveStepRealHost(step) ?? normalizeHost(step.app);
     const needle = (step.value ?? "").trim();
+    // Selections often include neighbouring text (e.g. a button label on the next line).
+    const needleLines = needle
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
 
     let bestCell: SourceCellEntry | undefined;
     if (needle && sourceCells.length > 0) {
@@ -1260,6 +1265,7 @@ function resolveCopySourceContext(
         if (cell.text === needle) score = 3;
         else if (cell.text.startsWith(`${needle} `)) score = 2;
         else if (cell.text.includes(needle)) score = 1;
+        else if (needleLines.includes(cell.text)) score = 2;
         if (score === 0) continue;
 
         const rowBonus =
