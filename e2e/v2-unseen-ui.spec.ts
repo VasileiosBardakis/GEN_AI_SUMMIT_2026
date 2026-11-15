@@ -328,19 +328,16 @@ async function runFlow1TabForm(page: Page, demoUrl: string, dataDir: string): Pr
   }
 
   const popup = page.locator("#__eyes_suggestion_host__");
-  await expect(popup).toBeVisible({ timeout: 20_000 });
-  expect(await getPopupPrimaryLabel(page)).toBe("Save skill");
-
-  await clickPopupPrimary(page);
   await expect
-    .poll(async () => (await readLibrary(dataDir).catch(() => [])).length, { timeout: 10_000 })
+    .poll(async () => (await readLibrary(dataDir).catch(() => [])).length, { timeout: 20_000 })
     .toBeGreaterThanOrEqual(1);
+  await expect(popup).toHaveCount(0);
 
   // Save-only must not double-submit
   await page.waitForTimeout(400);
   await expect(page.getByTestId("tab-submission-row")).toHaveCount(3);
 
-  // Wait for Save toast to clear or immediately start Move 1 on empty field 1
+  // Immediately start Move 1 on empty field 1
   await page.getByTestId("hex-code").click();
   await expect(popup).toBeVisible({ timeout: 10_000 });
   await expect.poll(() => getPopupPrimaryLabel(page), { timeout: 10_000 }).toBe("Run");
@@ -396,13 +393,10 @@ async function runFlow2ComboForm(page: Page, demoUrl: string, dataDir: string): 
   }
 
   const popup = page.locator("#__eyes_suggestion_host__");
-  await expect(popup).toBeVisible({ timeout: 20_000 });
-  expect(await getPopupPrimaryLabel(page)).toBe("Save skill");
-
-  await clickPopupPrimary(page);
   await expect
-    .poll(async () => (await readLibrary(dataDir).catch(() => [])).length, { timeout: 10_000 })
+    .poll(async () => (await readLibrary(dataDir).catch(() => [])).length, { timeout: 20_000 })
     .toBeGreaterThanOrEqual(1);
+  await expect(popup).toHaveCount(0);
 
   const savedEntries = await readLibrary(dataDir);
   expect(JSON.stringify(savedEntries[0].script)).not.toContain("stray-banner");
@@ -447,13 +441,10 @@ async function runFlow3RiskyForm(page: Page, demoUrl: string, dataDir: string): 
   }
 
   const popup = page.locator("#__eyes_suggestion_host__");
-  await expect(popup).toBeVisible({ timeout: 20_000 });
-  expect(await getPopupPrimaryLabel(page)).toBe("Save skill");
-
-  await clickPopupPrimary(page);
   await expect
-    .poll(async () => (await readLibrary(dataDir).catch(() => [])).length, { timeout: 10_000 })
+    .poll(async () => (await readLibrary(dataDir).catch(() => [])).length, { timeout: 20_000 })
     .toBeGreaterThanOrEqual(1);
+  await expect(popup).toHaveCount(0);
 
   const saved = await readLibrary(dataDir);
   expect(JSON.stringify(saved)).not.toContain(privateEmail);
@@ -522,6 +513,7 @@ test.describe("GEN-78: Real-browser unseen workflows (BRAIN_PIPELINE=v2)", () =>
   test("deterministic Flow 1: 3-field Tab form saves as save_only, recalls on move 1, and fills all 3 fields with .webm video", async () => {
     test.setTimeout(60_000);
     const harness = await launchHarness({
+      proposeDebounceMs: 500,
       gemini: makeDeterministicMockGemini(),
       iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
     });
@@ -537,6 +529,7 @@ test.describe("GEN-78: Real-browser unseen workflows (BRAIN_PIPELINE=v2)", () =>
   test("deterministic Flow 2: select + checkbox + Enter with 1 stray click saves, recalls, and replays cleanly with .webm video", async () => {
     test.setTimeout(60_000);
     const harness = await launchHarness({
+      proposeDebounceMs: 500,
       gemini: makeDeterministicMockGemini(),
       iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
     });

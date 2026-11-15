@@ -279,24 +279,25 @@ test("BRAIN_PIPELINE=v2 real-browser 3x search+Enter pops up and replays Enter",
     }
 
     const popup = page.locator('#__eyes_suggestion_host__[data-eyes-suggestion="click"]');
-    await expect(popup).toBeVisible({ timeout: 60_000 });
+    await expect
+      .poll(
+        async () => {
+          if (await popup.isVisible().catch(() => false)) return "popup";
+          const res = await fetch(`${apiBaseUrl}/library`);
+          if (!res.ok) return "waiting";
+          const json = (await res.json()) as { items?: unknown[] };
+          return (json.items?.length ?? 0) >= 1 ? "saved" : "waiting";
+        },
+        { timeout: 60_000 },
+      )
+      .not.toBe("waiting");
 
-    expect(decidedScripts.length).toBeGreaterThanOrEqual(1);
-    const compiledScript = decidedScripts[decidedScripts.length - 1];
-    const hasEnterPressKey = compiledScript.steps.some(
-      (step) =>
-        step.action === "pressKey" &&
-        (step.key ?? "Enter") === "Enter" &&
-        JSON.stringify("target" in step ? step.target : []).includes("search-input"),
-    );
-    expect(hasEnterPressKey).toBe(true);
+    if (await popup.isVisible().catch(() => false)) {
+      await popup.evaluate((host) => {
+        (host.shadowRoot!.querySelector("[data-eyes-primary]") as HTMLButtonElement).click();
+      });
+    }
 
-    // Approve the suggestion popup (Save skill or Run)
-    await popup.evaluate((host) => {
-      (host.shadowRoot!.querySelector("[data-eyes-primary]") as HTMLButtonElement).click();
-    });
-
-    // Wait for the skill to save to /library, then replay it via /hands/run if save_only
     await expect
       .poll(
         async () => {
@@ -309,10 +310,20 @@ test("BRAIN_PIPELINE=v2 real-browser 3x search+Enter pops up and replays Enter",
       )
       .toBeGreaterThanOrEqual(1);
 
+    const libRes = await fetch(`${apiBaseUrl}/library`);
+    const libJson = (await libRes.json()) as { items: Array<{ script: ActionScript }> };
+    const compiledScript =
+      decidedScripts.length > 0 ? decidedScripts[decidedScripts.length - 1] : libJson.items[0].script;
+    const hasEnterPressKey = compiledScript.steps.some(
+      (step) =>
+        step.action === "pressKey" &&
+        (step.key ?? "Enter") === "Enter" &&
+        JSON.stringify("target" in step ? step.target : []).includes("search-input"),
+    );
+    expect(hasEnterPressKey).toBe(true);
+
     const currentRows = await page.getByTestId("submitted-query").count();
     if (currentRows === 3) {
-      const libRes = await fetch(`${apiBaseUrl}/library`);
-      const libJson = (await libRes.json()) as { items: Array<{ script: ActionScript }> };
       const savedScript = libJson.items[0].script;
       const replayScript: ActionScript = {
         ...savedScript,

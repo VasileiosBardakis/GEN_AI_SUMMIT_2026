@@ -7,6 +7,7 @@ import {
   compiledWorkflowToFinding,
   pickPrimaryCandidate,
 } from "./report.ts";
+import type { FlowTip } from "./tips.ts";
 import {
   detectRepeatedCandidates,
   eventsToSteps,
@@ -74,6 +75,7 @@ export type ProposerDeps = {
     name: string,
     solution: string,
     script: ActionScript,
+    primaryLabel?: string,
   ) => Promise<HandsOutcome>;
   runScript: (
     script: ActionScript,
@@ -83,6 +85,7 @@ export type ProposerDeps = {
   log?: (line: string) => void;
   readSessionEvents: (sessionId: string) => Promise<Event[]>;
   compileV2: (input: CompileInput) => Promise<CompiledWorkflow | null>;
+  suggestFlowTip?: (events: Event[]) => Promise<FlowTip | null>;
   precheck?: (script: ActionScript, meta: { startUrl?: string }) => Promise<PrecheckOutcome>;
   onCompiled?: (info: {
     sessionId: string;
@@ -315,6 +318,9 @@ export function createProposer(deps: ProposerDeps): Proposer {
   const lastSitePopupAt = new Map<string, number>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const queuedSessions = new Set<string>();
+  const shownFlowTipsBySession = new Map<string, Set<string>>();
+  const flowTipCheckedAt = new Map<string, number>();
+  let flowTipPending = false;
   let queue: Promise<void> = Promise.resolve();
   let closed = false;
 
@@ -327,81 +333,118 @@ export function createProposer(deps: ProposerDeps): Proposer {
   ): Promise<void> {
     const name = finding.title.trim() || script.name?.trim() || "Proposed automation";
     const solution = finding.why.trim() || name;
+    let shouldRun =
+      script.runMode === "run_remaining" || workflow.kind === "snippet";
+    let runParams: Record<string, string> | undefined;
 
-    let outcome: HandsOutcome;
-    try {
-      outcome = await deps.requestDecision(name, solution, script);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      safeLog(`[propose:v2] ${name} -> error: ${message}`);
-      emitStageLog({ stage: "decide", session: sessionId, site, decision: "error", error: message, name });
-      return;
-    }
-
-    if (closed) return;
-
-    if (outcome.ok && outcome.decision === "approved") {
-      safeLog(`[propose:v2] ${name} -> approved`);
-      emitStageLog({ stage: "decide", session: sessionId, site, decision: "approved", name });
-
-      let shouldRun =
-        script.runMode === "run_remaining" || workflow.kind === "snippet";
-      if (deps.onApproved) {
-        try {
-          const hookRes = await deps.onApproved({
-            sessionId,
-            script,
-            workflow,
-            finding,
-          });
-          if (hookRes && typeof hookRes.shouldRun === "boolean") {
-            shouldRun = hookRes.shouldRun;
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          safeLog(`[propose:v2] ${name} -> save failed: ${msg}`);
-        }
+    if (shouldRun) {
+      const decideScript: ActionScript =
+        script.runMode === "save_only"
+          ? { ...script, runMode: "run_remaining" }
+          : script;
+      let outcome: HandsOutcome;
+      try {
+        outcome = await deps.requestDecision(name, solution, decideScript);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        safeLog(`[propose:v2] ${name} -> error: ${message}`);
+        emitStageLog({ stage: "decide", session: sessionId, site, decision: "error", error: message, name });
+        return;
       }
 
       if (closed) return;
 
-      if (!shouldRun) {
-        safeLog(`[propose:v2] ${name} -> saved (save_only)`);
-        emitStageLog({
-          stage: "run",
-          session: sessionId,
-          skipped: true,
-          reason: "save_only",
-          name,
-        });
+      if (!outcome.ok || outcome.decision !== "approved") {
+        const isTimeout = !outcome.ok && /timed?\s*out/i.test(outcome.error ?? "");
+        const decision = outcome.decision === "dismissed" ? "dismissed" : isTimeout ? "timeout" : "dismissed";
+        safeLog(`[propose:v2] ${name} -> ${decision}`);
+        emitStageLog({ stage: "decide", session: sessionId, site, decision, name });
         return;
       }
 
+      safeLog(`[propose:v2] ${name} -> approved`);
+      emitStageLog({ stage: "decide", session: sessionId, site, decision: "approved", name });
+      runParams = outcome.params;
+    }
+
+    if (deps.onApproved) {
       try {
-        const runOutcome = await deps.runScript(script, outcome.params);
-        safeLog(`[propose:v2] ${name} -> ${runOutcome.ok ? "run ok" : "run failed"}`);
-        emitStageLog({ stage: "run", session: sessionId, ok: runOutcome.ok, name });
-      } catch {
-        safeLog(`[propose:v2] ${name} -> run failed`);
-        emitStageLog({ stage: "run", session: sessionId, ok: false, name });
+        const hookRes = await deps.onApproved({
+          sessionId,
+          script,
+          workflow,
+          finding,
+        });
+        if (hookRes && typeof hookRes.shouldRun === "boolean") {
+          shouldRun = hookRes.shouldRun;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        safeLog(`[propose:v2] ${name} -> save failed: ${msg}`);
       }
+    }
+
+    if (closed) return;
+
+    if (!shouldRun) {
+      safeLog(`[propose:v2] ${name} -> saved (save_only)`);
+      emitStageLog({
+        stage: "run",
+        session: sessionId,
+        skipped: true,
+        reason: "save_only",
+        name,
+      });
       return;
     }
 
-    if (outcome.decision === "dismissed") {
-      safeLog(`[propose:v2] ${name} -> dismissed`);
-      emitStageLog({ stage: "decide", session: sessionId, site, decision: "dismissed", name });
+    try {
+      const runOutcome = await deps.runScript(script, runParams);
+      safeLog(`[propose:v2] ${name} -> ${runOutcome.ok ? "run ok" : "run failed"}`);
+      emitStageLog({ stage: "run", session: sessionId, ok: runOutcome.ok, name });
+    } catch {
+      safeLog(`[propose:v2] ${name} -> run failed`);
+      emitStageLog({ stage: "run", session: sessionId, ok: false, name });
+    }
+  }
+
+  async function maybeFlowTip(sessionId: string, events: Event[]): Promise<void> {
+    if (!deps.suggestFlowTip || flowTipPending) return;
+    const lastCheck = flowTipCheckedAt.get(sessionId) ?? 0;
+    if (now() - lastCheck < 60_000) return;
+    flowTipCheckedAt.set(sessionId, now());
+
+    let suggestion: FlowTip | null;
+    try {
+      suggestion = await deps.suggestFlowTip(events);
+    } catch {
       return;
     }
+    if (closed || !suggestion?.tip?.trim()) return;
 
-    if (!outcome.ok && /timed?\s*out/i.test(outcome.error ?? "")) {
-      safeLog(`[propose:v2] ${name} -> timeout`);
-      emitStageLog({ stage: "decide", session: sessionId, site, decision: "timeout", name });
-      return;
+    const name = suggestion.keys?.join(" → ") || suggestion.tip.trim();
+    const key = `${name}::${suggestion.tip.trim()}`;
+    let shown = shownFlowTipsBySession.get(sessionId);
+    if (!shown) {
+      shown = new Set<string>();
+      shownFlowTipsBySession.set(sessionId, shown);
     }
+    if (shown.has(key)) return;
+    shown.add(key);
 
-    safeLog(`[propose:v2] ${name} -> dismissed`);
-    emitStageLog({ stage: "decide", session: sessionId, site, decision: "dismissed", name });
+    flowTipPending = true;
+    try {
+      await deps.requestDecision(
+        name,
+        suggestion.tip.trim(),
+        { name, steps: [{ action: "wait", ms: 0 }] },
+        "Got it",
+      );
+    } catch {
+      // Never let tip delivery affect workflow proposals
+    } finally {
+      flowTipPending = false;
+    }
   }
 
   async function processSessionV2(sessionId: string): Promise<void> {
@@ -416,6 +459,8 @@ export function createProposer(deps: ProposerDeps): Proposer {
       return;
     }
     if (closed || events.length === 0) return;
+
+    if (deps.suggestFlowTip) void maybeFlowTip(sessionId, events);
 
     const { steps, piiMap } = eventsToSteps(events);
     const repeatCount = resolveRepeatCount();
@@ -570,9 +615,11 @@ export function createProposer(deps: ProposerDeps): Proposer {
     }
 
     const site = extractSiteHost(compiled, script, events);
+    const willShowPopup =
+      script.runMode === "run_remaining" || compiled.kind === "snippet";
 
     const nowMs = now();
-    if (site) {
+    if (willShowPopup && site) {
       const lastPopup = lastSitePopupAt.get(site);
       if (lastPopup !== undefined && nowMs - lastPopup < siteCooldownMs) {
         const remainingMs = siteCooldownMs - (nowMs - lastPopup);
@@ -635,7 +682,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       proposedSignaturesBySession.set(sessionId, sigSet);
     }
     sigSet.add(candidate.signature);
-    if (site) {
+    if (willShowPopup && site) {
       lastSitePopupAt.set(site, decidedAt);
     }
 

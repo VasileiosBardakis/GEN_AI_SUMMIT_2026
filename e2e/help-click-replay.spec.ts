@@ -251,20 +251,25 @@ test("3-repeat form with Help excursion drops Help click and reload so existing 
     }
 
     const popup = page.locator('#__eyes_suggestion_host__[data-eyes-suggestion="click"]');
-    await expect(popup).toBeVisible({ timeout: 60_000 });
+    await expect
+      .poll(
+        async () => {
+          if (await popup.isVisible().catch(() => false)) return "popup";
+          return stageLogs.some((ev) => ev.stage === "save_skill" && ev.runMode === "save_only")
+            ? "saved"
+            : "waiting";
+        },
+        { timeout: 60_000 },
+      )
+      .not.toBe("waiting");
 
-    expect(decidedScripts.length).toBeGreaterThanOrEqual(1);
-    const compiledScript = decidedScripts[decidedScripts.length - 1];
-    const serializedSteps = JSON.stringify(compiledScript.steps);
-    expect(serializedSteps).not.toContain("help-missing");
-    expect(compiledScript.steps.some((s) => s.action === "navigate")).toBe(false);
+    if (await popup.isVisible().catch(() => false)) {
+      await popup.evaluate((host) => {
+        (host.shadowRoot!.querySelector("[data-eyes-primary]") as HTMLButtonElement).click();
+      });
+    }
 
-    // Approve the popup
-    await popup.evaluate((host) => {
-      (host.shadowRoot!.querySelector("[data-eyes-primary]") as HTMLButtonElement).click();
-    });
-
-    // Wait for decide approval + skill save / auto-run stage
+    // Wait for skill save / auto-run stage
     await expect
       .poll(
         () =>
@@ -275,12 +280,18 @@ test("3-repeat form with Help excursion drops Help click and reload so existing 
       )
       .not.toBeNull();
 
+    const latestRes = await fetch(`${apiBaseUrl}/script/latest`);
+    expect(latestRes.status).toBe(200);
+    const latestJson = (await latestRes.json()) as { ok: boolean; script: ActionScript };
+    expect(latestJson.ok).toBe(true);
+    const compiledScript =
+      decidedScripts.length > 0 ? decidedScripts[decidedScripts.length - 1] : latestJson.script;
+    const serializedSteps = JSON.stringify(compiledScript.steps);
+    expect(serializedSteps).not.toContain("help-missing");
+    expect(compiledScript.steps.some((s) => s.action === "navigate")).toBe(false);
+
     const autoRan = stageLogs.some((ev) => ev.stage === "run" && !ev.skipped);
     if (!autoRan) {
-      const latestRes = await fetch(`${apiBaseUrl}/script/latest`);
-      expect(latestRes.status).toBe(200);
-      const latestJson = (await latestRes.json()) as { ok: boolean; script: ActionScript };
-      expect(latestJson.ok).toBe(true);
 
       let fillIdx = 0;
       const resolvedSteps = latestJson.script.steps.map((step) => {

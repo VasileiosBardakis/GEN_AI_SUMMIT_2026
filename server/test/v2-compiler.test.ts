@@ -1082,6 +1082,7 @@ describe("Brain v2 compiler and validator", () => {
 
     let visibleCount = 4; // 2 reps first
     const decided: Array<{ name: string; script: ReturnType<typeof compiledWorkflowToActionScript> }> = [];
+    const saved: Array<{ script: ReturnType<typeof compiledWorkflowToActionScript> }> = [];
     const proposer = createProposer({
       debounceMs: 10,
       readSessionEvents: async () => events.slice(0, visibleCount),
@@ -1090,6 +1091,10 @@ describe("Brain v2 compiler and validator", () => {
           gemini: client,
           iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
         }),
+      onApproved: async ({ script: approvedScript }) => {
+        saved.push({ script: approvedScript });
+        return { shouldRun: false };
+      },
       requestDecision: async (name, _solution, decidedScript) => {
         decided.push({ name, script: decidedScript });
         return { ok: true, decision: "approved" };
@@ -1101,12 +1106,14 @@ describe("Brain v2 compiler and validator", () => {
       proposer.onEvents("s_enter_search");
       await new Promise((r) => setTimeout(r, 60));
       expect(decided).toHaveLength(0);
+      expect(saved).toHaveLength(0);
 
       visibleCount = 6; // rep 3 arrives
       proposer.onEvents("s_enter_search");
       await new Promise((r) => setTimeout(r, 60));
-      expect(decided).toHaveLength(1);
-      expect(decided[0].script.steps).toEqual(script.steps);
+      expect(decided).toHaveLength(0);
+      expect(saved).toHaveLength(1);
+      expect(saved[0].script.steps).toEqual(script.steps);
     } finally {
       proposer.close();
     }

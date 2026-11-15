@@ -411,6 +411,27 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       results: [{ index: 0, action: "click", ok: true, matchCount: 1, unique: true }],
     });
 
+    if (opts.expectedRunMode === "save_only") {
+      await vi.waitFor(async () => {
+        const lib = await readLibrary(srvDataDir);
+        expect(lib.length).toBe(1);
+      });
+      const [savedEntry] = await readLibrary(srvDataDir);
+      const parsed = LibraryEntrySchema.parse(savedEntry);
+      expect(parsed.status).toBe("active");
+      expect(typeof parsed.startSignature).toBe("string");
+      expect(parsed.startSignature!.length).toBeGreaterThan(0);
+      expect(parsed.script.runMode).toBe("save_only");
+      if (opts.expectPauseBeforeSubmit) {
+        expect(parsed.script.pauseBeforeSubmit).toBe(true);
+      }
+
+      // Never asks the user to save the skill — no decide command queued
+      const trailing = await pollHandsNext(baseUrl, 40);
+      expect(trailing.status).toBe(204);
+      return;
+    }
+
     const decidePoll = await pollHandsNext(baseUrl, waitMs);
     expect(decidePoll.status).toBe(200);
     expect(decidePoll.cmd?.kind).toBe("decide");
@@ -426,7 +447,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       decision: opts.approve ? "approved" : "dismissed",
     });
 
-    if (opts.approve && opts.expectedRunMode === "run_remaining") {
+    if (opts.approve) {
       const runPoll = await pollHandsNext(baseUrl, waitMs);
       expect(runPoll.status).toBe(200);
       expect(runPoll.cmd?.kind).toBeUndefined();
@@ -435,9 +456,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
         ok: true,
         results: [{ ok: true }],
       });
-    }
 
-    if (opts.approve) {
       await vi.waitFor(async () => {
         const lib = await readLibrary(srvDataDir);
         expect(lib.length).toBe(1);
@@ -448,11 +467,6 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       expect(typeof parsed.startSignature).toBe("string");
       expect(parsed.startSignature!.length).toBeGreaterThan(0);
       expect(parsed.script.runMode).toBe(opts.expectedRunMode);
-
-      if (opts.expectedRunMode === "save_only") {
-        const trailing = await pollHandsNext(baseUrl, 20);
-        expect(trailing.status).toBe(204);
-      }
     }
   }
 
@@ -639,10 +653,10 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       },
     };
 
-    const stageLogs: StageLogEvent[] = [];
-    const { baseUrl } = await startV2Server({ gemini, stageLogs });
+      const stageLogs: StageLogEvent[] = [];
+      const { baseUrl, dataDir: srvDataDir } = await startV2Server({ gemini, stageLogs });
 
-    const makePair = (rep: number, tierValue: string): Event[] => [
+      const makePair = (rep: number, tierValue: string): Event[] => [
       {
         v: 1,
         id: `e0000000-0000-4000-8000-0000000000${rep}1`,
@@ -705,17 +719,16 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       results: [{ index: 0, action: "fill", ok: true, matchCount: 1, unique: true }],
     });
 
-    const decidePoll = await pollHandsNext(baseUrl);
-    expect(decidePoll.cmd?.kind).toBe("decide");
-    expect(decidePoll.cmd?.name).toBe("Submit order form (parameterized)");
+    await vi.waitFor(async () => {
+      const lib = await readLibrary(srvDataDir);
+      expect(lib.length).toBe(1);
+    });
+    const [saved] = await readLibrary(srvDataDir);
+    expect(saved.name).toBe("Submit order form (parameterized)");
     expect(calls).toBe(2);
     expect(stageLogs.some((e) => e.stage === "diff_recompile")).toBe(true);
-
-    await postHandsResult(baseUrl, {
-      id: decidePoll.cmd!.id,
-      ok: true,
-      decision: "dismissed",
-    });
+    const noDecide = await pollHandsNext(baseUrl, 40);
+    expect(noDecide.status).toBe(204);
   });
 
   it("checks index 2 constant diff on rep-4 when REPEAT_COUNT=4 and does not skip instance 2", async () => {
@@ -761,8 +774,8 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
         },
       };
 
-      const stageLogs: StageLogEvent[] = [];
-      const { baseUrl } = await startV2Server({ gemini, stageLogs });
+    const stageLogs: StageLogEvent[] = [];
+    const { baseUrl, dataDir: repeat4DataDir } = await startV2Server({ gemini, stageLogs });
 
       const makePair = (rep: number, tierValue: string): Event[] => [
         {
@@ -831,17 +844,16 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
         results: [{ index: 0, action: "fill", ok: true, matchCount: 1, unique: true }],
       });
 
-      const decidePoll = await pollHandsNext(baseUrl);
-      expect(decidePoll.cmd?.kind).toBe("decide");
-      expect(decidePoll.cmd?.name).toBe("Submit order form (parameterized)");
+      await vi.waitFor(async () => {
+        const lib = await readLibrary(repeat4DataDir);
+        expect(lib.length).toBe(1);
+      });
+      const [saved] = await readLibrary(repeat4DataDir);
+      expect(saved.name).toBe("Submit order form (parameterized)");
       expect(calls).toBe(2);
       expect(stageLogs.some((e) => e.stage === "diff_recompile")).toBe(true);
-
-      await postHandsResult(baseUrl, {
-        id: decidePoll.cmd!.id,
-        ok: true,
-        decision: "dismissed",
-      });
+      const noDecide = await pollHandsNext(baseUrl, 40);
+      expect(noDecide.status).toBe(204);
     } finally {
       if (prevRepeatCount === undefined) {
         delete process.env.REPEAT_COUNT;
@@ -869,7 +881,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     };
   }
 
-  it("gates decide on precheck matchCount === 1 (blocks 0 and >1)", async () => {
+  it("gates auto-save and decide on precheck matchCount === 1 (blocks 0 and >1)", async () => {
     const gemini = makeStaticGemini({
       suggest: true,
       offerAt2: false,
@@ -889,7 +901,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       ],
     });
     const stageLogs: StageLogEvent[] = [];
-    const { baseUrl } = await startV2Server({ gemini, stageLogs });
+    const { baseUrl, dataDir: precheckDataDir } = await startV2Server({ gemini, stageLogs });
 
     const events = await loadFixtureEvents("unseen-extra-click.jsonl");
     await fetch(`${baseUrl}/events`, {
@@ -898,7 +910,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       body: JSON.stringify(events),
     });
 
-    // Ambiguous precheck (matchCount: 2) -> must NOT emit decide
+    // Ambiguous precheck (matchCount: 2) -> must NOT auto-save or emit decide
     const pre1 = await pollHandsNext(baseUrl);
     expect(pre1.cmd?.kind).toBe("precheck");
     await postHandsResult(baseUrl, {
@@ -912,8 +924,9 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     expect(
       stageLogs.some((e) => e.stage === "precheck" && e.passed === false),
     ).toBe(true);
+    expect(await readLibrary(precheckDataDir)).toHaveLength(0);
 
-    // Send one more event batch for the same session -> now precheck passes with matchCount: 1
+    // Send one more event batch for the same session -> now precheck passes with matchCount: 1 -> auto-saves without decide
     const extraEvt: Event = {
       ...events[events.length - 1],
       id: "e9999999-0000-4000-8000-000000000001",
@@ -933,31 +946,29 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       results: [{ index: 0, action: "click", ok: true, matchCount: 1, unique: true }],
     });
 
-    const decide = await pollHandsNext(baseUrl);
-    expect(decide.status).toBe(200);
-    expect(decide.cmd?.kind).toBe("decide");
-    await postHandsResult(baseUrl, {
-      id: decide.cmd!.id,
-      ok: true,
-      decision: "dismissed",
+    await vi.waitFor(async () => {
+      const lib = await readLibrary(precheckDataDir);
+      expect(lib).toHaveLength(1);
     });
+    const noDecide = await pollHandsNext(baseUrl, 40);
+    expect(noDecide.status).toBe(204);
   });
 
   it(
-    "enforces 1 popup / site / 5 min rate limit and resets after 5 min",
+    "enforces 1 popup / site / 5 min rate limit and resets after 5 min (without blocking auto-save)",
     async () => {
       let fakeNow = 1_000_000;
     const { client: gemini, matchedFiles } = await getUnseenGeminiClient();
     const stageLogs: StageLogEvent[] = [];
-    const { baseUrl } = await startV2Server({
+    const { baseUrl, dataDir: rateDataDir } = await startV2Server({
       gemini,
       siteCooldownMs: 5 * 60 * 1000,
       now: () => fakeNow,
       stageLogs,
     });
 
-    const baseEvents = await loadFixtureEvents("unseen-enter-controls.jsonl");
-    // Session 1 on intake.local -> succeeds
+    const baseEvents = await loadFixtureEvents("unseen-two-repeats.jsonl");
+    // Session 1 on erp-stock.local (run_remaining) -> shows popup
     await fetch(`${baseUrl}/events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -967,12 +978,12 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     const pre1 = await pollHandsNext(baseUrl);
     expect(pre1.cmd?.kind).toBe("precheck");
     if (process.env.V2_UNSEEN_LIVE !== "1") {
-      expect(matchedFiles[0]).toBe("unseen-enter-controls.answer.json");
+      expect(matchedFiles[0]).toBe("unseen-two-repeats.answer.json");
     }
     await postHandsResult(baseUrl, {
       id: pre1.cmd!.id,
       ok: true,
-      results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
+      results: [{ index: 0, action: "fill", ok: true, matchCount: 1 }],
     });
     const dec1 = await pollHandsNext(baseUrl);
     expect(dec1.cmd?.kind).toBe("decide");
@@ -982,12 +993,12 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       decision: "dismissed",
     });
 
-    // Advance 2 min (< 5 min): Session 2 on SAME site (intake.local) -> rate limited!
+    // Advance 2 min (< 5 min): Session 2 on SAME site -> rate limited!
     fakeNow += 2 * 60 * 1000;
     const sess2Events = baseEvents.map((e, i) => ({
       ...e,
       id: `b2000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
-      session: "sess_intake_2",
+      session: "sess_erp_2",
     }));
     await fetch(`${baseUrl}/events`, {
       method: "POST",
@@ -999,7 +1010,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       () => {
         expect(
           stageLogs.some(
-            (e) => e.stage === "rate_limit" && e.session === "sess_intake_2",
+            (e) => e.stage === "rate_limit" && e.session === "sess_erp_2",
           ),
         ).toBe(true);
       },
@@ -1008,12 +1019,30 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     const rateLimitedPoll = await pollHandsNext(baseUrl, 40);
     expect(rateLimitedPoll.status).toBe(204);
 
-    // Advance past 5 min: Session 3 on intake.local -> allowed!
+    // A save_only workflow on a site is auto-saved silently even without popup quota
+    const saveOnlyEvents = await loadFixtureEvents("unseen-enter-controls.jsonl");
+    await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(saveOnlyEvents),
+    });
+    const preSaveOnly = await pollHandsNext(baseUrl);
+    expect(preSaveOnly.cmd?.kind).toBe("precheck");
+    await postHandsResult(baseUrl, {
+      id: preSaveOnly.cmd!.id,
+      ok: true,
+      results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
+    });
+    await vi.waitFor(async () => {
+      expect(await readLibrary(rateDataDir)).toHaveLength(1);
+    });
+
+    // Advance past 5 min: Session 3 on erp-stock.local -> allowed!
     fakeNow += 4 * 60 * 1000;
     const sess3Events = baseEvents.map((e, i) => ({
       ...e,
       id: `b3000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
-      session: "sess_intake_3",
+      session: "sess_erp_3",
     }));
     await fetch(`${baseUrl}/events`, {
       method: "POST",
@@ -1026,7 +1055,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     await postHandsResult(baseUrl, {
       id: pre3.cmd!.id,
       ok: true,
-      results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
+      results: [{ index: 0, action: "fill", ok: true, matchCount: 1 }],
     });
     const dec3 = await pollHandsNext(baseUrl);
     expect(dec3.cmd?.kind).toBe("decide");
@@ -1045,7 +1074,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       name: "Record claim approval",
       reason: "Copies claim ID and ref from Claims Queue to Payout Ledger",
       risk: "low",
-      runMode: "save_only",
+      runMode: "run_remaining",
       params: [],
       steps: [
         { action: "readText", stepIndex: 1, bind: "claimId" },
@@ -1266,19 +1295,13 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       ok: true,
       results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
     });
-    const cDec = await pollHandsNext(recallUrl);
-    expect(cDec.cmd?.kind).toBe("decide");
-    expect(cDec.cmd?.script?.runMode).toBe("save_only");
-    await postHandsResult(recallUrl, {
-      id: cDec.cmd!.id,
-      ok: true,
-      decision: "approved",
-    });
 
     await vi.waitFor(async () => {
       const lib = await readLibrary(recallDataDir);
       expect(lib).toHaveLength(1);
     });
+    const noSaveDecide = await pollHandsNext(recallUrl, 40);
+    expect(noSaveDecide.status).toBe(204);
     const [ticketEntry] = (await readLibrary(recallDataDir)) as LibraryEntry[];
     expect(ticketEntry.startSignature).toContain("intake.local");
 
@@ -1338,7 +1361,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     "offers at rep 2 when offerAt2 === true, blocks precheck matchCount === 0, and builds GET /report across >10-min gaps",
     async () => {
     const { client: gemini, matchedFiles } = await getUnseenGeminiClient();
-    const { baseUrl } = await startV2Server({
+    const { baseUrl, dataDir: offer2DataDir } = await startV2Server({
       gemini,
       subDir: "offer-at-2-and-gap",
     });
@@ -1419,15 +1442,13 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
       ok: true,
       results: [{ index: 0, action: "click", ok: true, matchCount: 1 }],
     });
-    const dec3 = await pollHandsNext(baseUrl);
-    expect(dec3.cmd?.kind).toBe("decide");
-    expect(dec3.cmd?.script?.runMode).toBe("save_only");
-    expect((dec3.cmd?.name ?? "").length).toBeGreaterThan(0);
-    await postHandsResult(baseUrl, {
-      id: dec3.cmd!.id,
-      ok: true,
-      decision: "dismissed",
+    await vi.waitFor(async () => {
+      const lib = await readLibrary(offer2DataDir);
+      expect(lib.length).toBeGreaterThanOrEqual(1);
     });
+    const noDec3 = await pollHandsNext(baseUrl, 40);
+    expect(noDec3.status).toBe(204);
+    const [savedTicketEntry] = await readLibrary(offer2DataDir);
 
     const reportRes = await fetch(
       `${baseUrl}/report?session=sess_unseen_enter_controls`,
@@ -1435,7 +1456,7 @@ describe("Brain+Hands v2 HTTP integration (BRAIN_PIPELINE=v2)", () => {
     expect(reportRes.status).toBe(200);
     const report = (await reportRes.json()) as Report;
     expect(report.findings).toHaveLength(1);
-    expect(report.findings[0].title).toBe(dec3.cmd?.name);
+    expect(report.findings[0].title).toBe(savedTicketEntry.name);
   }, TEST_TIMEOUT_MS);
 
   it("caches rep-2 precompile when offerAt2 === false and reuses on rep-3 via cache_hit without a second Gemini call", async () => {
