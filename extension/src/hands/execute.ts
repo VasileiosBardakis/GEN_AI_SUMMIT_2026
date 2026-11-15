@@ -913,7 +913,29 @@ export async function executeStep(
       });
     };
 
-    element.dispatchEvent(createKeyEvent("keydown"));
+    const notCancelled = element.dispatchEvent(createKeyEvent("keydown"));
+    if (keyName === "Enter" && notCancelled) {
+      const tag = element.tagName?.toLowerCase() ?? "";
+      const isInputOrTextarea =
+        tag === "input" ||
+        tag === "textarea" ||
+        (typeof HTMLInputElement !== "undefined" && element instanceof HTMLInputElement) ||
+        (typeof HTMLTextAreaElement !== "undefined" && element instanceof HTMLTextAreaElement);
+      if (isInputOrTextarea) {
+        const form =
+          (element as HTMLInputElement).form ??
+          (typeof element.closest === "function"
+            ? (element.closest("form") as HTMLFormElement | null)
+            : null);
+        if (form) {
+          if (typeof form.requestSubmit === "function") {
+            form.requestSubmit();
+          } else if (typeof form.submit === "function") {
+            form.submit();
+          }
+        }
+      }
+    }
     element.dispatchEvent(createKeyEvent("keyup"));
   }
 

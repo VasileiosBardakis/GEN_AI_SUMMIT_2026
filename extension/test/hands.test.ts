@@ -316,14 +316,14 @@ class FakeDomElement {
     this.listeners.set(type, list);
   }
 
-  dispatchEvent(ev: { type: string }): boolean {
+  dispatchEvent(ev: { type: string; defaultPrevented?: boolean }): boolean {
     for (const cb of this.listeners.get(ev.type) ?? []) {
       cb(ev);
     }
     if (ev.type && this.parentElement) {
       this.parentElement.dispatchEvent(ev);
     }
-    return true;
+    return !ev.defaultPrevented;
   }
 
   click(): void {
@@ -1177,5 +1177,86 @@ describe("GEN-69: M2 Hands v2", () => {
       tab: "localhost",
       url: "http://127.0.0.1:4173/erp.html",
     });
+  });
+
+  it("pressKey(Enter) on an input inside <form> calls requestSubmit/submit when keydown is not cancelled, and skips when preventDefault() is called", async () => {
+    const root = new FakeDomElement("body");
+
+    // Case 1: form with requestSubmit()
+    const formWithRequestSubmit = new FakeDomElement("form", { id: "search-form-1" }) as FakeDomElement & {
+      requestSubmit: ReturnType<typeof vi.fn>;
+      submit: ReturnType<typeof vi.fn>;
+    };
+    formWithRequestSubmit.requestSubmit = vi.fn();
+    formWithRequestSubmit.submit = vi.fn();
+    const input1 = new FakeDomInput({ id: "search-1", type: "search" }) as FakeDomInput & {
+      form?: FakeDomElement;
+    };
+    input1.form = formWithRequestSubmit;
+    const keySequence1: string[] = [];
+    input1.addEventListener("keydown", () => keySequence1.push("keydown"));
+    input1.addEventListener("keyup", () => keySequence1.push("keyup"));
+    formWithRequestSubmit.appendChild(input1);
+    root.appendChild(formWithRequestSubmit);
+
+    // Case 2: form without requestSubmit() falls back to submit()
+    const formFallback = new FakeDomElement("form", { id: "search-form-2" }) as FakeDomElement & {
+      submit: ReturnType<typeof vi.fn>;
+    };
+    formFallback.submit = vi.fn();
+    const input2 = new FakeDomInput({ id: "search-2", type: "text" });
+    formFallback.appendChild(input2);
+    root.appendChild(formFallback);
+
+    // Case 3: keydown listener calls preventDefault() -> form submission skipped
+    const formCancelled = new FakeDomElement("form", { id: "search-form-3" }) as FakeDomElement & {
+      requestSubmit: ReturnType<typeof vi.fn>;
+      submit: ReturnType<typeof vi.fn>;
+    };
+    formCancelled.requestSubmit = vi.fn();
+    formCancelled.submit = vi.fn();
+    const input3 = new FakeDomInput({ id: "search-3", type: "text" }) as FakeDomInput & {
+      form?: FakeDomElement;
+    };
+    input3.form = formCancelled;
+    const keySequence3: string[] = [];
+    input3.addEventListener("keydown", (ev) => {
+      keySequence3.push("keydown");
+      (ev as { preventDefault: () => void }).preventDefault();
+    });
+    input3.addEventListener("keyup", () => keySequence3.push("keyup"));
+    formCancelled.appendChild(input3);
+    root.appendChild(formCancelled);
+
+    const dom = installFakeDom(root);
+    restoreDom = dom.restore;
+
+    const res1 = await executeStep({
+      action: "pressKey",
+      key: "Enter",
+      target: { kind: "css", value: "#search-1" },
+    });
+    expect(res1.ok).toBe(true);
+    expect(formWithRequestSubmit.requestSubmit).toHaveBeenCalledTimes(1);
+    expect(formWithRequestSubmit.submit).not.toHaveBeenCalled();
+    expect(keySequence1).toEqual(["keydown", "keyup"]);
+
+    const res2 = await executeStep({
+      action: "pressKey",
+      key: "Enter",
+      target: { kind: "css", value: "#search-2" },
+    });
+    expect(res2.ok).toBe(true);
+    expect(formFallback.submit).toHaveBeenCalledTimes(1);
+
+    const res3 = await executeStep({
+      action: "pressKey",
+      key: "Enter",
+      target: { kind: "css", value: "#search-3" },
+    });
+    expect(res3.ok).toBe(true);
+    expect(formCancelled.requestSubmit).not.toHaveBeenCalled();
+    expect(formCancelled.submit).not.toHaveBeenCalled();
+    expect(keySequence3).toEqual(["keydown", "keyup"]);
   });
 });
