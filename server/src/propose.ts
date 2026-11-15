@@ -186,6 +186,15 @@ export function buildFindingKey(finding: Finding, script: ActionScript): string 
   return `${detector}:${finding.verdict}:${hash}`;
 }
 
+function summarizePrecheckCounts(outcome: PrecheckOutcome | HandsOutcome): unknown {
+  const results = outcome.results;
+  if (!Array.isArray(results)) return results ?? null;
+  return results.map((item) => {
+    const rec = (item ?? {}) as { index?: unknown; action?: unknown; matchCount?: unknown };
+    return `${String(rec.index)}:${String(rec.action)}=${String(rec.matchCount)}`;
+  });
+}
+
 function isPrecheckPassed(outcome: PrecheckOutcome | HandsOutcome): boolean {
   if (!outcome.ok) return false;
   const results = outcome.results;
@@ -196,12 +205,13 @@ function isPrecheckPassed(outcome: PrecheckOutcome | HandsOutcome): boolean {
       const rec = item as { ok?: unknown; matchCount?: unknown };
       if (rec.ok === false) return false;
       if (typeof rec.matchCount !== "number") return false;
-      return rec.matchCount === 1;
+      // 0 = target not found; 2+ = ambiguous here, but Run narrows with within/stepIndex and fails closed.
+      return rec.matchCount >= 1;
     });
   }
   if (typeof results === "object" && results !== null && "matchCount" in results) {
     const rec = results as { ok?: unknown; matchCount?: unknown };
-    return rec.ok !== false && rec.matchCount === 1;
+    return rec.ok !== false && typeof rec.matchCount === "number" && rec.matchCount >= 1;
   }
   return false;
 }
@@ -361,7 +371,7 @@ function collectWorkflowHosts(
   return hosts;
 }
 
-function collectLibraryEntryHosts(entry: LibraryEntry): Set<string> {
+export function collectLibraryEntryHosts(entry: LibraryEntry): Set<string> {
   const hosts = new Set<string>();
   for (const app of entry.eyes.scope.apps) {
     addNormalizedHost(hosts, app);
@@ -392,7 +402,7 @@ function stripWww(host: string): string {
   return host.startsWith("www.") && host.length > 4 ? host.slice(4) : host;
 }
 
-function hasHostOverlap(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+export function hasHostOverlap(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size === 0 || b.size === 0) return false;
   const bNorm = new Set<string>();
   for (const h of b) {
@@ -478,6 +488,8 @@ function summarizeScriptSteps(steps: readonly ActionScript["steps"][number][]): 
   return out;
 }
 
+const MAX_SAME_TASK_COMPARISONS = 6;
+
 export function createProposer(deps: ProposerDeps): Proposer {
   const now = deps.now ?? (() => Date.now());
 
@@ -511,6 +523,15 @@ export function createProposer(deps: ProposerDeps): Proposer {
   const knownWorkflowHostsByKey = new Map<string, Set<string>>();
   let flowTipPending = false;
   let closed = false;
+  // Compiles from different sessions can finish together. Everything from the
+  // library check to the save runs one at a time, so a later compile always sees
+  // the entry an earlier one just saved.
+  let libraryChain: Promise<void> = Promise.resolve();
+  function withLibraryLock(fn: () => Promise<void>): Promise<void> {
+    const run = libraryChain.then(fn, fn);
+    libraryChain = run.catch(() => {});
+    return run;
+  }
 
   function entryLookupKey(name: string, solution: string): string {
     return `${name.trim().toLowerCase()}::${solution.trim().toLowerCase()}`;
@@ -849,6 +870,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
     const site = extractSiteHost(compiled, script, windowedEvents);
 
+    await withLibraryLock(async () => {
     if (deps.readLibrary) {
       const existingEntries = await deps.readLibrary().catch(() => []);
       if (existingEntries.length > 0) {
@@ -858,11 +880,18 @@ export function createProposer(deps: ProposerDeps): Proposer {
             finding.title.trim() || script.name?.trim() || "Proposed automation";
           const solution = finding.why.trim() || name;
           const candidateHosts = collectWorkflowHosts(site, compiled, script);
-          const sameHostEntries = existingEntries.filter(
-            (entry) =>
-              entry.kind === "workflow" &&
-              hasHostOverlap(candidateHosts, getLibraryEntryHosts(entry)),
+          // Iris decides sameness. Host overlap only orders the entries; a flow
+          // that starts on another site can still be the same task.
+          const workflowEntries = existingEntries.filter(
+            (entry) => entry.kind === "workflow",
           );
+          const overlapping = workflowEntries.filter((entry) =>
+            hasHostOverlap(candidateHosts, getLibraryEntryHosts(entry)),
+          );
+          const sameHostEntries = [
+            ...overlapping,
+            ...workflowEntries.filter((entry) => !overlapping.includes(entry)),
+          ].slice(0, MAX_SAME_TASK_COMPARISONS);
           if (sameHostEntries.length > 0) {
             const candidateSummary = {
               name,
@@ -928,7 +957,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
             }
           }
         }
-        if (!irisAnswered && !(compiled.kind === "workflow" && deps.judgeSameTask)) {
+        if (!irisAnswered) {
           const context: ImplementContext = {
             ...(compiled.apps[0] ? { app: compiled.apps[0] } : {}),
             ...(compiled.startUrl ? { url: compiled.startUrl } : {}),
@@ -1002,7 +1031,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       });
       if (!passed) {
         safeLog(
-          `[propose:v2] precheck blocked popup for ${compiled.name} (${precheckOutcome.error ?? "matchCount !== 1"})`,
+          `[propose:v2] precheck blocked popup for ${compiled.name} (${precheckOutcome.error ?? `matchCounts ${JSON.stringify(summarizePrecheckCounts(precheckOutcome))}`})`,
         );
         if (!closed && irisYes && deps.suggestFlowTip) {
           await maybeFlowTip(sessionId, events);
@@ -1036,6 +1065,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       compiled,
       decisionMeta,
     );
+    });
   }
 
   function runSession(sessionId: string): void {

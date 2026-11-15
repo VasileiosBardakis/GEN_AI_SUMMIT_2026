@@ -48,11 +48,14 @@ import {
 } from "./llm/iris.ts";
 import {
   collectFlatSteps,
+  collectLibraryEntryHosts,
   createProposer,
+  hasHostOverlap,
   type HandsDecision,
   type HandsOutcome,
   type StageLogEvent,
 } from "./propose.ts";
+import { hostnameFromUrl } from "./common/host.ts";
 import { buildCombinedReport, buildReport } from "./report.ts";
 import { scrubEvents } from "./scrub.ts";
 import { suggestFlowTip } from "./tips.ts";
@@ -645,7 +648,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
     for (const [name, value] of entries) {
       const idx = out.findIndex((p) => p.name === name);
       if (idx >= 0) {
-        if (!out[idx].example) out[idx].example = value;
+        out[idx].example = value;
       } else {
         out.push({ name, example: value });
       }
@@ -731,12 +734,12 @@ export function createServer(opts: CreateServerOptions): http.Server {
         startStepIndex > 0 ? extractMatchedPrefixBindings(sessionEvents, entry) : {};
       const matchedUrl = typeof matchedEvent?.url === "string" ? matchedEvent.url : undefined;
       const providedParams: Record<string, string> = {
-        ...boundValues,
         ...Object.fromEntries(
           (entry.script.params ?? [])
             .filter((p) => p.example !== undefined || p.piiHash !== undefined)
             .map((p) => [p.name, p.example ?? p.piiHash ?? ""]),
         ),
+        ...boundValues,
       };
       const urlStartIndex =
         matchedUrl && entry.kind !== "snippet"
@@ -1204,6 +1207,18 @@ export function createServer(opts: CreateServerOptions): http.Server {
             .matchEventsWithIris(events, entries, { irisOpts })
             .then((matched) => {
               if (!matched) return;
+              // A recall must happen on a site the entry's steps actually use.
+              const eventHost = hostnameFromUrl(matched.event.url ?? "", {
+                collapseLoopback: true,
+              });
+              const entryHosts = collectLibraryEntryHosts(matched.entry);
+              if (
+                eventHost &&
+                entryHosts.size > 0 &&
+                !hasHostOverlap(new Set([eventHost]), entryHosts)
+              ) {
+                return;
+              }
               if (activeLibraryDecide && activeLibraryDecide.entryId !== matched.entry.id) {
                 if (commandQueue.some((c) => c.id === activeLibraryDecide!.commandId)) {
                   cancelCommand(activeLibraryDecide.commandId, "Superseded");

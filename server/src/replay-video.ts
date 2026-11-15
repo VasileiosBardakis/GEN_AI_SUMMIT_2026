@@ -289,6 +289,8 @@ type PlaywrightBrowser = {
     close: () => Promise<void>;
   }>;
   close: () => Promise<void>;
+  isConnected?: () => boolean;
+  on?: (event: "disconnected", cb: () => void) => void;
 };
 
 async function waitForRenderedFrame(page: ReplayPage, settleMs = 0): Promise<void> {
@@ -358,8 +360,15 @@ function resolveFallbackChromePath(): string | undefined {
 }
 
 async function getSharedBrowser(): Promise<PlaywrightBrowser | null> {
-  if (sharedBrowserPromise) return sharedBrowserPromise;
-  sharedBrowserPromise = (async () => {
+  if (sharedBrowserPromise) {
+    const existing = await sharedBrowserPromise;
+    if (existing && existing.isConnected?.() !== false) return existing;
+    // Browser crashed or was closed: drop it so a fresh one is launched.
+    if (existing) sharedBrowserPromise = null;
+    else return null;
+  }
+  let launching: Promise<PlaywrightBrowser | null> | null = null;
+  launching = (async () => {
     try {
       const { chromium } = await import("@playwright/test");
       const defaultExec = chromium.executablePath();
@@ -370,14 +379,19 @@ async function getSharedBrowser(): Promise<PlaywrightBrowser | null> {
         headless: true,
         ...(executablePath ? { executablePath } : {}),
       });
-      return browser as unknown as PlaywrightBrowser;
+      const launched = browser as unknown as PlaywrightBrowser;
+      launched.on?.("disconnected", () => {
+        if (sharedBrowserPromise === launching) sharedBrowserPromise = null;
+      });
+      return launched;
     } catch (err) {
       console.error("[replay-video] failed to launch Playwright browser:", err);
-      sharedBrowserPromise = null;
+      if (sharedBrowserPromise === launching) sharedBrowserPromise = null;
       return null;
     }
   })();
-  return sharedBrowserPromise;
+  sharedBrowserPromise = launching;
+  return launching;
 }
 
 export function warmReplayBrowser(): void {
@@ -419,11 +433,21 @@ export async function recordScriptReplay(
   let context: Awaited<ReturnType<PlaywrightBrowser["newContext"]>> | null = null;
 
   try {
-    context = await browser.newContext({
+    const contextOptions = {
       viewport: { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT },
       recordVideo: { dir: tmpDir, size: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT } },
       permissions: ["clipboard-read", "clipboard-write"],
-    });
+    };
+    try {
+      context = await browser.newContext(contextOptions);
+    } catch (err) {
+      // Shared browser died between checks: relaunch once and retry.
+      console.error("[replay-video] newContext failed, relaunching browser:", err);
+      sharedBrowserPromise = null;
+      const fresh = await getSharedBrowser();
+      if (!fresh) return null;
+      context = await fresh.newContext(contextOptions);
+    }
 
     await context.addInitScript({ content: getExecuteStepBundle() });
 

@@ -263,6 +263,7 @@ export const COMPILER_RESPONSE_SCHEMA = {
 } as const;
 
 type EnrichedStep = V2Step & {
+  cell?: string;
   label?: string;
   role?: string;
   tag?: string;
@@ -574,8 +575,10 @@ function enrichSteps(steps: V2Step[], events?: Event[]): EnrichedStep[] {
             }
           : undefined;
 
+    const gridCell = matched?.meta?.grid?.cellRef;
     return {
       ...step,
+      ...(typeof gridCell === "string" && gridCell ? { cell: gridCell } : {}),
       label: matched?.target?.label,
       role: matched?.target?.role,
       tag: matched?.target?.tag,
@@ -1246,6 +1249,11 @@ function resolveCopySourceContext(
 
     const host = resolveStepRealHost(step) ?? normalizeHost(step.app);
     const needle = (step.value ?? "").trim();
+    // Selections often include neighbouring text (e.g. a button label on the next line).
+    const needleLines = needle
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
 
     let bestCell: SourceCellEntry | undefined;
     if (needle && sourceCells.length > 0) {
@@ -1260,6 +1268,7 @@ function resolveCopySourceContext(
         if (cell.text === needle) score = 3;
         else if (cell.text.startsWith(`${needle} `)) score = 2;
         else if (cell.text.includes(needle)) score = 1;
+        else if (needleLines.includes(cell.text)) score = 2;
         if (score === 0) continue;
 
         const rowBonus =
@@ -1318,6 +1327,7 @@ function buildCompilePrompt(
     };
     const label = step.label ?? inferLabelFromTarget(step.target);
     if (label) entry.label = label;
+    if (step.cell) entry.cell = step.cell;
     if (step.role) entry.role = step.role;
     if (step.tag) entry.tag = step.tag;
     const copyMatch = ctx.copySourceMatches.get(idx);
@@ -1409,6 +1419,8 @@ function buildCompilePrompt(
     "5. `switchTab` uses `stepIndex` or `host` (hostname only). Any `navigate` must preserve the full URL (scheme, host, port, path).",
     "6. SNIPPET: When the steps are `paste` or `fill` of the same literal text into one field with no `copy`/source read (even with clear clicks or empty clears in between), set `suggest: true`, `kind: \"snippet\"`, `params: []`, `runMode: \"save_only\"`, and emit ONLY ONE `insertText` step with `stepIndex` and that exact repeated text (no `fill`, `click`, or clear steps).",
     "7. WORKFLOW: When PageSummary Lists contains a source list with rows on the source page, ALWAYS emit `forEach` with `runMode: \"run_remaining\"` and `itemIds` (for remaining unprocessed items, or `items: \"<listId>\"` for all rows) and put ALL per-row steps inside `forEach.steps: [...]` (never leave `forEach.steps` empty or put body steps after `forEach`). Inside `forEach.steps`, scope row-level `readText`/`click` steps using `withinId` and `withinTextParam` (NOT on `forEach` itself) plus `stepIndex` (or `targetId`), and fill destination fields using `stepIndex` or exact `ps_*` `targetId`. Otherwise set `runMode: \"save_only\"` with flat steps. Set `risk: \"high\"` for irreversible external actions; set `suggest: true` for repeated workflows (2+ cycles), snippet pastes, or multi-field transfers with a PageSummary list — set `suggest: false` if one-off or incomplete.",
+    "8. GRID/CELLS: Steps with a `cell` field wrote into a grid whose editor element is shared by every cell. If the cycles wrote to successive cells (the row or column advances from one cycle to the next), do NOT replay the recorded cell references: compile one cycle that is relative to the current position, moving with `key` steps (e.g. Tab between columns, Enter or arrow keys to the next row, Home to return to the first column) so each run lands after the previous data instead of overwriting it. Emit a fill/insertText step for EVERY column that was filled in a cycle (even if a value was only partly captured), in the recorded column order, each with its own param or `{{var}}`.",
+    "9. Only add fill steps for fields the user actually typed or pasted into; never invent example values.",
     "",
     "Steps:",
     ...stepLines,
@@ -2022,6 +2034,8 @@ function logRejectedStep(
   );
 }
 
+const COMPILE_RESOLVE_RETRIES = 2;
+
 function resolveSteps(
   rawSteps: readonly ModelStep[],
   ctx: PromptContext,
@@ -2253,6 +2267,19 @@ function resolveSteps(
     );
     if (!resolved) {
       if (raw.action === "switchTab") continue;
+      // A click scoped only to a container has no element to act on; skip it
+      // and keep the rest of the workflow.
+      if (
+        raw.action === "click" &&
+        raw.withinId &&
+        raw.stepIndex === undefined &&
+        !raw.targetId
+      ) {
+        console.log(
+          `[v2/compiler] skipped click with only withinId=${raw.withinId} (no stepIndex/targetId)`,
+        );
+        continue;
+      }
       logRejectedStep(raw, describeLeafRejection(raw as ModelLeafStep, ctx));
       return null;
     }
@@ -2486,7 +2513,7 @@ export async function compileWorkflow(
           () => null,
         );
 
-  const [modelOut, irisResult] = await Promise.all([
+  let [modelOut, irisResult] = await Promise.all([
     gemini.generateJson(prompt, ModelCompileOutputSchema),
     irisPromise,
   ]);
@@ -2505,7 +2532,19 @@ export async function compileWorkflow(
     return null;
   }
 
-  const resolved = resolveSteps(modelOut.steps, ctx, stabilityCounts);
+  // The model occasionally omits a step reference; one bad step voids the whole
+  // compile, so regenerate before giving up.
+  let resolved = resolveSteps(modelOut.steps, ctx, stabilityCounts);
+  for (
+    let retry = 0;
+    retry < COMPILE_RESOLVE_RETRIES && (!resolved || resolved.steps.length === 0);
+    retry += 1
+  ) {
+    console.log(`[v2/compiler] unresolved step, regenerating (${retry + 1}/${COMPILE_RESOLVE_RETRIES})`);
+    modelOut = await gemini.generateJson(prompt, ModelCompileOutputSchema);
+    if (modelOut.steps.length === 0) break;
+    resolved = resolveSteps(modelOut.steps, ctx, stabilityCounts);
+  }
   if (!resolved || resolved.steps.length === 0) {
     console.log(`[v2/compiler] dropped: no step resolved to a real target (${modelOut.steps.length} model steps)`);
     return null;
@@ -2626,6 +2665,56 @@ export async function compileWorkflow(
     ...(p.description !== undefined ? { description: p.description } : {}),
     ...(p.example !== undefined ? { example: p.example } : {}),
   }));
+
+  // Keep an example only if the user actually typed or pasted that exact value;
+  // a fill for a param whose example was invented has nothing to type, so drop it.
+  const typedValues = new Set<string>();
+  for (const st of rawSteps) if (st.value) typedValues.add(st.value);
+  for (const ev of input.events ?? []) {
+    const v = (ev as { value?: unknown }).value;
+    if (typeof v === "string" && v) typedValues.add(v);
+  }
+  for (const [token, real] of input.piiMap ?? []) {
+    typedValues.add(token);
+    typedValues.add(real);
+  }
+  const boundNames = new Set<string>();
+  const collectBinds = (list: readonly CompiledStep[]): void => {
+    for (const st of list) {
+      if (st.action === "forEach") collectBinds(st.steps);
+      else if ("bind" in st && typeof st.bind === "string") boundNames.add(st.bind);
+    }
+  };
+  collectBinds(steps);
+  const inventedParams = new Set<string>();
+  for (let i = params.length - 1; i >= 0; i -= 1) {
+    const pm = params[i]!;
+    if (pm.example === undefined || typedValues.has(pm.example)) continue;
+    const { example: _drop, ...rest } = pm;
+    void _drop;
+    params[i] = rest;
+    if (!boundNames.has(pm.name)) inventedParams.add(pm.name);
+  }
+  if (inventedParams.size > 0) {
+    const droppedNames = new Set<string>();
+    const kept = steps.filter((st) => {
+      if (st.action !== "fill" && st.action !== "insertText") return true;
+      const m = /^\{\{\s*([^}]+?)\s*\}\}$/.exec(st.value ?? "");
+      if (m && inventedParams.has(m[1]!)) {
+        droppedNames.add(m[1]!);
+        return false;
+      }
+      return true;
+    });
+    if (droppedNames.size > 0) {
+      console.log(`[v2/compiler] dropped fill steps for invented params: ${Array.from(droppedNames).join(",")}`);
+      steps.length = 0;
+      steps.push(...kept);
+      for (let i = params.length - 1; i >= 0; i -= 1) {
+        if (droppedNames.has(params[i]!.name)) params.splice(i, 1);
+      }
+    }
+  }
 
   const cleanedSteps = stripSelfReadsToParams(steps, params, indexedSteps);
   if (cleanedSteps.length === 0) {

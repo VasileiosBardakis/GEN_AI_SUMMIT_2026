@@ -998,13 +998,18 @@ function stepLocatorsForPrecheck(step: {
   if (Array.isArray(step.target)) raw.push(...step.target);
   else if (step.target) raw.push(step.target);
   if (Array.isArray(step.targets)) raw.push(...step.targets);
-  return filterPrecheckLocators(raw);
+  return dropTemplatedLocators(filterPrecheckLocators(raw));
+}
+
+// Locators still holding a {{param}} cannot be resolved before Run fills them in.
+function dropTemplatedLocators(locs: Locator[]): Locator[] {
+  return locs.filter((loc) => !/\{\{[^}]*\}\}/.test(loc.value ?? ""));
 }
 
 function withinLocatorsForPrecheck(step: { within?: Locator | Locator[] }): Locator[] {
   if (!step.within) return [];
   const raw = Array.isArray(step.within) ? step.within : [step.within];
-  return filterPrecheckLocators(raw);
+  return dropTemplatedLocators(filterPrecheckLocators(raw));
 }
 
 type PrecheckStepInput = V2Step & {
@@ -1506,9 +1511,13 @@ export async function handleHandsCommand(
         status: itemStatus,
       });
       storedItem.script = decideScript as unknown as ActionScript;
-      void loadLibrary()
-        .then((items) => saveLibrary(upsertOptimizationItem(items, storedItem)))
-        .catch(() => {});
+      // Workflows are saved by the server on approval and arrive via /library;
+      // saving them here too would show a second card for the same task.
+      if (suggestion.kind === "text") {
+        void loadLibrary()
+          .then((items) => saveLibrary(upsertOptimizationItem(items, storedItem)))
+          .catch(() => {});
+      }
     }
     void (async () => {
       let payload: {

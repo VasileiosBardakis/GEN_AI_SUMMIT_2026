@@ -368,6 +368,8 @@ export function mergeServerAndLocalOptimizations(
         }
         continue;
       }
+      // Unsaved workflow offers are not library entries; the server is the source of truth.
+      if (item.kind === "workflow" && item.runCount === 0) continue;
     }
     merged.push(item);
   }

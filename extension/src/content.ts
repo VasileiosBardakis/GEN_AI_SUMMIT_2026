@@ -439,6 +439,24 @@ function resolvePrecheckWithinRoot(within: WatchLocator[]): {
   return { ok: true, root: rootEl };
 }
 
+function isPrecheckVisible(el: Element): boolean {
+  try {
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return false;
+    const style = window.getComputedStyle(el);
+    return style.display !== "none" && style.visibility !== "hidden";
+  } catch {
+    return true;
+  }
+}
+
+/** Same preference Run applies: a single visible match wins over hidden duplicates. */
+function pickPrecheckMatches(matches: Element[]): Element[] {
+  if (matches.length <= 1) return matches;
+  const visible = matches.filter(isPrecheckVisible);
+  return visible.length > 0 ? visible : matches;
+}
+
 export function precheckStepLocators(
   locators: WatchLocator[],
   within?: WatchLocator[]
@@ -458,7 +476,7 @@ export function precheckStepLocators(
 
   let fallback: { matchCount: number; matchedLocator: WatchLocator } | undefined;
   for (const loc of locators) {
-    const matches = resolvePrecheckMatches(loc, scopeRoot);
+    const matches = pickPrecheckMatches(resolvePrecheckMatches(loc, scopeRoot));
     if (matches.length === 1) {
       return { matchCount: 1, unique: true, matchedLocator: loc };
     }
