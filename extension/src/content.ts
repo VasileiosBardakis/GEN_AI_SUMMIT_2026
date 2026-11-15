@@ -1,9 +1,10 @@
 import type { Event, EventMeta, EventType } from "@gen/shared";
 import { executeStep } from "./hands/execute.ts";
 import { extractGridContext, extractMenuContext, extractTarget } from "./locators.ts";
+import { captureSourceSummary, captureTargetSummary } from "./page-summary.ts";
 import { inspectElementPrivacy, sanitizeUrl, sanitizeValue } from "./privacy.ts";
 import { buildDeciderSuggestion, createSuggestionEngine } from "./suggestion.ts";
-import type { FlowNode, Suggestion } from "./suggestion.ts";
+import type { FlowNode, Suggestion, SuggestionParam } from "./suggestion.ts";
 import { suggestionToOptimization } from "./library.ts";
 import type { ActionScript } from "./types.ts";
 
@@ -74,6 +75,8 @@ function uuid(): string {
 }
 
 const SUGGESTION_HOST_ID = "__eyes_suggestion_host__";
+const WATCH_BAR_HOST_ID = "__eyes_watch_bar__";
+const WATCH_HIGHLIGHT_ID = "__eyes_watch_highlight__";
 
 function extensionAssetUrl(assetPath: string): string | undefined {
   const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
@@ -208,7 +211,27 @@ function renderReplay(suggestion: Suggestion): string {
 }
 
 function isEyesUiTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest("[data-eyes-ui]"));
+  const isEl =
+    (typeof Element !== "undefined" && target instanceof Element) ||
+    (typeof HTMLElement !== "undefined" && target instanceof HTMLElement);
+  if (!isEl) return false;
+  const el = target as Element;
+  if (typeof el.closest === "function" && el.closest("[data-eyes-ui]")) {
+    return true;
+  }
+  if (typeof el.getRootNode === "function") {
+    const root = el.getRootNode();
+    if (
+      typeof ShadowRoot !== "undefined" &&
+      root instanceof ShadowRoot &&
+      root.host &&
+      typeof root.host.hasAttribute === "function" &&
+      root.host.hasAttribute("data-eyes-ui")
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function sendLibraryMessage(message: unknown): void {
@@ -224,8 +247,324 @@ function sendLibraryMessage(message: unknown): void {
   }
 }
 
+function emitStopRunMessage(): void {
+  const chromeGlobal = (globalThis as Record<string, unknown>).chrome as
+    | { runtime?: { sendMessage?: (msg: unknown) => void } }
+    | undefined;
+  if (typeof chromeGlobal?.runtime?.sendMessage === "function") {
+    try {
+      chromeGlobal.runtime.sendMessage({ kind: "HANDS_STOP_RUN" });
+    } catch {
+      // ignore invalidated runtime
+    }
+  }
+}
+
+interface WatchLocator {
+  kind: string;
+  value: string;
+}
+
+let activeHighlightedEl: Element | null = null;
+
+function cssEscapeIdentLocal(val: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(val);
+  }
+  return val.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~ ])/g, "\\$1");
+}
+
+function collapseWsLocal(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function resolvePrecheckMatches(locator: WatchLocator): Element[] {
+  if (typeof document === "undefined") return [];
+  const kind = locator.kind;
+  const raw = locator.value?.trim() ?? "";
+  if (!raw) return [];
+
+  let found: Element[] = [];
+  try {
+    if (kind === "css") {
+      found = Array.from(document.querySelectorAll(raw));
+    } else if (kind === "testid") {
+      found = Array.from(
+        document.querySelectorAll(`[data-testid="${cssEscapeIdentLocal(raw)}"]`)
+      );
+    } else if (kind === "xpath" && typeof XPathResult !== "undefined") {
+      const snap = document.evaluate(
+        raw,
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null
+      );
+      for (let i = 0; i < snap.snapshotLength; i += 1) {
+        const node = snap.snapshotItem(i);
+        if (typeof Element !== "undefined" && node instanceof Element) {
+          found.push(node);
+        }
+      }
+    } else if (kind === "aria") {
+      if (raw.startsWith("[")) {
+        found = Array.from(document.querySelectorAll(raw));
+      } else {
+        const roleMatch = /^([a-z]+)\[\s*name\s*=\s*["']([\s\S]*?)["']\s*\]$/i.exec(raw);
+        const wantedRole = roleMatch ? roleMatch[1].toLowerCase() : null;
+        const wantedName = collapseWsLocal(
+          roleMatch ? roleMatch[2].replace(/\\(["'\\])/g, "$1") : raw
+        ).toLowerCase();
+        if (wantedName) {
+          const candidates = Array.from(
+            document.querySelectorAll(
+              'input, textarea, select, button, a, summary, [role], [aria-label], [aria-labelledby], [contenteditable="true"]'
+            )
+          );
+          found = candidates.filter((el) => {
+            if (wantedRole) {
+              const tag = el.tagName.toLowerCase();
+              const explicitRole = el.getAttribute("role")?.toLowerCase();
+              const inputType = (el.getAttribute("type") || "text").toLowerCase();
+              const implicit =
+                explicitRole ||
+                (tag === "button"
+                  ? "button"
+                  : tag === "a"
+                    ? "link"
+                    : tag === "select"
+                      ? "combobox"
+                      : tag === "textarea"
+                        ? "textbox"
+                        : tag === "input"
+                          ? inputType === "checkbox"
+                            ? "checkbox"
+                            : inputType === "radio"
+                              ? "radio"
+                              : inputType === "search"
+                                ? "searchbox"
+                                : inputType === "submit" || inputType === "button"
+                                  ? "button"
+                                  : "textbox"
+                          : "");
+              const matchRole =
+                implicit === wantedRole ||
+                ((implicit === "textbox" || implicit === "searchbox") &&
+                  (wantedRole === "textbox" || wantedRole === "searchbox"));
+              if (!matchRole) return false;
+            }
+            const names = [
+              el.getAttribute("aria-label") || "",
+              el.getAttribute("placeholder") || "",
+              el.getAttribute("title") || "",
+              collapseWsLocal(el.textContent || ""),
+            ]
+              .map((n) => collapseWsLocal(n).toLowerCase())
+              .filter(Boolean);
+            return names.some((n) => n === wantedName);
+          });
+        }
+      }
+    } else if (kind === "text") {
+      const wantedLower = collapseWsLocal(raw).toLowerCase();
+      const submits = Array.from(
+        document.querySelectorAll('input[type="submit"], input[type="button"], input[type="reset"]')
+      ).filter((el) => {
+        const val = collapseWsLocal((el as HTMLInputElement).value || "").toLowerCase();
+        return val === wantedLower;
+      });
+      const textEls = Array.from(document.querySelectorAll("*")).filter(
+        (el) => collapseWsLocal(el.textContent || "").toLowerCase() === wantedLower
+      );
+      found = [...submits, ...textEls];
+    }
+  } catch {
+    return [];
+  }
+
+  return found.filter((el) => !isEyesUiTarget(el));
+}
+
+export function precheckStepLocators(locators: WatchLocator[]): {
+  matchCount: number;
+  unique: boolean;
+  matchedLocator?: WatchLocator;
+} {
+  let fallback: { matchCount: number; matchedLocator: WatchLocator } | undefined;
+  for (const loc of locators) {
+    const matches = resolvePrecheckMatches(loc);
+    if (matches.length === 1) {
+      return { matchCount: 1, unique: true, matchedLocator: loc };
+    }
+    if (matches.length > 1 && !fallback) {
+      fallback = { matchCount: matches.length, matchedLocator: loc };
+    }
+  }
+  if (fallback) {
+    return { matchCount: fallback.matchCount, unique: false, matchedLocator: fallback.matchedLocator };
+  }
+  return { matchCount: 0, unique: false };
+}
+
+export function clearWatchOverlay(): void {
+  if (activeHighlightedEl && typeof activeHighlightedEl.removeAttribute === "function") {
+    activeHighlightedEl.removeAttribute("data-eyes-highlighted");
+  }
+  activeHighlightedEl = null;
+  if (typeof document === "undefined") return;
+  document.getElementById(WATCH_HIGHLIGHT_ID)?.remove();
+  document.getElementById(WATCH_BAR_HOST_ID)?.remove();
+}
+
+export interface WatchOverlayOptions {
+  name?: string;
+  stepIndex?: number;
+  totalSteps?: number;
+  label?: string;
+  status?: string;
+  target?: WatchLocator;
+  locators?: WatchLocator[];
+  pauseBeforeSubmit?: boolean;
+  pauseNotice?: string;
+}
+
+export function showWatchOverlay(options: WatchOverlayOptions = {}): void {
+  if (typeof document === "undefined" || !document.documentElement) return;
+  if (window.top !== window.self) return;
+
+  if (activeHighlightedEl && typeof activeHighlightedEl.removeAttribute === "function") {
+    activeHighlightedEl.removeAttribute("data-eyes-highlighted");
+  }
+  activeHighlightedEl = null;
+  document.getElementById(WATCH_HIGHLIGHT_ID)?.remove();
+
+  const candidateLocators: WatchLocator[] = Array.isArray(options.locators)
+    ? options.locators
+    : options.target
+      ? [options.target]
+      : [];
+
+  let targetEl: Element | null = null;
+  for (const loc of candidateLocators) {
+    const matches = resolvePrecheckMatches(loc);
+    if (matches.length > 0) {
+      targetEl = matches[0];
+      break;
+    }
+  }
+
+  if (targetEl) {
+    if (typeof targetEl.setAttribute === "function") {
+      targetEl.setAttribute("data-eyes-highlighted", "true");
+    }
+    activeHighlightedEl = targetEl;
+    const highlight = document.createElement("div");
+    highlight.id = WATCH_HIGHLIGHT_ID;
+    highlight.setAttribute("data-eyes-ui", "true");
+    highlight.style.position = "fixed";
+    highlight.style.pointerEvents = "none";
+    highlight.style.border = "2px solid #8a5a2b";
+    highlight.style.background = "rgba(138, 90, 43, 0.12)";
+    highlight.style.borderRadius = "6px";
+    highlight.style.boxSizing = "border-box";
+    highlight.style.zIndex = "2147483646";
+    if (typeof targetEl.getBoundingClientRect === "function") {
+      const rect = targetEl.getBoundingClientRect();
+      highlight.style.top = `${Math.max(0, rect.top - 3)}px`;
+      highlight.style.left = `${Math.max(0, rect.left - 3)}px`;
+      highlight.style.width = `${Math.max(0, rect.width + 6)}px`;
+      highlight.style.height = `${Math.max(0, rect.height + 6)}px`;
+    }
+    document.documentElement.appendChild(highlight);
+  }
+
+  document.getElementById(WATCH_BAR_HOST_ID)?.remove();
+  const barHost = document.createElement("div");
+  barHost.id = WATCH_BAR_HOST_ID;
+  barHost.setAttribute("data-eyes-ui", "true");
+  barHost.style.position = "fixed";
+  barHost.style.top = "12px";
+  barHost.style.right = "12px";
+  barHost.style.zIndex = "2147483647";
+
+  const title = (options.name || "Eyes").trim();
+  const stepText =
+    typeof options.stepIndex === "number" && typeof options.totalSteps === "number"
+      ? `Step ${options.stepIndex + 1} of ${options.totalSteps}`
+      : options.status || options.label || "Watching run";
+  const pauseText =
+    options.pauseNotice ||
+    (options.pauseBeforeSubmit ? "Paused before submit — you click the final button." : undefined);
+
+  const shadow = barHost.attachShadow({ mode: "open" });
+  shadow.innerHTML = `
+    <style>
+      :host { all: initial; }
+      .bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        border: 1px solid #ccb08d;
+        border-radius: 10px;
+        background: #faf8f4;
+        color: #1a1917;
+        box-shadow: 0 10px 28px rgba(26, 25, 23, 0.18);
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 12px;
+      }
+      .info {
+        display: grid;
+        gap: 2px;
+      }
+      .title {
+        font-weight: 600;
+        color: #1a1917;
+      }
+      .sub {
+        color: #57524b;
+        font-size: 11px;
+      }
+      .pause {
+        color: #8a5a2b;
+        font-size: 11px;
+        font-weight: 500;
+      }
+      .stop {
+        padding: 5px 10px;
+        border: 1px solid #8a2b2b;
+        border-radius: 6px;
+        background: #a33232;
+        color: #fff;
+        font: inherit;
+        font-size: 11.5px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .stop:hover {
+        background: #8a2626;
+      }
+    </style>
+    <div class="bar" data-eyes-watch-bar role="status" aria-live="polite">
+      <div class="info">
+        <span class="title">${escapeHtml(title)}</span>
+        <span class="sub">${escapeHtml(stepText)}</span>
+        ${pauseText ? `<span class="pause" data-eyes-watch-pause>${escapeHtml(pauseText)}</span>` : ""}
+      </div>
+      <button type="button" class="stop" data-eyes-watch-stop>Stop</button>
+    </div>
+  `;
+
+  shadow.querySelector("[data-eyes-watch-stop]")?.addEventListener("click", () => {
+    emitStopRunMessage();
+    clearWatchOverlay();
+  });
+
+  document.documentElement.appendChild(barHost);
+}
+
 export interface ShowSuggestionOptions {
-  onDecision?: (decision: "approved" | "dismissed") => void;
+  onDecision?: (decision: "approved" | "dismissed", paramValues?: Record<string, string>) => void;
   script?: ActionScript;
   force?: boolean;
 }
@@ -249,14 +588,21 @@ export function showSuggestion(
   lastSuggestionShownAt = Date.now();
 
   let settled = false;
-  const resolveDecision = (decision: "approved" | "dismissed"): void => {
+  const resolveDecision = (
+    decision: "approved" | "dismissed",
+    paramValues?: Record<string, string>
+  ): void => {
     if (settled) return;
     settled = true;
     if (activePopupDismiss === dismiss) {
       activePopupDismiss = null;
     }
     console.log("[eyes-content] decider decision:", decision, suggestion.id);
-    options.onDecision?.(decision);
+    if (paramValues && Object.keys(paramValues).length > 0) {
+      options.onDecision?.(decision, paramValues);
+    } else {
+      options.onDecision?.(decision);
+    }
   };
 
   const appHost = typeof location !== "undefined" ? location.hostname || "Browser" : "Browser";
@@ -299,10 +645,24 @@ export function showSuggestion(
     </svg>
   `;
 
-  const primaryButtonLabel = suggestion.kind === "text" ? "Insert" : "Run";
-  const successTitle = suggestion.kind === "text" ? "Inserted." : "Running.";
-  const successSubtitle =
-    suggestion.kind === "text"
+  const isSaveOnly = suggestion.runMode === "save_only";
+  const params = Array.isArray(suggestion.params) ? suggestion.params : [];
+  const pauseNotice =
+    suggestion.pauseNotice ||
+    (suggestion.pauseBeforeSubmit
+      ? "Pauses before submit — you click the final button."
+      : undefined);
+  const primaryButtonLabel =
+    suggestion.primaryLabel ||
+    (isSaveOnly ? "Save skill" : suggestion.kind === "text" ? "Insert" : "Run");
+  const successTitle = isSaveOnly
+    ? "Saved."
+    : suggestion.kind === "text"
+      ? "Inserted."
+      : "Running.";
+  const successSubtitle = isSaveOnly
+    ? "Skill saved to your Eyes library."
+    : suggestion.kind === "text"
       ? "Text pasted into the active field."
       : "Eyes is executing this shortcut now.";
 
@@ -589,6 +949,38 @@ export function showSuggestion(
         margin: 6px 0;
         background: var(--line);
       }
+      .pause-notice {
+        margin-top: 8px;
+        padding: 6px 8px;
+        border: 1px solid var(--brown-border);
+        border-radius: 6px;
+        background: var(--surface-eyes);
+        color: var(--brown);
+        font-size: 11px;
+        font-weight: 500;
+      }
+      .params-block {
+        display: grid;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .param-field {
+        display: grid;
+        gap: 3px;
+        font-size: 10.5px;
+        color: var(--ink-2);
+        font-weight: 500;
+      }
+      .param-field input {
+        width: 100%;
+        padding: 5px 7px;
+        border: 1px solid var(--line-strong);
+        border-radius: 5px;
+        background: var(--surface-node);
+        color: var(--ink);
+        font: inherit;
+        font-size: 11.5px;
+      }
       .footer {
         display: flex;
         flex-wrap: wrap;
@@ -671,11 +1063,25 @@ export function showSuggestion(
         <div class="preview ${previewClass}">${escapeHtml(suggestion.preview)}</div>
         ${renderReplay(suggestion)}
         ${renderFlows(suggestion)}
+        ${pauseNotice ? `<div class="pause-notice" data-eyes-pause-notice>${escapeHtml(pauseNotice)}</div>` : ""}
+        ${
+          params.length > 0
+            ? `<div class="params-block" data-eyes-params>${params
+                .map(
+                  (param) => `
+          <label class="param-field">
+            <span>${escapeHtml(param.name)}</span>
+            <input type="text" data-eyes-param="${escapeHtml(param.name)}" placeholder="${escapeHtml(param.example ?? `Enter ${param.name}`)}" value="" />
+          </label>`
+                )
+                .join("")}</div>`
+            : ""
+        }
         <div class="footer">
           <div class="meta">${escapeHtml(suggestion.meta)}</div>
           <div class="actions">
             <button class="ghost" type="button" data-eyes-dismiss>Not now</button>
-            <button class="primary" type="button" data-eyes-primary>${primaryButtonLabel}</button>
+            <button class="primary" type="button" data-eyes-primary>${escapeHtml(primaryButtonLabel)}</button>
           </div>
         </div>
       </div>
@@ -695,15 +1101,24 @@ export function showSuggestion(
     button.addEventListener("click", dismiss);
   }
   shadow.querySelector("[data-eyes-primary]")?.addEventListener("click", () => {
+    let collectedParams: Record<string, string> | undefined;
+    if (params.length > 0) {
+      collectedParams = {};
+      for (const inputEl of Array.from(shadow.querySelectorAll("[data-eyes-param]"))) {
+        const paramName = inputEl.getAttribute("data-eyes-param");
+        if (!paramName) continue;
+        collectedParams[paramName] = (inputEl as unknown as { value?: string }).value ?? "";
+      }
+    }
     const activeItem = suggestionToOptimization(suggestion, { app: appHost, status: "active" });
     if (options.script) activeItem.script = options.script;
     sendLibraryMessage({
       kind: "EYES_ACTIVATE_OPTIMIZATION",
       id: suggestion.id,
       item: activeItem,
-      recordRun: true,
+      recordRun: !isSaveOnly,
     });
-    resolveDecision("approved");
+    resolveDecision("approved", collectedParams);
     const content = shadow.querySelector<HTMLElement>("[data-eyes-content]");
     const success = shadow.querySelector<HTMLElement>("[data-eyes-success]");
     if (content) content.hidden = true;
@@ -1270,8 +1685,10 @@ export function setupEventListeners(): void {
           currentVal.length >= 4 &&
           durationMs < 80);
 
+      const targetSummary = captureTargetSummary(targetEl);
       emit("input", targetEl, currentVal, {
         grid: sess?.initialValue ? { prevValue: sess.initialValue } : undefined,
+        ...(targetSummary ? { pageSummary: { target: targetSummary } } : {}),
         typing: {
           inputType: ie.inputType || "insertText",
           data: privacyCheck.isSensitiveField ? "[REDACTED]" : ie.data ?? undefined,
@@ -1297,8 +1714,46 @@ export function setupEventListeners(): void {
       const sess = typingSessions.get(targetEl);
       const privacyCheck = inspectElementPrivacy(targetEl);
       const currentVal = getElementValue(targetEl) ?? "";
-      emit("change", targetEl, currentVal, {
+      const tag = targetEl.tagName.toLowerCase();
+      const isInputEl =
+        (typeof HTMLInputElement !== "undefined" && targetEl instanceof HTMLInputElement) ||
+        tag === "input";
+      const inputType = isInputEl
+        ? (
+            (targetEl as HTMLInputElement).type ||
+            targetEl.getAttribute("type") ||
+            ""
+          ).toLowerCase()
+        : "";
+      const isCheckable = isInputEl && (inputType === "checkbox" || inputType === "radio");
+      const isSelectEl =
+        (typeof HTMLSelectElement !== "undefined" && targetEl instanceof HTMLSelectElement) ||
+        tag === "select";
+
+      let selectedLabel: string | undefined;
+      if (isSelectEl) {
+        const sel = targetEl as HTMLSelectElement;
+        const opt = sel.selectedOptions?.[0] ?? sel.options?.[sel.selectedIndex];
+        const rawLabel = (opt?.label || opt?.textContent || "").replace(/\s+/g, " ").trim();
+        if (rawLabel) {
+          selectedLabel = sanitizeValue(rawLabel, privacyCheck).value;
+        }
+      }
+
+      const checkedVal = Boolean((targetEl as HTMLInputElement).checked);
+      const emitVal = isInputEl && inputType === "checkbox" ? String(checkedVal) : currentVal;
+      const targetSummary = captureTargetSummary(targetEl);
+
+      emit("change", targetEl, emitVal, {
         grid: sess?.initialValue ? { prevValue: sess.initialValue } : undefined,
+        ...(isCheckable ? { checked: checkedVal } : {}),
+        ...(isSelectEl
+          ? {
+              selectedValue: currentVal,
+              ...(selectedLabel ? { selectedLabel } : {}),
+            }
+          : {}),
+        ...(targetSummary ? { pageSummary: { target: targetSummary } } : {}),
         typing: {
           inputType: sess?.lastInputType || "change",
           keystrokeCount: sess?.keystrokeCount ?? 0,
@@ -1310,7 +1765,9 @@ export function setupEventListeners(): void {
           inputTypeAttr: targetEl.getAttribute("type") || undefined,
         },
       });
-      recordCommittedText(targetEl, currentVal, privacyCheck);
+      if (!isCheckable && !isSelectEl) {
+        recordCommittedText(targetEl, currentVal, privacyCheck);
+      }
     },
     true
   );
@@ -1361,9 +1818,11 @@ export function setupEventListeners(): void {
               sess.lastInputType !== "insertFromPaste" &&
               Math.abs(currentVal.length - sess.initialValue.length) >= 4 &&
               durationMs < 80);
+          const targetSummary = captureTargetSummary(targetEl);
           emit("input", targetEl, currentVal, {
             subType: "blur_commit",
             grid: sess.initialValue ? { prevValue: sess.initialValue } : undefined,
+            ...(targetSummary ? { pageSummary: { target: targetSummary } } : {}),
             typing: {
               inputType: sess.lastInputType || "insertText",
               keystrokeCount: sess.keystrokeCount,
@@ -1443,11 +1902,33 @@ export function setupEventListeners(): void {
         inspectElementPrivacy(e.target as Element)
       );
       const grid = extractGridContext(e.target as HTMLElement, cleanText);
+      const rawCopyEl =
+        e.target instanceof HTMLElement
+          ? e.target
+          : typeof Node !== "undefined" && e.target instanceof Node
+            ? e.target.parentElement
+            : null;
+      let sourceSummary = captureSourceSummary(rawCopyEl);
+      if (!sourceSummary && typeof window !== "undefined") {
+        const anchorNode = window.getSelection?.()?.anchorNode ?? null;
+        const selEl =
+          anchorNode instanceof HTMLElement
+            ? anchorNode
+            : typeof Node !== "undefined" && anchorNode instanceof Node
+              ? anchorNode.parentElement
+              : null;
+        if (selEl) {
+          sourceSummary = captureSourceSummary(selEl);
+        }
+      }
       emit(
         "copy",
         e.target,
         cleanText,
-        { privacy },
+        {
+          privacy,
+          ...(sourceSummary ? { pageSummary: { source: sourceSummary } } : {}),
+        },
         {
           fromApp: location.hostname || "local-page",
           fromUrl: sanitizeUrl(location.href).url,
@@ -1493,24 +1974,28 @@ export function setupEventListeners(): void {
       const pastedText = e.clipboardData?.getData("text/plain") || "";
       const elCheck = inspectElementPrivacy(e.target as Element);
       const { value: cleanText, privacy } = sanitizeValue(pastedText, elCheck);
+      const pasteEl =
+        resolveEditableField(e.target) ??
+        (e.target instanceof HTMLElement
+          ? e.target
+          : typeof Node !== "undefined" && e.target instanceof Node
+            ? e.target.parentElement
+            : null);
+      const targetSummary = captureTargetSummary(pasteEl);
       emit(
         "paste",
         e.target,
         cleanText,
-        { privacy },
+        {
+          privacy,
+          ...(targetSummary ? { pageSummary: { target: targetSummary } } : {}),
+        },
         {
           toApp: location.hostname || "local-page",
           text: cleanText,
           textHash: privacy.valueHash,
         }
       );
-      const pasteEl =
-        resolveEditableField(e.target) ??
-        (e.target instanceof HTMLElement
-          ? e.target
-          : e.target instanceof Node
-            ? e.target.parentElement
-            : null);
       recordCommittedText(pasteEl, cleanText, elCheck, true);
     },
     true
@@ -1821,6 +2306,7 @@ function setupHandsTracker(): void {
 
   const onFieldInteraction = (e: globalThis.Event): void => {
     const first = typeof e.composedPath === "function" ? e.composedPath()[0] : e.target;
+    if (isEyesUiTarget(first ?? e.target)) return;
     recordCandidate(first ?? e.target, true);
   };
 
@@ -1830,6 +2316,7 @@ function setupHandsTracker(): void {
   }
 
   win.__HANDS_CLEANUP__ = () => {
+    clearWatchOverlay();
     for (const evtName of trackedEvents) {
       document.removeEventListener(evtName, onFieldInteraction, true);
     }
@@ -1846,6 +2333,18 @@ function setupHandsTracker(): void {
       name?: string;
       solution?: string;
       script?: ActionScript;
+      pauseBeforeSubmit?: boolean;
+      runMode?: "run" | "save_only";
+      params?: SuggestionParam[];
+      primaryLabel?: string;
+      pauseNotice?: string;
+      target?: WatchLocator | WatchLocator[];
+      locators?: WatchLocator[];
+      step?: { target?: WatchLocator | WatchLocator[] };
+      stepIndex?: number;
+      totalSteps?: number;
+      label?: string;
+      status?: string;
     };
 
     if (msg.kind === "EYES_SHOW_DECIDER") {
@@ -1863,13 +2362,79 @@ function setupHandsTracker(): void {
         name: typeof msg.name === "string" ? msg.name : "",
         solution: msg.solution,
         script: msg.script,
+        pauseBeforeSubmit:
+          typeof msg.pauseBeforeSubmit === "boolean" ? msg.pauseBeforeSubmit : undefined,
+        runMode: msg.runMode === "run" || msg.runMode === "save_only" ? msg.runMode : undefined,
+        params: Array.isArray(msg.params) ? msg.params : undefined,
+        primaryLabel: typeof msg.primaryLabel === "string" ? msg.primaryLabel : undefined,
+        pauseNotice: typeof msg.pauseNotice === "string" ? msg.pauseNotice : undefined,
       });
       showSuggestion(suggestion, {
         force: true,
         script: msg.script,
-        onDecision: (decision) => sendResponse({ ok: true, decision }),
+        onDecision: (decision, paramValues) =>
+          sendResponse({
+            ok: true,
+            decision,
+            ...(paramValues && Object.keys(paramValues).length > 0 ? { params: paramValues } : {}),
+          }),
       });
       return true;
+    }
+
+    if (msg.kind === "EYES_PRECHECK_STEP") {
+      const candidateLocators: WatchLocator[] = Array.isArray(msg.locators)
+        ? msg.locators
+        : Array.isArray(msg.target)
+          ? msg.target
+          : msg.target
+            ? [msg.target]
+            : Array.isArray(msg.step?.target)
+              ? msg.step.target
+              : msg.step?.target
+                ? [msg.step.target]
+                : [];
+      if (candidateLocators.length === 0) {
+        sendResponse({ ok: false, matchCount: 0, unique: false, error: "No locators provided" });
+        return false;
+      }
+      const precheck = precheckStepLocators(candidateLocators);
+      sendResponse({ ok: true, ...precheck });
+      return false;
+    }
+
+    if (
+      msg.kind === "EYES_WATCH_START" ||
+      msg.kind === "EYES_WATCH_STEP" ||
+      msg.kind === "EYES_WATCH_HIGHLIGHT"
+    ) {
+      if (window.top !== window.self) return false;
+      const singleTarget = !Array.isArray(msg.target) ? msg.target : undefined;
+      const locators = Array.isArray(msg.locators)
+        ? msg.locators
+        : Array.isArray(msg.target)
+          ? msg.target
+          : undefined;
+      showWatchOverlay({
+        name: typeof msg.name === "string" ? msg.name : undefined,
+        stepIndex: typeof msg.stepIndex === "number" ? msg.stepIndex : undefined,
+        totalSteps: typeof msg.totalSteps === "number" ? msg.totalSteps : undefined,
+        label: typeof msg.label === "string" ? msg.label : undefined,
+        status: typeof msg.status === "string" ? msg.status : undefined,
+        target: singleTarget,
+        locators,
+        pauseBeforeSubmit:
+          typeof msg.pauseBeforeSubmit === "boolean" ? msg.pauseBeforeSubmit : undefined,
+        pauseNotice: typeof msg.pauseNotice === "string" ? msg.pauseNotice : undefined,
+      });
+      sendResponse({ ok: true });
+      return false;
+    }
+
+    if (msg.kind === "EYES_WATCH_STOP") {
+      clearWatchOverlay();
+      sendResponse({ ok: true });
+      return false;
     }
 
     if (msg.kind !== "HANDS_INSERT_LAST_FIELD" || typeof msg.text !== "string") return false;
