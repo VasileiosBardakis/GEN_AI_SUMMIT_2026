@@ -154,9 +154,9 @@ const WORKFLOW_JUDGE_QUESTIONS: IrisQuestions = {
   worthAutomating: {
     type: "noul",
     instructions:
-      "Is this workflow worth automating for the user based on repetition, structure, and practical time savings?",
+      "Is this workflow worth automating for the user based on repetition, structure, and practical time savings? Same text pasted repeatedly into a field (even with clears in between) = snippet candidate, which IS worth automating.",
     criteria: {
-      true: "The workflow is repetitive, structured, and worth automating.",
+      true: "The workflow is repetitive and worth automating, including same text pasted repeatedly (snippet candidate) or a repeated multi-step workflow.",
       false: "The workflow is one-off, unstable, trivial, or unsuitable for automation.",
     },
   },

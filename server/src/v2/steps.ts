@@ -53,13 +53,35 @@ export function eventsToSteps(
         const target = formatTarget(ev.target);
         const key = targetKey(ev.target);
         const prev = steps[steps.length - 1];
+        const inputType = (ev.meta?.typing as { inputType?: string } | undefined)?.inputType;
+
+        if (
+          prev &&
+          prev.action === "paste" &&
+          prev.session === ev.session &&
+          lastTargetKey !== "" &&
+          lastTargetKey === key &&
+          inputType === "insertFromPaste" &&
+          prev.value === masked
+        ) {
+          if (url !== undefined && prev.url === undefined) prev.url = url;
+          if (pageSummary !== undefined && prev.pageSummary === undefined) {
+            prev.pageSummary = pageSummary;
+          }
+          if (key !== "") {
+            getSessionFills(ev.session).set(key, masked);
+          }
+          lastTargetKey = key;
+          break;
+        }
 
         if (
           prev &&
           prev.action === "fill" &&
           prev.session === ev.session &&
           lastTargetKey !== "" &&
-          lastTargetKey === key
+          lastTargetKey === key &&
+          !(masked === "" && (prev.value ?? "") !== "")
         ) {
           prev.value = masked;
           if (url !== undefined) prev.url = url;
@@ -308,11 +330,11 @@ function resolveStepHost(step: Pick<V2Step, "app" | "url">): string {
   );
 }
 
-export function buildMeaningfulWindow(
+export function selectMeaningfulWindow(
   steps: V2Step[],
   events?: Event[],
   maxSteps = 40,
-): MeaningfulWindow {
+): { window: MeaningfulWindow; steps: V2Step[]; events: Event[] } {
   const labels = matchStepLabels(steps, events);
   const kept: Array<{
     step: V2Step;
@@ -406,9 +428,45 @@ export function buildMeaningfulWindow(
     }
   }
 
+  let selectedSteps: V2Step[];
+  if (kept.length <= cap) {
+    selectedSteps = steps;
+  } else {
+    const startRawIndex = windowItems[0]?.rawIndex ?? 0;
+    const prefixTransition =
+      startRawIndex > 0 &&
+      TRANSITION_ACTIONS.has(steps[startRawIndex - 1].action) &&
+      resolveStepHost(steps[startRawIndex - 1]) === windowItems[0].host
+        ? [steps[startRawIndex - 1]]
+        : [];
+    selectedSteps = [
+      ...prefixTransition,
+      ...windowItems.map((item) => item.step),
+    ];
+  }
+  const minTs = selectedSteps[0]?.ts;
+  const selectedEvents =
+    events && minTs !== undefined
+      ? events.filter(
+          (ev) => V2_STEP_EVENT_TYPES.has(ev.type) && ev.ts >= minTs,
+        )
+      : [];
+
   return {
-    meaningfulCount,
-    steps: windowSteps,
-    gaps,
+    window: {
+      meaningfulCount,
+      steps: windowSteps,
+      gaps,
+    },
+    steps: selectedSteps,
+    events: selectedEvents,
   };
+}
+
+export function buildMeaningfulWindow(
+  steps: V2Step[],
+  events?: Event[],
+  maxSteps = 40,
+): MeaningfulWindow {
+  return selectMeaningfulWindow(steps, events, maxSteps).window;
 }

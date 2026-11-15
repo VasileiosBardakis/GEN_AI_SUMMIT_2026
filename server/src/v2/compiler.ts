@@ -16,6 +16,7 @@ import {
 import { eventsToSteps, type PiiMap, type V2Step } from "./steps.ts";
 import {
   isPlaceholderHost,
+  isSameStepTarget,
   normalizeHost,
   validateCompiledWorkflow,
   type CompiledLeafStep,
@@ -285,6 +286,25 @@ type SourceColumnMeta = {
   }>;
 };
 
+type SourceCellEntry = {
+  host: string;
+  containerId?: string;
+  rowIndex: number;
+  colIndex: number;
+  colKey: string;
+  text: string;
+  locators: Locator[];
+  invariantLocators: Locator[];
+};
+
+type CopySourceMatch = {
+  sourceTargetId: string;
+  withinId?: string;
+  colKey: string;
+  cellLocators: Locator[];
+  invariantLocators: Locator[];
+};
+
 type PromptContext = {
   allSteps: EnrichedStep[];
   indexedSteps: EnrichedStep[];
@@ -292,6 +312,8 @@ type PromptContext = {
   lists: Map<string, PageSummaryList>;
   items: Map<string, PageSummaryListItem>;
   sourceMetaByContainerId: Map<string, SourceColumnMeta>;
+  copySourceMatches: Map<number, CopySourceMatch>;
+  copyNoSourceSteps: Set<number>;
   summaryViews: Array<{ host: string; viewKey: string; content: string }>;
 };
 
@@ -574,6 +596,8 @@ function extractPageSummaryData(
   lists: Map<string, PageSummaryList>;
   items: Map<string, PageSummaryListItem>;
   sourceMetaByContainerId: Map<string, SourceColumnMeta>;
+  sourceCells: SourceCellEntry[];
+  nextTargetSeq: number;
   summaryViews: Array<{ host: string; viewKey: string; content: string }>;
 } {
   const latestByView = new Map<
@@ -672,6 +696,7 @@ function extractPageSummaryData(
   const lists = new Map<string, PageSummaryList>();
   const items = new Map<string, PageSummaryListItem>();
   const sourceMetaByContainerId = new Map<string, SourceColumnMeta>();
+  const sourceCells: SourceCellEntry[] = [];
   const summaryViews: Array<{ host: string; viewKey: string; content: string }> = [];
 
   let targetSeq = 0;
@@ -917,6 +942,9 @@ function extractPageSummaryData(
 
         const rawRows = Array.isArray(src.rows) ? src.rows : [];
         const parsedRows: Array<{ fields: Record<string, string> }> = [];
+        const rawCellMatrix: Array<
+          Array<{ colIndex: number; text: string; locators: Locator[] }>
+        > = [];
         const columnAccum: Array<{
           texts: string[];
           locators: Locator[];
@@ -928,6 +956,11 @@ function extractPageSummaryData(
           const rowRec = rawRow as Record<string, unknown>;
           const rawCells = Array.isArray(rowRec.cells) ? rowRec.cells : [];
           const fields: Record<string, string> = {};
+          const rowCellEntries: Array<{
+            colIndex: number;
+            text: string;
+            locators: Locator[];
+          }> = [];
           for (let c = 0; c < rawCells.length; c++) {
             const cell = rawCells[c];
             if (!cell || typeof cell !== "object") continue;
@@ -946,6 +979,7 @@ function extractPageSummaryData(
             const colEntry = columnAccum[c];
             if (text) colEntry.texts.push(text);
             const cellLocs = parseSummaryLocators(cellRec.locators);
+            rowCellEntries.push({ colIndex: c, text, locators: cellLocs });
             const seenInCell = new Set<string>();
             for (const loc of cellLocs) {
               colEntry.locators.push(loc);
@@ -963,6 +997,7 @@ function extractPageSummaryData(
           }
           if (Object.keys(fields).length > 0) {
             parsedRows.push({ fields });
+            rawCellMatrix.push(rowCellEntries);
           }
         }
 
@@ -1011,6 +1046,23 @@ function extractPageSummaryData(
             },
           );
           sourceMetaByContainerId.set(containerId, { rowTag, columns });
+          for (let r = 0; r < rawCellMatrix.length; r++) {
+            for (const cellEntry of rawCellMatrix[r]) {
+              if (cellEntry.text || cellEntry.locators.length > 0) {
+                sourceCells.push({
+                  host,
+                  containerId,
+                  rowIndex: r,
+                  colIndex: cellEntry.colIndex,
+                  colKey: `col${cellEntry.colIndex + 1}`,
+                  text: cellEntry.text,
+                  locators: cellEntry.locators,
+                  invariantLocators:
+                    columns[cellEntry.colIndex]?.invariantLocators ?? [],
+                });
+              }
+            }
+          }
         }
       }
 
@@ -1053,7 +1105,117 @@ function extractPageSummaryData(
     }
   }
 
-  return { targets, lists, items, sourceMetaByContainerId, summaryViews };
+  return {
+    targets,
+    lists,
+    items,
+    sourceMetaByContainerId,
+    sourceCells,
+    nextTargetSeq: targetSeq,
+    summaryViews,
+  };
+}
+
+function isCopyButtonStep(step: EnrichedStep): boolean {
+  if (step.action !== "copy") return false;
+  const tag = step.tag?.toLowerCase();
+  const role = step.role?.toLowerCase();
+  if (tag === "button" || role === "button") return true;
+  if (!step.target || step.target.length === 0) return true;
+  return step.target.some(
+    (loc) => loc.kind === "aria" && /^button\[/i.test(loc.value),
+  );
+}
+
+function resolveCopySourceContext(
+  indexedSteps: readonly EnrichedStep[],
+  targets: Map<string, PageSummaryTarget>,
+  sourceCells: readonly SourceCellEntry[],
+  startTargetSeq: number,
+): {
+  copySourceMatches: Map<number, CopySourceMatch>;
+  copyNoSourceSteps: Set<number>;
+} {
+  const copySourceMatches = new Map<number, CopySourceMatch>();
+  const copyNoSourceSteps = new Set<number>();
+  let targetSeq = startTargetSeq;
+
+  const targetIdByLocKey = new Map<string, string>();
+  for (const t of targets.values()) {
+    if (t.withinOnly || t.locators.length === 0) continue;
+    const key = `${t.host}::${t.locators.map((l) => `${l.kind}:${l.value}`).join("|")}`;
+    targetIdByLocKey.set(key, t.id);
+  }
+
+  let recentRowIndex: number | undefined;
+
+  for (let idx = 0; idx < indexedSteps.length; idx++) {
+    const step = indexedSteps[idx];
+    if (!isCopyButtonStep(step)) {
+      if (step.action === "tab_switch" || step.action === "nav") {
+        recentRowIndex = undefined;
+      }
+      continue;
+    }
+
+    const host = resolveStepRealHost(step) ?? normalizeHost(step.app);
+    const needle = (step.value ?? "").trim();
+
+    let bestCell: SourceCellEntry | undefined;
+    if (needle && sourceCells.length > 0) {
+      const hostCandidates = sourceCells.filter(
+        (c) =>
+          c.locators.length > 0 &&
+          (isPlaceholderHost(host) || c.host === host),
+      );
+      let bestScore = -1;
+      for (const cell of hostCandidates) {
+        let score = 0;
+        if (cell.text === needle) score = 3;
+        else if (cell.text.startsWith(`${needle} `)) score = 2;
+        else if (cell.text.includes(needle)) score = 1;
+        if (score === 0) continue;
+
+        const rowBonus =
+          recentRowIndex !== undefined && cell.rowIndex === recentRowIndex
+            ? 10
+            : 0;
+        const totalScore = score + rowBonus;
+        if (totalScore > bestScore) {
+          bestScore = totalScore;
+          bestCell = cell;
+        }
+      }
+    }
+
+    if (bestCell) {
+      recentRowIndex = bestCell.rowIndex;
+      const locKey = `${bestCell.host}::${bestCell.locators.map((l) => `${l.kind}:${l.value}`).join("|")}`;
+      let sourceTargetId = targetIdByLocKey.get(locKey);
+      if (!sourceTargetId) {
+        targetSeq += 1;
+        sourceTargetId = `ps_${targetSeq}`;
+        targets.set(sourceTargetId, {
+          id: sourceTargetId,
+          host: bestCell.host,
+          description: `source cell row ${bestCell.rowIndex + 1} ${bestCell.colKey} (${bestCell.text})`,
+          locators: bestCell.locators,
+        });
+        targetIdByLocKey.set(locKey, sourceTargetId);
+      }
+      copySourceMatches.set(idx, {
+        sourceTargetId,
+        ...(bestCell.containerId ? { withinId: bestCell.containerId } : {}),
+        colKey: bestCell.colKey,
+        cellLocators: bestCell.locators,
+        invariantLocators: bestCell.invariantLocators,
+      });
+    } else {
+      copyNoSourceSteps.add(idx);
+    }
+  }
+
+  return { copySourceMatches, copyNoSourceSteps };
 }
 
 function buildCompilePrompt(ctx: PromptContext): string {
@@ -1069,7 +1231,20 @@ function buildCompilePrompt(ctx: PromptContext): string {
     if (label) entry.label = label;
     if (step.role) entry.role = step.role;
     if (step.tag) entry.tag = step.tag;
-    if (step.target && step.target.length > 0) entry.hasTarget = true;
+    const copyMatch = ctx.copySourceMatches.get(idx);
+    const copyNoSource = ctx.copyNoSourceSteps.has(idx);
+    if (step.target && step.target.length > 0 && !copyNoSource) {
+      entry.hasTarget = true;
+    }
+    if (copyMatch) {
+      entry.copyButton = true;
+      entry.sourceTargetId = copyMatch.sourceTargetId;
+      if (copyMatch.withinId) entry.sourceWithinId = copyMatch.withinId;
+      entry.sourceColumn = copyMatch.colKey;
+    } else if (copyNoSource) {
+      entry.copyButton = true;
+      entry.noReadableSource = true;
+    }
     if (step.value !== undefined) entry.value = step.value;
     if (step.key !== undefined) entry.key = step.key;
     if (
@@ -1133,9 +1308,9 @@ function buildCompilePrompt(ctx: PromptContext): string {
     rule1,
     "2. Output one clean generalized workflow repetition; drop one-off stray clicks or irrelevant side excursions, and do not add extra `navigate` steps unless the user navigated between distinct pages as part of the task.",
     "3. Keep all distinct form inputs and submit keys (e.g. `Enter`).",
-    "4. Parameterize user-supplied variables in `params[]` and `\"{{paramName}}\"`. Use `readText`/`readValue` with `bind` and `\"{{varName}}\"` for values copied across steps or tabs.",
+    "4. Parameterize user-supplied variables in `params[]` and `\"{{paramName}}\"`. Use `readText`/`readValue` with `bind` and `\"{{varName}}\"` ONLY when a readable source element exists (`sourceTargetId` for copy-button steps, or a non-button source `stepIndex`/PageSummary source target). NEVER emit `readText`/`readValue` on a Copy button or on the destination input field being filled (no self-read). If a `copy` step has `noReadableSource: true`, parameterize it in `params[]` and `\"{{paramName}}\"` with NO `readText`/`readValue`.",
     "5. `switchTab` uses `stepIndex` or `host` (hostname only). Any `navigate` must preserve the full URL (scheme, host, port, path).",
-    "6. Use `forEach` with `runMode: \"run_remaining\"` and `itemIds` only when PageSummary Lists contains unprocessed items; scope row-level steps with `withinId` and `withinTextParam`. Otherwise set `runMode: \"save_only\"` with flat steps. Set `risk: \"high\"` for irreversible external actions; only set `suggest: true` when the steps show a repeated workflow (2+ completed cycles) or a clear multi-field copy/paste transfer with unprocessed items in PageSummary Lists — set `suggest: false` if one-off or incomplete.",
+    "6. When PageSummary Lists contains a source list with rows on the source page, ALWAYS emit `forEach` with `runMode: \"run_remaining\"` and `itemIds` (for remaining unprocessed items, or `items: \"<listId>\"` for all rows), scoping row-level steps with `withinId` and `withinTextParam`. When the user pastes or types the same literal text repeatedly into one field (even with clears in between), set `suggest: true`, `kind: \"snippet\"`, `params: []`, `runMode: \"save_only\"`, and emit ONE `insertText` step with that exact repeated text. Otherwise set `runMode: \"save_only\"` with flat steps. Set `risk: \"high\"` for irreversible external actions; set `suggest: true` for repeated workflows (2+ cycles), snippet pastes, or multi-field transfers with a PageSummary list — set `suggest: false` if one-off or incomplete.",
     "",
     "Steps:",
     ...stepLines,
@@ -1305,6 +1480,22 @@ function resolveLeafStep(
     }
   }
 
+  const copyMatchForStep =
+    (raw.action === "readText" || raw.action === "readValue") &&
+    raw.stepIndex !== undefined &&
+    !raw.targetId
+      ? ctx.copySourceMatches.get(raw.stepIndex)
+      : undefined;
+  const copyNoSourceForStep =
+    (raw.action === "readText" || raw.action === "readValue") &&
+    raw.stepIndex !== undefined &&
+    !raw.targetId &&
+    ctx.copyNoSourceSteps.has(raw.stepIndex);
+
+  if (copyNoSourceForStep) {
+    return null;
+  }
+
   const targetLocators: Locator[] = [];
   const allowTextTarget =
     raw.targetTextParam &&
@@ -1314,6 +1505,20 @@ function resolveLeafStep(
     const param = normalizeLoopParam(raw.targetTextParam);
     if (param) {
       targetLocators.push({ kind: "text", value: `{{${param}}}` });
+    }
+  } else if (copyMatchForStep) {
+    if (
+      inLoop &&
+      (withinTarget || copyMatchForStep.withinId) &&
+      copyMatchForStep.invariantLocators.length > 0
+    ) {
+      targetLocators.push(
+        ...copyMatchForStep.invariantLocators.map((l) => ({ ...l })),
+      );
+    } else {
+      targetLocators.push(
+        ...copyMatchForStep.cellLocators.map((l) => ({ ...l })),
+      );
     }
   } else if (captured?.target && captured.target.length > 0) {
     const preferInvariant = inLoop || withinLocators.length > 0;
@@ -1335,6 +1540,7 @@ function resolveLeafStep(
   if (
     (raw.action === "readText" || raw.action === "readValue") &&
     !allowTextTarget &&
+    !copyMatchForStep &&
     effectiveWithinId &&
     withinTarget &&
     captured
@@ -1456,7 +1662,38 @@ function resolveLeafStep(
       };
     }
     case "extractList": {
-      if (dedupedTarget.length === 0 || !raw.bind?.trim()) return null;
+      if (!raw.bind?.trim()) return null;
+      if (dedupedTarget.length === 0 && effectiveWithinId) {
+        const srcMeta = ctx.sourceMetaByContainerId.get(effectiveWithinId);
+        if (srcMeta) {
+          const rowLocators: Locator[] = [
+            {
+              kind: "css",
+              value: srcMeta.rowTag === "tr" ? "tr:has(td)" : srcMeta.rowTag,
+            },
+          ];
+          const fields: Record<string, Locator[]> = {};
+          for (let i = 0; i < srcMeta.columns.length; i += 1) {
+            const col = srcMeta.columns[i];
+            if (col.invariantLocators.length > 0) {
+              fields[`col${i + 1}`] = [{ ...col.invariantLocators[0] }];
+            }
+          }
+          return {
+            step: {
+              action: "extractList",
+              target: rowLocators,
+              ...withinPart,
+              bind: raw.bind.trim(),
+              ...(Object.keys(fields).length > 0 ? { fields } : {}),
+              ...optionalPart,
+            },
+            host: stepHost,
+            url: stepUrl,
+          };
+        }
+      }
+      if (dedupedTarget.length === 0) return null;
       return {
         step: {
           action: "extractList",
@@ -1667,7 +1904,13 @@ function resolveSteps(
         }
       } else if (raw.items && raw.items.trim()) {
         const key = stripParamBraces(raw.items);
-        const list = ctx.lists.get(key);
+        const list =
+          ctx.lists.get(key) ??
+          Array.from(ctx.lists.values()).find(
+            (l) =>
+              l.containerId !== undefined &&
+              ctx.sourceMetaByContainerId.has(l.containerId),
+          );
         if (list && list.items.length > 0) {
           recordLocation(!isPlaceholderHost(list.host) ? list.host : undefined);
           resolvedItems = list.items.map((item) => ({ ...item.fields }));
@@ -1749,10 +1992,10 @@ function resolveSteps(
             fields[`col${i + 1}`] = [{ ...col.invariantLocators[0] }];
           }
         }
-        const hasExtractRows = out.some(
-          (s) => s.action === "extractList" && s.bind === "rows",
-        );
-        if (!hasExtractRows) {
+        const existingExtract = out.find((s) => s.action === "extractList");
+        if (existingExtract && existingExtract.action === "extractList") {
+          resolvedItems = existingExtract.bind;
+        } else {
           out.push({
             action: "extractList",
             target: rowLocators,
@@ -1760,8 +2003,8 @@ function resolveSteps(
             bind: "rows",
             ...(Object.keys(fields).length > 0 ? { fields } : {}),
           });
+          resolvedItems = "rows";
         }
-        resolvedItems = "rows";
       }
 
       out.push({
@@ -1837,6 +2080,104 @@ function createCompileGeminiClient(
   });
 }
 
+function collectFillTargets(
+  steps: readonly CompiledStep[],
+): Array<{ target: Locator[]; within?: Locator[] }> {
+  const fills: Array<{ target: Locator[]; within?: Locator[] }> = [];
+  for (const s of steps) {
+    if (s.action === "forEach") {
+      fills.push(...collectFillTargets(s.steps));
+    } else if (
+      (s.action === "fill" || s.action === "insertText" || s.action === "select") &&
+      s.target &&
+      s.target.length > 0
+    ) {
+      fills.push({ target: s.target, within: s.within });
+    }
+  }
+  return fills;
+}
+
+function findExampleForSelfReadBind(
+  bindName: string,
+  readTarget: readonly Locator[],
+  indexedSteps: readonly EnrichedStep[],
+): string | undefined {
+  for (let i = indexedSteps.length - 1; i >= 0; i--) {
+    const s = indexedSteps[i];
+    if (
+      (s.action === "fill" || s.action === "paste") &&
+      s.value &&
+      s.target &&
+      isSameStepTarget(readTarget, undefined, s.target, undefined)
+    ) {
+      return s.value;
+    }
+  }
+  const needle = bindName.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (needle) {
+    for (let i = indexedSteps.length - 1; i >= 0; i--) {
+      const s = indexedSteps[i];
+      if (!s.value) continue;
+      const lbl = (s.label ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (lbl && (lbl.includes(needle) || needle.includes(lbl))) {
+        return s.value;
+      }
+    }
+  }
+  return undefined;
+}
+
+function stripSelfReadsToParams(
+  steps: CompiledStep[],
+  params: CompiledParam[],
+  indexedSteps: readonly EnrichedStep[],
+): CompiledStep[] {
+  const existingParams = new Set(params.map((p) => p.name));
+  const out: CompiledStep[] = [];
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (step.action === "forEach") {
+      const cleanedChildren = stripSelfReadsToParams(
+        step.steps,
+        params,
+        indexedSteps,
+      );
+      if (cleanedChildren.length > 0) {
+        out.push({ ...step, steps: cleanedChildren });
+      }
+      continue;
+    }
+
+    if (step.action === "readText" || step.action === "readValue") {
+      const laterFills = collectFillTargets(steps.slice(i + 1));
+      const isSelfRead = laterFills.some((f) =>
+        isSameStepTarget(step.target, step.within, f.target, f.within),
+      );
+      if (isSelfRead) {
+        if (!existingParams.has(step.bind)) {
+          existingParams.add(step.bind);
+          const example = findExampleForSelfReadBind(
+            step.bind,
+            step.target,
+            indexedSteps,
+          );
+          params.push({
+            name: step.bind,
+            ...(example !== undefined ? { example } : {}),
+          });
+        }
+        continue;
+      }
+    }
+
+    out.push(step);
+  }
+
+  return out;
+}
+
 export async function compileWorkflow(
   input: CompileInput,
   opts?: CompileOptions,
@@ -1860,11 +2201,23 @@ export async function compileWorkflow(
   const repeatCount = Math.max(1, Math.trunc(input.repeatCount ?? 1));
 
   const summaryData = extractPageSummaryData(enrichedAll);
+  const { copySourceMatches, copyNoSourceSteps } = resolveCopySourceContext(
+    indexedSteps,
+    summaryData.targets,
+    summaryData.sourceCells,
+    summaryData.nextTargetSeq,
+  );
 
   const ctx: PromptContext = {
     allSteps: enrichedAll,
     indexedSteps,
-    ...summaryData,
+    targets: summaryData.targets,
+    lists: summaryData.lists,
+    items: summaryData.items,
+    sourceMetaByContainerId: summaryData.sourceMetaByContainerId,
+    copySourceMatches,
+    copyNoSourceSteps,
+    summaryViews: summaryData.summaryViews,
   };
 
   const prompt = buildCompilePrompt(ctx);
@@ -1971,6 +2324,11 @@ export async function compileWorkflow(
     ...(p.example !== undefined ? { example: p.example } : {}),
   }));
 
+  const cleanedSteps = stripSelfReadsToParams(steps, params, indexedSteps);
+  if (cleanedSteps.length === 0) {
+    return null;
+  }
+
   const pauseBeforeSubmit =
     irisResult?.pauseBeforeSubmit === true || modelOut.risk === "high";
 
@@ -1987,7 +2345,7 @@ export async function compileWorkflow(
     ...(rawStartUrl ? { startUrl: rawStartUrl } : {}),
     apps,
     params,
-    steps,
+    steps: cleanedSteps,
     stats,
   };
 

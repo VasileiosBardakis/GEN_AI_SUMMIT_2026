@@ -1963,4 +1963,152 @@ describe("v2 compiler model and timeout configuration", () => {
     ).rejects.toThrow("Gemini request timed out after 35 ms");
     expect(generateContent).toHaveBeenCalledTimes(1);
   });
+
+  it("rejects self-read in validateCompiledWorkflow, resolves copy-button to nearest source cell, and strips self-reads to params when no source exists", async () => {
+    const selfReadValidation = validateCompiledWorkflow({
+      kind: "workflow",
+      name: "Self read bad",
+      reason: "Invalid self read",
+      risk: "low",
+      offerAt2: false,
+      runMode: "save_only",
+      pauseBeforeSubmit: false,
+      apps: ["erp.local"],
+      params: [],
+      steps: [
+        { action: "readText", target: [{ kind: "testid", value: "erp-amount" }], bind: "amount" },
+        { action: "fill", target: [{ kind: "testid", value: "erp-amount" }], value: "{{amount}}" },
+      ],
+      stats: { repetitions: 1, minutesPerWeek: 0.1, manualSeconds: 2, replaySeconds: 0 },
+    });
+    expect(selfReadValidation.ok).toBe(false);
+    if (!selfReadValidation.ok) {
+      expect(selfReadValidation.error).toContain("Self-read");
+    }
+
+    // Copy button with source pageSummary -> exposes sourceTargetId & resolves readText to portal cell, NOT copy button
+    const portalEvents: Event[] = [
+      {
+        v: 1,
+        id: "cb-1",
+        ts: 1000,
+        session: "sess_cb",
+        source: "browser",
+        app: "localhost",
+        url: "http://localhost:5173/portal.html",
+        type: "copy",
+        value: "1250.00 EUR",
+        target: {
+          tag: "button",
+          role: "button",
+          label: "Copy",
+          locators: [
+            { kind: "testid", value: "copy-portal-amount-1" },
+            { kind: "text", value: "Copy" },
+          ],
+        },
+        meta: {
+          pageSummary: {
+            source: {
+              containerLocators: [{ kind: "css", value: "tbody" }],
+              rowTag: "tr",
+              rows: [
+                {
+                  locators: [{ kind: "css", value: "tr:nth-of-type(1)" }],
+                  cells: [
+                    { text: "INV-2026-001", locators: [{ kind: "testid", value: "portal-invoice-id-1" }] },
+                    { text: "1250.00 EUR", locators: [{ kind: "testid", value: "portal-amount-1" }] },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+      {
+        v: 1,
+        id: "cb-2",
+        ts: 2000,
+        session: "sess_cb",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "tab_switch",
+      },
+      {
+        v: 1,
+        id: "cb-3",
+        ts: 3000,
+        session: "sess_cb",
+        source: "browser",
+        app: "127.0.0.1",
+        url: "http://127.0.0.1:5173/erp.html",
+        type: "paste",
+        value: "1250.00 EUR",
+        target: {
+          tag: "input",
+          role: "textbox",
+          label: "Amount",
+          locators: [{ kind: "testid", value: "erp-amount" }],
+        },
+      },
+    ];
+
+    const { client: cbGemini, prompts: cbPrompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Portal Amount to ERP",
+      reason: "Copies amount from portal cell to ERP",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "readText", stepIndex: 0, bind: "amount" },
+        { action: "switchTab", host: "127.0.0.1" },
+        { action: "fill", stepIndex: 2, value: "{{amount}}" },
+      ],
+    });
+    const cbWf = await compileWorkflow(
+      { events: portalEvents },
+      { gemini: cbGemini, iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }) },
+    );
+    expect(cbWf).not.toBeNull();
+    expect(cbPrompts[0]).toContain('"sourceTargetId":');
+    const readStep = cbWf!.steps.find((s) => s.action === "readText");
+    expect(readStep).toEqual({
+      action: "readText",
+      target: [{ kind: "testid", value: "portal-amount-1" }],
+      bind: "amount",
+    });
+
+    // Copy button with NO source pageSummary -> Gemini self-read is stripped to params instead of self-read
+    const noSourceEvents: Event[] = [
+      { ...portalEvents[0], meta: undefined },
+      portalEvents[1],
+      portalEvents[2],
+    ];
+    const { client: nsGemini, prompts: nsPrompts } = makeMockGemini({
+      suggest: true,
+      offerAt2: false,
+      kind: "workflow",
+      name: "Fill Amount",
+      reason: "Fills ERP amount",
+      risk: "low",
+      runMode: "save_only",
+      params: [],
+      steps: [
+        { action: "readText", stepIndex: 2, bind: "amount" },
+        { action: "fill", stepIndex: 2, value: "{{amount}}" },
+      ],
+    });
+    const nsWf = await compileWorkflow(
+      { events: noSourceEvents },
+      { gemini: nsGemini, iris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }) },
+    );
+    expect(nsWf).not.toBeNull();
+    expect(nsPrompts[0]).toContain('"noReadableSource":true');
+    expect(nsWf!.steps.some((s) => s.action === "readText")).toBe(false);
+    expect(nsWf!.params.some((p) => p.name === "amount")).toBe(true);
+  });
 });

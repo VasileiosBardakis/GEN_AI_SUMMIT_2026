@@ -16,9 +16,9 @@ import {
 } from "./report.ts";
 import { hasRepeatedInteraction, type FlowTip } from "./tips.ts";
 import {
-  buildMeaningfulWindow,
   eventsToSteps,
   normalizeHost,
+  selectMeaningfulWindow,
   type CompileInput,
   type CompiledWorkflow,
 } from "./v2/index.ts";
@@ -396,8 +396,17 @@ export function createProposer(deps: ProposerDeps): Proposer {
     if (deps.suggestFlowTip) void maybeFlowTip(sessionId, events);
 
     const { steps, piiMap } = eventsToSteps(events);
-    const window = buildMeaningfulWindow(steps, events);
-    if (window.meaningfulCount < 2) return;
+    const {
+      window,
+      steps: windowedSteps,
+      events: windowedEvents,
+    } = selectMeaningfulWindow(steps, events);
+    if (window.meaningfulCount < 2) {
+      safeLog(
+        `[iris] session=${sessionId} meaningful=${window.meaningfulCount} verdict=skip reason=meaningfulCount<2`,
+      );
+      return;
+    }
 
     emitStageLog({
       stage: "detect",
@@ -408,11 +417,28 @@ export function createProposer(deps: ProposerDeps): Proposer {
 
     let irisJudgment: WorkflowIrisJudgment | null | undefined;
     if (deps.judgeIris) {
+      let irisError: string | null = null;
       try {
         irisJudgment = await deps.judgeIris(window);
-      } catch {
+      } catch (err) {
         irisJudgment = null;
+        irisError = err instanceof Error ? err.message : String(err);
       }
+      const verdict =
+        irisJudgment == null
+          ? "null"
+          : irisJudgment.worthAutomating
+            ? "yes"
+            : "no";
+      const reason =
+        irisError !== null
+          ? irisError
+          : irisJudgment == null
+            ? "null_response"
+            : `pauseBeforeSubmit=${irisJudgment.pauseBeforeSubmit}`;
+      safeLog(
+        `[iris] session=${sessionId} meaningful=${window.meaningfulCount} verdict=${verdict} reason=${reason}`,
+      );
       if (closed) return;
       if (irisJudgment?.worthAutomating === false) {
         return;
@@ -422,7 +448,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
     let compiled: CompiledWorkflow | null = null;
     try {
       compiled = await deps.compileV2(
-        { events, steps, piiMap },
+        { events: windowedEvents, steps: windowedSteps, piiMap },
         irisJudgment !== undefined ? { irisJudgment } : undefined,
       );
     } catch (err) {
@@ -489,7 +515,7 @@ export function createProposer(deps: ProposerDeps): Proposer {
       }
     }
 
-    const site = extractSiteHost(compiled, script, events);
+    const site = extractSiteHost(compiled, script, windowedEvents);
 
     if (deps.precheck) {
       let precheckOutcome: PrecheckOutcome;

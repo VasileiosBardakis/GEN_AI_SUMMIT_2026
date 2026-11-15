@@ -341,4 +341,59 @@ describe("proposer Iris-gated pipeline (GEN-114)", () => {
     expect(seenEventCounts).toEqual([2, 3]);
     proposer.close();
   });
+
+  it("logs [iris] verdict/meaningful count on skip and judge calls, and passes windowed events/steps to compileV2", async () => {
+    const logs: string[] = [];
+    const pSkip = createProposer({
+      readSessionEvents: async () => [twoStepEvents[0]],
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: async () => null,
+      requestDecision: async () => ({ ok: true, decision: "dismissed" }),
+      runScript: async () => ({ ok: true }),
+      log: (line) => logs.push(line),
+    });
+    pSkip.onEvents("sess_skip");
+    await vi.waitFor(() => {
+      expect(logs.some((l) => l.includes("[iris] session=sess_skip"))).toBe(true);
+    });
+    expect(logs.some((l) => l.includes("meaningful=1") && l.includes("meaningfulCount<2"))).toBe(true);
+    pSkip.close();
+
+    // 60 meaningful steps + noise -> compileV2 receives <= 41 windowed steps, not all 60+
+    const manyEvents: Event[] = [];
+    for (let i = 0; i < 60; i++) {
+      manyEvents.push(
+        makeTestEvent(`m-noise-${i}`, "mousemove", 1_000 + i * 100),
+        makeTestEvent(`m-click-${i}`, "click", 1_000 + i * 100 + 10, {
+          target: { label: `Btn ${i}`, locators: [{ kind: "testid", value: `btn-${i}` }] },
+        }),
+      );
+    }
+    let receivedStepsLen = 0;
+    let receivedEventsLen = 0;
+    const pWin = createProposer({
+      readSessionEvents: async () => manyEvents,
+      judgeIris: async () => ({ worthAutomating: true, pauseBeforeSubmit: false }),
+      compileV2: async (input) => {
+        receivedStepsLen = input.steps?.length ?? 0;
+        receivedEventsLen = input.events?.length ?? 0;
+        return null;
+      },
+      requestDecision: async () => ({ ok: true, decision: "dismissed" }),
+      runScript: async () => ({ ok: true }),
+      log: (line) => logs.push(line),
+    });
+    pWin.onEvents("sess_win");
+    await vi.waitFor(() => {
+      expect(receivedStepsLen).toBeGreaterThan(0);
+    });
+    expect(receivedStepsLen).toBeLessThanOrEqual(41);
+    expect(receivedEventsLen).toBeLessThanOrEqual(41);
+    expect(
+      logs.some((l) =>
+        l.includes("[iris] session=sess_win meaningful=60 verdict=yes"),
+      ),
+    ).toBe(true);
+    pWin.close();
+  });
 });

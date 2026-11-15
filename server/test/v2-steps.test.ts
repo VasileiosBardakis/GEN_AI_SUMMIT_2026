@@ -237,4 +237,49 @@ describe("v2 steps, mergeWithinSession, and buildMeaningfulWindow", () => {
       { afterIndex: 1, marker: "4 min elsewhere (erp.local)" },
     ]);
   });
+
+  it("preserves repeated identical pastes + clears in one field as meaningful steps for snippet detection", () => {
+    const reply = "Hi, thanks for your order. It ships Friday.";
+    const replyTarget: NonNullable<Event["target"]> = {
+      tag: "textarea",
+      role: "textbox",
+      label: "Reply to customer",
+      locators: [{ kind: "css", value: 'textarea[name="customer_reply"]' }],
+    };
+    const clearTarget: NonNullable<Event["target"]> = {
+      tag: "button",
+      role: "button",
+      label: "Clear reply",
+      locators: [{ kind: "css", value: "#clear-reply" }],
+    };
+
+    const events: Event[] = [];
+    for (let i = 0; i < 3; i++) {
+      const base = 10_000 + i * 2000;
+      events.push(
+        makeEvent("paste", { ts: base, target: replyTarget, value: reply }),
+        makeEvent("input", {
+          ts: base + 10,
+          target: replyTarget,
+          value: reply,
+          meta: { typing: { inputType: "insertFromPaste" } },
+        }),
+      );
+      if (i < 2) {
+        events.push(makeEvent("click", { ts: base + 500, target: clearTarget }));
+      }
+    }
+
+    const { steps } = eventsToSteps(events);
+    expect(steps.filter((s) => s.action === "paste")).toHaveLength(3);
+    const window = buildMeaningfulWindow(steps, events, 40);
+    expect(window.meaningfulCount).toBe(5);
+    expect(window.steps.map((s) => s.action)).toEqual([
+      "paste",
+      "click",
+      "paste",
+      "click",
+      "paste",
+    ]);
+  });
 });
