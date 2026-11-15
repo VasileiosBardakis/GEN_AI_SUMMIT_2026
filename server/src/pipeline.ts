@@ -32,8 +32,8 @@ export type PipelineConfig = {
 export const DEFAULT_PIPELINE_CONFIG: PipelineConfig = {
   minBigramShare: 0.5,
   confidenceThreshold: 0.6,
-  llmTimeoutMs: 8_000,
-  implementTimeoutMs: 15_000,
+  llmTimeoutMs: 12_000,
+  implementTimeoutMs: 60_000,
   safetyWords: [
     "send",
     "pay",
@@ -881,7 +881,12 @@ export async function runPipeline(
       }
       return implementSolution(solution, {
         ...o,
-        ...(opts.gemini ? { gemini: opts.gemini } : {}),
+        gemini: {
+          ...(typeof opts.gemini === "object" && opts.gemini !== null
+            ? opts.gemini
+            : {}),
+          thinkingBudget: 0,
+        },
       });
     });
 

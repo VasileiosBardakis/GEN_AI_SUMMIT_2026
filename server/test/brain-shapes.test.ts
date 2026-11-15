@@ -264,7 +264,7 @@ describe("Brain shapes: normalize(events)", () => {
     expectedOrder: Locator["kind"][];
   }>([
     {
-      label: "standard element ranks testid > aria > text > css > uia",
+      label: "standard element ranks testid > css > aria > text > uia",
       target: {
         tag: "button",
         role: "button",
@@ -276,7 +276,7 @@ describe("Brain shapes: normalize(events)", () => {
           { kind: "testid", value: "save-btn" },
         ],
       },
-      expectedOrder: ["testid", "aria", "text", "css", "uia"],
+      expectedOrder: ["testid", "css", "aria", "text", "uia"],
     },
     {
       label: "td tag ranks css > testid > aria > text > uia",
@@ -359,9 +359,9 @@ describe("Brain shapes: normalize(events)", () => {
       assertValidStepShape(steps[0]);
       expect(steps[0].target).toEqual([
         { kind: "testid", value: "menu-item F2" },
+        { kind: "css", value: ".item" },
         { kind: "aria", value: expectedAria },
         { kind: "text", value: expectedText },
-        { kind: "css", value: ".item" },
       ]);
     },
   );

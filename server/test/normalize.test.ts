@@ -139,7 +139,7 @@ describe("normalize", () => {
     ]);
   });
 
-  it("orders non-grid locators testid > aria > text > css > uia and strips shortcuts", () => {
+  it("orders non-grid locators testid > css > aria > text > uia and strips shortcuts", () => {
     const steps = normalize([
       makeEvent("click", {
         target: {
@@ -158,16 +158,16 @@ describe("normalize", () => {
 
     expect(steps[0].target?.map((locator) => locator.kind)).toEqual([
       "testid",
+      "css",
       "aria",
       "text",
-      "css",
       "uia",
     ]);
     expect(steps[0].target?.map((locator) => locator.value)).toEqual([
       "save-btn",
+      "button.save",
       'button[name="Save"]',
       "Save",
-      "button.save",
       "Button Save",
     ]);
   });
