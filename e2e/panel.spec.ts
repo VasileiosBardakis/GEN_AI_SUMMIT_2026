@@ -214,3 +214,56 @@ test("extension panel preserves locally activated workflow across reload when mi
     await env.cleanup();
   }
 });
+
+test("extension panel live-refreshes newly saved server entries while open", async () => {
+  const env = await launchExtensionContext();
+
+  try {
+    let serverItems: unknown[] = [];
+    await env.context.route("http://localhost:8787/library", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, items: serverItems }),
+      });
+    });
+
+    const panel = await env.context.newPage();
+    await panel.goto(`chrome-extension://${env.extensionId}/dist/panel.html`, {
+      waitUntil: "domcontentloaded",
+    });
+
+    await expect(panel.locator(".opt-card")).toHaveCount(0);
+
+    serverItems = [
+      {
+        id: "lib_live_refresh_1",
+        name: "Live-saved workflow",
+        description: "Appears without manual reload.",
+        kind: "workflow",
+        status: "active",
+        solution: "Fill #erp-invoice.",
+        script: {
+          name: "Live-saved workflow",
+          steps: [{ action: "click", target: { kind: "css", value: "#save-btn" } }],
+        },
+        eyes: {
+          intent: "Live-saved workflow",
+          scope: { apps: ["127.0.0.1"], urlPatterns: [], pageHints: [] },
+          targetHints: { roles: ["button"], labelContains: ["save"], locators: [] },
+          textHints: { prefixHints: [], minCharsBeforeMatch: 0 },
+          guards: { fieldEmptyOnly: false, requireClipboard: false, cooldownMs: 60_000, minSignals: 1 },
+        },
+        stats: { repetitions: 3, stepCount: 1, manualSeconds: 18, replaySeconds: 2, timeSavedSeconds: 16 },
+        runCount: 0,
+        createdAt: 1_000,
+        updatedAt: 2_000,
+      },
+    ];
+
+    await expect(panel.locator(".opt-card")).toHaveCount(1, { timeout: 6_000 });
+    await expect(panel.locator(".opt-card").first()).toContainText("Live-saved workflow");
+  } finally {
+    await env.cleanup();
+  }
+});

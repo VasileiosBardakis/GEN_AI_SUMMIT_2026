@@ -668,18 +668,40 @@ async function handleAction(action: string, id: string): Promise<void> {
   }
 }
 
-async function loadServerEntries(): Promise<LibraryEntryWithStats[]> {
+async function loadServerEntriesOrNull(): Promise<LibraryEntryWithStats[] | null> {
   try {
     const resp = await fetch(`${SERVER_URL}/library`);
-    if (!resp.ok) return [];
+    if (!resp.ok) return null;
     const data = (await resp.json()) as {
       ok?: boolean;
       items?: LibraryEntryWithStats[];
     };
-    if (data?.ok === false || !Array.isArray(data?.items)) return [];
+    if (data?.ok === false || !Array.isArray(data?.items)) return null;
     return data.items;
   } catch {
-    return [];
+    return null;
+  }
+}
+
+async function loadServerEntries(): Promise<LibraryEntryWithStats[]> {
+  return (await loadServerEntriesOrNull()) ?? [];
+}
+
+let refreshInFlight = false;
+async function refreshFromServer(): Promise<void> {
+  if (refreshInFlight || document.hidden) return;
+  refreshInFlight = true;
+  try {
+    const entries = await loadServerEntriesOrNull();
+    if (!entries) return;
+    lastServerEntries = entries;
+    const nextItems = mergeServerAndLocalOptimizations(entries, latestLocalItems ?? []);
+    if (JSON.stringify(nextItems) !== JSON.stringify(allItems)) {
+      allItems = nextItems;
+      render();
+    }
+  } finally {
+    refreshInFlight = false;
   }
 }
 
@@ -738,12 +760,12 @@ async function init(): Promise<void> {
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
-    void loadServerEntries().then((entries) => {
-      lastServerEntries = entries;
-      allItems = mergeServerAndLocalOptimizations(entries, latestLocalItems ?? []);
-      render();
-    });
+    void refreshFromServer();
   });
+
+  setInterval(() => {
+    void refreshFromServer();
+  }, 2000);
 }
 
 document.querySelectorAll<HTMLButtonElement>(".filter-tab").forEach((tab) => {
