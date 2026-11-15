@@ -5,7 +5,6 @@ import type { Event, Report } from "@gen/shared";
 import { ReportSchema } from "@gen/shared/schema.ts";
 import { isValidArtifactId, readSnippetArtifact } from "./artifacts.ts";
 import {
-  readFallbackDemoVideo,
   recordScriptReplay,
   warmReplayBrowser,
 } from "./replay-video.ts";
@@ -191,20 +190,27 @@ export function createServer(opts: CreateServerOptions): http.Server {
     }
   >();
 
-  function scriptCacheKey(script: ActionScript): string {
-    return JSON.stringify(script.steps ?? []);
+  function scriptCacheKey(script: ActionScript, fallbackUrl?: string): string {
+    const first = script.steps?.[0];
+    const needsFallback =
+      Boolean(first) && first.action !== "navigate" && first.action !== "switchTab";
+    return JSON.stringify({
+      steps: script.steps ?? [],
+      ...(needsFallback && fallbackUrl ? { fallbackUrl } : {}),
+    });
   }
 
   function startOrGetScriptReplay(
     script: ActionScript,
     fallbackUrl?: string,
   ): Promise<Buffer | null> {
-    const key = scriptCacheKey(script);
+    const resolvedFallback = fallbackUrl ?? lastActiveUrl;
+    const key = scriptCacheKey(script, resolvedFallback);
     const existing = replayVideosByScriptKey.get(key);
     if (existing) return existing;
     const promise = recordScriptReplay(script, {
       hostUrls: lastUrlByHost,
-      fallbackUrl: fallbackUrl ?? lastActiveUrl,
+      fallbackUrl: resolvedFallback,
     });
     replayVideosByScriptKey.set(key, promise);
     return promise;
@@ -348,7 +354,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         decideMetaById.set(cmd.id, {
           script: cmd.script,
           entryId: cmd.entryId,
-          fallbackUrl: lastActiveUrl,
+          fallbackUrl: cmd.url ?? lastActiveUrl,
         });
         if (!process.env.VITEST) {
           void getOrStartReplayVideo(cmd.id);
@@ -1045,7 +1051,7 @@ export function createServer(opts: CreateServerOptions): http.Server {
         }
         const id = rawName.replace(/\.webm$/i, "");
         const videoPromise = getOrStartReplayVideo(id);
-        const buf = (await videoPromise) ?? (await readFallbackDemoVideo());
+        const buf = videoPromise ? await videoPromise : null;
         if (!buf) {
           res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
           res.end("Not found");
@@ -1172,7 +1178,11 @@ export function createServer(opts: CreateServerOptions): http.Server {
               lastUrlByHost.set(evt.app.trim().toLowerCase(), evt.url);
             }
             try {
-              lastUrlByHost.set(new URL(evt.url).hostname.toLowerCase(), evt.url);
+              const parsed = new URL(evt.url);
+              lastUrlByHost.set(parsed.hostname.toLowerCase(), evt.url);
+              if (parsed.port) {
+                lastUrlByHost.set(parsed.host.toLowerCase(), evt.url);
+              }
             } catch {
               // ignore malformed URL
             }

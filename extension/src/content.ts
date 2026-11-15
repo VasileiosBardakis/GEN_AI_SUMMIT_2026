@@ -1514,12 +1514,6 @@ export function showSuggestion(
     }
   }
   videoEl?.addEventListener("error", () => {
-    const fallbackUrl = extensionAssetUrl("dist/replay-demo.webm") ?? getConfig().clickReplayUrl;
-    if (fallbackUrl && videoEl.getAttribute("src") !== fallbackUrl) {
-      videoEl.setAttribute("src", fallbackUrl);
-      videoEl.load?.();
-      return;
-    }
     shadow.querySelector("[data-eyes-replay]")?.remove();
   });
 
